@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Script Manager
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.4.0
+// @version      1.4.1
 // @description  Universal Browser Extension & Greasy Fork Script Manager with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -375,12 +375,130 @@
       mod.author = "BESing Team";
       mod.category = "Visual";
       return mod;
+    })(),
+
+    // Module: Prevent Redirect
+    (() => {
+      const mod = {
+    id: 'prevent-redirect',
+    name: 'Prevent Redirect',
+    version: '1.0.0',
+    description: 'Prevents automatic redirects to external sites and strictly blocks unwanted new tab popups.',
+    category: 'Security',
+    _origOpen: null,
+    _origAssign: null,
+    _origReplace: null,
+    _clickHandler: null,
+
+    _isSameHost(targetUrl) {
+      if (!targetUrl || typeof targetUrl !== 'string') return true;
+      try {
+        const parsed = new URL(targetUrl, window.location.href);
+        if (parsed.protocol === 'javascript:' || parsed.protocol === 'about:') return true;
+        const curHost = (window.location.hostname || '').toLowerCase();
+        const targetHost = parsed.hostname.toLowerCase();
+        return targetHost === curHost || targetHost.endsWith('.' + curHost) || curHost.endsWith('.' + targetHost);
+      } catch (e) {
+        return false;
+      }
+    },
+
+    notifyBlocked(targetUrl, reason) {
+      console.warn(`[BESing Prevent Redirect] Blocked ${reason}:`, targetUrl);
+      window.dispatchEvent(new CustomEvent('besing:redirect-blocked', {
+        detail: { url: targetUrl, reason }
+      }));
+    },
+
+    init() {
+      this.destroy();
+      const self = this;
+
+      // 1. Intercept window.open (Strictly block new tabs / popups to external sites or blank)
+      this._origOpen = window.open;
+      window.open = function (url, target, features) {
+        if (url && !self._isSameHost(url)) {
+          self.notifyBlocked(url, 'external window.open redirect');
+          return null;
+        }
+        if (target === '_blank' || !target) {
+          self.notifyBlocked(url || 'about:blank', 'new tab popup');
+          return null;
+        }
+        return self._origOpen.call(window, url, target, features);
+      };
+
+      // 2. Intercept programmatic location changes
+      try {
+        this._origAssign = window.location.assign;
+        window.location.assign = function (url) {
+          if (!self._isSameHost(url)) {
+            self.notifyBlocked(url, 'location.assign redirect');
+            return;
+          }
+          return self._origAssign.call(window.location, url);
+        };
+      } catch (e) {}
+
+      try {
+        this._origReplace = window.location.replace;
+        window.location.replace = function (url) {
+          if (!self._isSameHost(url)) {
+            self.notifyBlocked(url, 'location.replace redirect');
+            return;
+          }
+          return self._origReplace.call(window.location, url);
+        };
+      } catch (e) {}
+
+      // 3. Intercept click events on links with target="_blank" or external redirects
+      this._clickHandler = function (e) {
+        const link = e.target.closest('a');
+        if (!link) return;
+        const href = link.getAttribute('href');
+        if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+
+        if (!self._isSameHost(href)) {
+          // If it was not a direct user click (e.g. synthetic script click)
+          if (!e.isTrusted) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            self.notifyBlocked(href, 'synthetic link click');
+          }
+        }
+      };
+      document.addEventListener('click', this._clickHandler, true);
+    },
+
+    destroy() {
+      if (this._origOpen) {
+        window.open = this._origOpen;
+        this._origOpen = null;
+      }
+      if (this._origAssign) {
+        window.location.assign = this._origAssign;
+        this._origAssign = null;
+      }
+      if (this._origReplace) {
+        window.location.replace = this._origReplace;
+        this._origReplace = null;
+      }
+      if (this._clickHandler) {
+        document.removeEventListener('click', this._clickHandler, true);
+        this._clickHandler = null;
+      }
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><rect x=\"3\" y=\"11\" width=\"18\" height=\"11\" rx=\"2\" ry=\"2\"></rect><path d=\"M7 11V7a5 5 0 0 1 10 0v4\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Security";
+      return mod;
     })()
   ];
 
   // 4. Update Engine (Checks version, prompts native update, no eval)
   class BESUpdater {
-    static CURRENT_VERSION = '1.4.0';
+    static CURRENT_VERSION = '1.4.1';
 
     static CHANNELS = {
       github: {
@@ -548,6 +666,20 @@
 
       this.injectStyles(shadow);
       this.renderWidget(shadow);
+
+      window.addEventListener('besing:redirect-blocked', () => {
+        this.blinkRedirectAlert();
+      });
+    }
+
+    blinkRedirectAlert() {
+      if (!this.widgetEl) return;
+      this.widgetEl.classList.remove('redirect-alert');
+      void this.widgetEl.offsetWidth;
+      this.widgetEl.classList.add('redirect-alert');
+      setTimeout(() => {
+        if (this.widgetEl) this.widgetEl.classList.remove('redirect-alert');
+      }, 1200);
     }
 
     teardown() {
@@ -1140,6 +1272,9 @@
         .besing-trigger.folded-left::after { content: ""; position: absolute; right: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
         .besing-trigger.folded-top:not(.folded-right)::before, .besing-trigger.folded-top.folded-right::after { content: ""; position: absolute; bottom: 2px; left: 14px; right: 14px; height: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
         .besing-trigger.folded-bottom:not(.folded-left)::after, .besing-trigger.folded-bottom.folded-left::before { content: ""; position: absolute; top: 2px; left: 14px; right: 14px; height: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
+        .besing-trigger.redirect-alert { border-color: #ef4444 !important; box-shadow: 0 0 20px rgba(239, 68, 68, 0.9), 0 0 35px rgba(239, 68, 68, 0.6) !important; }
+        .besing-trigger.redirect-alert::before, .besing-trigger.redirect-alert::after { background: #ef4444 !important; box-shadow: 0 0 16px #ef4444, 0 0 26px #ef4444 !important; animation: besingBarBlink 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite !important; }
+        @keyframes besingBarBlink { 0%, 100% { opacity: 1; transform: scale(1.15); } 50% { opacity: 0.15; transform: scale(0.85); } }
         .besing-badge-count { position: absolute; top: -2px; right: -2px; background: linear-gradient(135deg, #06b6d4, #3b82f6); color: #fff; font-size: 10px; font-weight: 700; height: 18px; min-width: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #0f172a; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
         .besing-pet-eye { transform-origin: center; animation: petBlink 4.5s infinite; }
         .besing-pet-face:hover .besing-pet-eye { animation: none; transform: scaleY(0.2) translateY(1px); }

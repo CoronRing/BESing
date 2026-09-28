@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Script Manager
@@ -305,7 +305,7 @@ def build():
     }}
 
     static parseVersion(metaText) {{
-      const match = metaText.match(/@version\s+([0-9\.]+)/i);
+      const match = metaText.match(/@version\\s+([0-9\\.]+)/i);
       return match ? match[1].trim() : null;
     }}
 
@@ -437,6 +437,20 @@ def build():
 
       this.injectStyles(shadow);
       this.renderWidget(shadow);
+
+      window.addEventListener('besing:redirect-blocked', () => {{
+        this.blinkRedirectAlert();
+      }});
+    }}
+
+    blinkRedirectAlert() {{
+      if (!this.widgetEl) return;
+      this.widgetEl.classList.remove('redirect-alert');
+      void this.widgetEl.offsetWidth;
+      this.widgetEl.classList.add('redirect-alert');
+      setTimeout(() => {{
+        if (this.widgetEl) this.widgetEl.classList.remove('redirect-alert');
+      }}, 1200);
     }}
 
     teardown() {{
@@ -1029,6 +1043,9 @@ def build():
         .besing-trigger.folded-left::after {{ content: ""; position: absolute; right: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }}
         .besing-trigger.folded-top:not(.folded-right)::before, .besing-trigger.folded-top.folded-right::after {{ content: ""; position: absolute; bottom: 2px; left: 14px; right: 14px; height: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }}
         .besing-trigger.folded-bottom:not(.folded-left)::after, .besing-trigger.folded-bottom.folded-left::before {{ content: ""; position: absolute; top: 2px; left: 14px; right: 14px; height: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }}
+        .besing-trigger.redirect-alert {{ border-color: #ef4444 !important; box-shadow: 0 0 20px rgba(239, 68, 68, 0.9), 0 0 35px rgba(239, 68, 68, 0.6) !important; }}
+        .besing-trigger.redirect-alert::before, .besing-trigger.redirect-alert::after {{ background: #ef4444 !important; box-shadow: 0 0 16px #ef4444, 0 0 26px #ef4444 !important; animation: besingBarBlink 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite !important; }}
+        @keyframes besingBarBlink {{ 0%, 100% {{ opacity: 1; transform: scale(1.15); }} 50% {{ opacity: 0.15; transform: scale(0.85); }} }}
         .besing-badge-count {{ position: absolute; top: -2px; right: -2px; background: linear-gradient(135deg, #06b6d4, #3b82f6); color: #fff; font-size: 10px; font-weight: 700; height: 18px; min-width: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #0f172a; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }}
         .besing-pet-eye {{ transform-origin: center; animation: petBlink 4.5s infinite; }}
         .besing-pet-face:hover .besing-pet-eye {{ animation: none; transform: scaleY(0.2) translateY(1px); }}

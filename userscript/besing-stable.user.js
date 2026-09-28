@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         BESing Stable Loader
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.0
+// @version      1.0.1
 // @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
 // @connect      127.0.0.1
 // @connect      localhost
@@ -26,74 +29,128 @@
   function runCode(code) {
     if (!code || typeof code !== 'string') return;
     try {
-      const exec = new Function(code);
-      exec();
+      // Pass GM APIs explicitly so the dynamically evaluated script has full userscript powers
+      const exec = new Function(
+        'GM_getValue',
+        'GM_setValue',
+        'GM_deleteValue',
+        'GM_registerMenuCommand',
+        'GM_xmlhttpRequest',
+        'unsafeWindow',
+        code
+      );
+      exec(
+        typeof GM_getValue !== 'undefined' ? GM_getValue : undefined,
+        typeof GM_setValue !== 'undefined' ? GM_setValue : undefined,
+        typeof GM_deleteValue !== 'undefined' ? GM_deleteValue : undefined,
+        typeof GM_registerMenuCommand !== 'undefined' ? GM_registerMenuCommand : undefined,
+        typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : undefined,
+        typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
+      );
+      console.log('[BESing Stable Loader] BESing successfully initialized.');
     } catch (err) {
       console.error('[BESing Stable Loader] Execution error:', err);
+      try {
+        const s = document.createElement('script');
+        s.textContent = code;
+        (document.head || document.documentElement).appendChild(s);
+        s.remove();
+      } catch (fallbackErr) {
+        console.error('[BESing Stable Loader] Fallback execution failed:', fallbackErr);
+      }
     }
   }
 
   function fetchRemote(url) {
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest === 'function') {
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url: `${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`,
-          timeout: 8000,
-          onload: (res) => (res.status >= 200 && res.status < 300) ? resolve(res.responseText) : reject(new Error('HTTP ' + res.status)),
-          onerror: (err) => reject(new Error(err.error || 'Network error')),
-          ontimeout: () => reject(new Error('Timeout'))
-        });
-      } else {
-        fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache' })
-          .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
-          .then(resolve)
-          .catch(reject);
+        try {
+          GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`,
+            timeout: 10000,
+            onload: (res) => {
+              if (res.status >= 200 && res.status < 300 && res.responseText) {
+                resolve(res.responseText);
+              } else {
+                reject(new Error('HTTP ' + res.status));
+              }
+            },
+            onerror: (err) => {
+              fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache' })
+                .then(r => r.ok ? r.text() : Promise.reject(new Error('Fetch HTTP ' + r.status)))
+                .then(resolve)
+                .catch(() => reject(new Error(err.error || 'Network error')));
+            },
+            ontimeout: () => {
+              fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache' })
+                .then(r => r.ok ? r.text() : Promise.reject(new Error('Fetch HTTP ' + r.status)))
+                .then(resolve)
+                .catch(() => reject(new Error('Timeout')));
+            }
+          });
+          return;
+        } catch (e) {}
       }
+
+      fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache' })
+        .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
+        .then(resolve)
+        .catch(reject);
     });
   }
 
   async function checkAndRefresh(force = false) {
-    const lastCheck = GM_getValue('besing_last_check', 0);
+    const lastCheck = (typeof GM_getValue === 'function') ? GM_getValue('besing_last_check', 0) : 0;
     const now = Date.now();
-    if (!force && (now - lastCheck < ONE_DAY_MS)) return;
+    if (!force && (now - lastCheck < ONE_DAY_MS)) return null;
 
     try {
       let code = null;
       try {
         code = await fetchRemote(REMOTE_SCRIPT_URL);
       } catch (e) {
-        // Fallback to local dev server if github is unreachable
+        console.warn('[BESing Stable Loader] Remote fetch failed, trying local server:', e.message);
         code = await fetchRemote(LOCAL_DEV_URL);
       }
 
       if (code && code.length > 500) {
-        GM_setValue('besing_cached_code', code);
-        GM_setValue('besing_last_check', now);
-        console.log('[BESing Stable Loader] Successfully updated code cache.');
+        if (typeof GM_setValue === 'function') {
+          GM_setValue('besing_cached_code', code);
+          GM_setValue('besing_last_check', now);
+        }
+        console.log('[BESing Stable Loader] Successfully fetched and cached latest BESing release.');
+        return code;
       }
     } catch (e) {
-      console.warn('[BESing Stable Loader] Update check skipped/failed:', e.message);
+      console.warn('[BESing Stable Loader] Update skipped/failed:', e.message);
     }
+    return null;
   }
 
-  // 1. Instant execution of cached version (zero latency on page load)
-  const cached = GM_getValue('besing_cached_code', null);
+  // 1. Instant execution of cached version
+  const cached = (typeof GM_getValue === 'function') ? GM_getValue('besing_cached_code', null) : null;
   if (cached) {
     runCode(cached);
   }
 
-  // 2. Refresh check (runs once a day, or immediately on first install)
+  // 2. Refresh check (immediately on first install, or daily in background)
   if (!cached) {
-    checkAndRefresh(true).then(() => {
-      const fresh = GM_getValue('besing_cached_code', null);
-      if (fresh) runCode(fresh);
+    console.log('[BESing Stable Loader] First install detected. Fetching latest release...');
+    checkAndRefresh(true).then((fresh) => {
+      if (fresh) {
+        runCode(fresh);
+      } else {
+        const c = (typeof GM_getValue === 'function') ? GM_getValue('besing_cached_code', null) : null;
+        if (c) runCode(c);
+      }
+    }).catch(err => {
+      console.error('[BESing Stable Loader] Initial setup failed:', err);
     });
   } else {
-    // Background check once per day after page is idle
     setTimeout(() => checkAndRefresh(false), 3000);
   }
 
-  // 3. Global hook for manual update triggering
-  window.__BESING_RELOAD_LATEST__ = () => checkAndRefresh(true);
+  // 3. Global hook for manual reload
+  window.__BESING_RELOAD_LATEST__ = () => checkAndRefresh(true).then(c => { if (c) runCode(c); });
 })();
