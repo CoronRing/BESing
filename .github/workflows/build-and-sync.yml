@@ -1,0 +1,57 @@
+name: Build Mega-File & Sync Greasy Fork
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'scripts/**'
+      - 'build.py'
+      - '.github/workflows/build-and-sync.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Rebuild Mega-File via build.py
+        run: |
+          python build.py
+
+      - name: Commit & Push if mega-file changed
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add userscript/besing-manager.user.js userscript/besing-manager.meta.js
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "chore(release): auto-rebuild mega-file and meta headers [skip ci]"
+            git push origin HEAD:${{ github.ref }}
+          else
+            echo "No mega-file changes detected."
+          fi
+
+      - name: Ping Greasy Fork Webhook
+        env:
+          GF_USER_ID: "1646625"
+          GF_SECRET: ${{ secrets.GREASYFORK_WEBHOOK_SECRET }}
+        run: |
+          echo "Pinging Greasy Fork Webhook for user $GF_USER_ID..."
+          # If secret is provided, the GitHub repository webhook automatically handles HMAC signature.
+          # This step provides an optional fallback trigger.
+          curl -s -X POST "https://greasyfork.org/en/users/${GF_USER_ID}/webhook" \
+            -H "Content-Type: application/json" \
+            -d '{"ref":"refs/heads/master"}' || true
