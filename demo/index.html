@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BESing Live Interactive Sandbox - Browser Extension Script Manager</title>
+  <style>
+    :root {
+      --bg: #030712;
+      --card-bg: rgba(17, 24, 39, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text-main: #f9fafb;
+      --text-sub: #9ca3af;
+      --primary: #6366f1;
+      --primary-light: #818cf8;
+      --accent-cyan: #06b6d4;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(at 10% 20%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
+        radial-gradient(at 90% 80%, rgba(6, 182, 212, 0.12) 0px, transparent 50%);
+      background-attachment: fixed;
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      line-height: 1.7;
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
+
+    .container {
+      max-width: 880px;
+      margin: 0 auto;
+    }
+
+    header {
+      margin-bottom: 40px;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 24px;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      border-radius: 9999px;
+      color: var(--primary-light);
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: -0.8px;
+      line-height: 1.25;
+      background: linear-gradient(135deg, #ffffff 40%, #a5b4fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 12px;
+    }
+
+    h2 {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.4px;
+      margin-top: 36px;
+      margin-bottom: 14px;
+      color: #f3f4f6;
+    }
+
+    h3 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-top: 24px;
+      margin-bottom: 10px;
+      color: #e5e7eb;
+    }
+
+    p {
+      color: var(--text-sub);
+      margin-bottom: 18px;
+      font-size: 16px;
+    }
+
+    .interactive-guide {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 24px;
+      margin: 32px 0;
+      box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
+    }
+
+    .guide-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .step-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+    }
+
+    .step-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 12px;
+      padding: 16px;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+
+    .step-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(99, 102, 241, 0.35);
+    }
+
+    .step-num {
+      width: 26px;
+      height: 26px;
+      background: rgba(99, 102, 241, 0.25);
+      color: var(--primary-light);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .step-card h4 {
+      font-size: 14px;
+      color: #f9fafb;
+      margin-bottom: 6px;
+    }
+
+    .step-card p {
+      font-size: 13px;
+      margin-bottom: 0;
+      line-height: 1.5;
+    }
+
+    .callout {
+      border-left: 4px solid var(--primary);
+      background: rgba(99, 102, 241, 0.08);
+      padding: 14px 18px;
+      border-radius: 0 10px 10px 0;
+      margin: 24px 0;
+    }
+
+    .callout p {
+      margin-bottom: 0;
+      color: #c7d2fe;
+      font-size: 14px;
+    }
+
+    code {
+      background: rgba(255, 255, 255, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      color: #38bdf8;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 20px;
+      flex-wrap: wrap;
+    }
+
+    .demo-btn {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 8px;
+      color: #f3f4f6;
+      padding: 9px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.15s ease;
+    }
+
+    .demo-btn:hover {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: rgba(255, 255, 255, 0.25);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="hero-badge">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+        BESing Sandbox v1.1.0
+      </div>
+      <h1>Universal Browser Extension & Script Manager</h1>
+      <p>
+        Desktop Pet avatar, corner folding, non-blocking anchored speech bubble, and live targeted AI agent sync.
+      </p>
+    </header>
+
+    <!-- Interactive Testing Guide -->
+    <section class="interactive-guide">
+      <div class="guide-title">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polygon points="10 8 16 12 10 16 10 8"></polygon></svg>
+        Try Out The New Features
+      </div>
+      <p style="font-size: 14px; margin-bottom: 16px;">
+        Look at the <strong>bottom-right of your screen</strong> — the Cyber Pet widget is blinking and alive!
+      </p>
+
+      <div class="step-grid">
+        <div class="step-card">
+          <div class="step-num">1</div>
+          <h4>Corner & Edge Folding</h4>
+          <p>Drag the pet widget close to the left or right edge of the screen. Notice how it <strong>folds into the edge</strong>, showing a peek tab! Hover over it to smoothly expand back out.</p>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">2</div>
+          <h4>Desktop Pet Themes</h4>
+          <p>Open Settings (gear icon) to switch the display pattern between <strong>Cyber Pet</strong> (blinking eyes), <strong>Neon Orb</strong>, <strong>Prism Crystal</strong>, and <strong>Minimal</strong>.</p>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">3</div>
+          <h4>Non-Blocking Bubble</h4>
+          <p>Click the pet widget. Notice how the menu opens as an <strong>anchored speech bubble</strong> with a directional pointer tail! The rest of the website is not blocked and remains fully interactive.</p>
+        </div>
+
+        <div class="step-card">
+          <div class="step-num">4</div>
+          <h4>Targeted Agent Sync</h4>
+          <p>In Settings under <strong>Targeted Agent Sync</strong>, click <strong>Test</strong>, then click <strong>Pull Scripts</strong> or <strong>Push State</strong> to see live bi-directional sync with the local AI agent server!</p>
+        </div>
+      </div>
+
+      <div class="button-row">
+        <button class="demo-btn" id="btn-trigger-shortcut">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M6 8h.001M10 8h.001M14 8h.001M18 8h.001M8 12h8M6 16h.001M18 16h.001"></path></svg>
+          Simulate Alt+Shift+B (Emergency Settings)
+        </button>
+        <button class="demo-btn" id="btn-test-agent">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 14 14"></polyline></svg>
+          Test Agent Sync API (Health Check)
+        </button>
+      </div>
+    </section>
+
+    <!-- Sample Article with Headings for Reading Assistant -->
+    <article>
+      <h2>Edge Folding & Desktop Pet Interaction</h2>
+      <p>
+        Traditional floating browser badges often obscure page elements or interfere with reading. BESing introduces intelligent edge docking: when dragged near any side or corner of the screen, the widget folds 65% of its width into the margin, leaving only an elegant peek tab and ears visible.
+      </p>
+
+      <div class="callout">
+        <p><strong>Pro-Tip:</strong> The Reading Assistant pill at bottom-left indexes all document headings and tracks word count in real time without interfering with the pet widget.</p>
+      </div>
+
+      <h2>Anchored Non-Blocking Speech Bubble</h2>
+      <p>
+        Rather than modal backdrops that obscure the page, BESing projects an anchored popover linked by a directional arrow pointer. The user can continue reviewing content or scrolling while viewing active extensions. A discreet expand button (<code>⤢</code>) in the top-right corner allows switching to full modal mode when desired.
+      </p>
+
+      <h2>Safe Agent Connection & Remote State Sync</h2>
+      <p>
+        Security is founded on verified, authenticated connections to trusted agent endpoints. The built-in sync engine enables external agents to inspect browser context, push dynamic scripts, and maintain synchronized telemetry across sessions.
+      </p>
+    </article>
+  </div>
+
+  <script>
+    document.getElementById('btn-trigger-shortcut').addEventListener('click', () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', code: 'KeyB', altKey: true, shiftKey: true, bubbles: true }));
+    });
+
+    document.getElementById('btn-test-agent').addEventListener('click', async () => {
+      try {
+        const res = await fetch('http://127.0.0.1:8765/api/sync/health');
+        const data = await res.json();
+        alert('Agent Response:\n' + JSON.stringify(data, null, 2));
+      } catch (e) {
+        alert('Agent request failed: ' + e.message);
+      }
+    });
+  </script>
+
+  <!-- Embed BESing Manager script directly for sandbox demo -->
+  <script src="../userscript/besing-manager.user.js"></script>
+</body>
+</html>
