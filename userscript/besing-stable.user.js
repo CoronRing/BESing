@@ -19,7 +19,7 @@
   'use strict';
 
   // Release URL endpoint (GitHub Raw primary, local fallback)
-  const REMOTE_SCRIPT_URL = 'https://raw.githubusercontent.com/CoronRing/BESing/main/BESing/userscript/besing-manager.user.js';
+  const REMOTE_SCRIPT_URL = 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js';
   const LOCAL_DEV_URL = 'http://127.0.0.1:8765/userscript/besing-manager.user.js';
   const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 

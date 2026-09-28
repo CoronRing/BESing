@@ -1,68 +1,99 @@
 # BESing - Browser Extension Script Framework & Manager
 
-**BESing** is a dual-compatible browser scripting system designed to unify **Greasy Fork userscripts** (Tampermonkey, Violentmonkey) and **Chrome Extensions (Manifest V3)** under a single secure architecture.
+**BESing** is a dual-compatible browser scripting system designed to unify **Greasy Fork userscripts** (Tampermonkey, Violentmonkey, ScriptCat) and **Chromium Extensions (Manifest V3)** under a single secure architecture.
 
 ---
 
-## 🌟 Key Highlights
+## ⚡ Quick Install (One-Click Downloader)
 
-- **Dual-Compatible Runtime**: Write once, deploy as a Tampermonkey userscript or unpack as a Chromium Extension.
-- **Draggable & Non-Intrusive Floating Widget**: Sleek, glassmorphic floating trigger with screen boundary clamping and persistent coordinate memory.
-- **Auto-Installed Sub-Scripts**: Out of the box, auto-installs and manages:
-  - 📖 **Reading Assistant**: Word counter, estimated reading duration, and heading outline navigator.
-  - 🌙 **Night Comfort Dimmer**: Screen tint and dimming filter for nighttime reading.
-  - 🔗 **Markdown Link Copier**: Instant `Alt + C` shortcut and one-click Markdown link generator.
-- **Per-Site Disabling & Granular Blocklist**:
-  - Disable BESing on any site with one click. When disabled, all scripts and the floating button disappear completely from that site.
-  - View all blocked sites ordered chronologically by added time.
-  - Easily unblock any domain with an instant click.
-  - Emergency summon hotkey (`Alt + Shift + B`) or Tampermonkey menu command to manage blocked sites even when the widget is hidden.
-- **Absolute Security**: Zero dynamic code execution (`eval` / `new Function()` prohibited), full Shadow DOM styling and script isolation, context-isolated persistent storage, and strict sanitization.
+For fast cross-device testing and zero-maintenance updates, install the **Stable Loader**:
 
----
+👉 **[Click Here to Install BESing Stable Loader](https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-stable.user.js)**
 
-## 📁 Directory Structure
-
+Direct Raw URL to paste into Tampermonkey / Violentmonkey:
+```text
+https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-stable.user.js
 ```
+> **How it works**: Ultra-minimal bootstrapper (< 60 lines). Executes instantly with zero page load latency using local Tampermonkey cache (`GM_getValue`), and automatically refreshes from GitHub in the background at most once every 24 hours.
+
+---
+
+## 📦 Greasy Fork Mega-File & Distribution Channels
+
+BESing provides two streamlined distribution channels:
+
+| Channel | Script File | Best For | Rules & Updates |
+| :--- | :--- | :--- | :--- |
+| **GitHub Channel** | [`besing-stable.user.js`](https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-stable.user.js) | Personal, cross-device testing, Edge/Chrome/Firefox/Android | Dynamic bootstrapper, auto-updates daily from GitHub raw. |
+| **Greasy Fork Channel** | [`besing-manager.user.js`](https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js) | Public Greasy Fork listing | Monolithic mega-file. All 5 scripts bundled & **OFF by default**. Zero `eval`, zero remote script downloading. 100% compliant with GF Rule 2. |
+
+### Greasy Fork Import Link
+When importing or syncing the script on Greasy Fork:
+```text
+https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js
+```
+
+---
+
+## 🌟 Key Features
+
+- **Draggable & 4-Way Edge Folding**: Smooth floating widget that folds into glowing dock tabs on Top, Bottom, Left, or Right edges.
+- **Desktop Pet Themes**: Interactive Cyber Kitty, Cozy Slime, Pixel Dino, or Minimal Pill.
+- **Non-Blocking Anchored Bubble Menu**: Speech bubble menu that anchors directly to the pet widget without blocking page clicks.
+- **Pre-Bundled Productivity Tools (All OFF by Default)**:
+  - 📖 **Reading Assistant**: Word counter, reading duration, heading outline.
+  - 🌙 **Night Comfort Dimmer**: Gentle screen tinting and brightness filter.
+  - 🔗 **Markdown Link Copier**: Instant `Alt + C` title & URL copier.
+  - 🛡️ **Ad & Banner Cleaner**: Hides floating overlays and newsletter popups.
+  - 🎨 **Color Change**: Dynamic visual background confirmation.
+- **Modular Sub-Scripts Catalog**: Every tool lives as a standalone userscript in `scripts/<id>/<id>.user.js` and can run independently or bundled.
+- **Granular Site Blocklist**: Disable BESing on any specific website with 1 click; summon with `Alt + Shift + B` anytime.
+
+---
+
+## 🛠️ Mega-File Generator (`build.py`)
+
+BESing includes an automated compiler that reads all modular scripts from `scripts/` and builds the monolithic `besing-manager.user.js` for Greasy Fork:
+
+```powershell
+.\.venv\Scripts\python.exe BESing\build.py
+```
+
+---
+
+## 📁 Repository Structure
+
+```text
 BESing/
-├── docs/
-│   ├── design.md              # System design, data flow, & architecture
-│   ├── SECURITY.md            # Security manifesto & threat models
-│   └── README.md              # Documentation overview
-├── src/
-│   ├── core/                  # Adapter, storage, registry
-│   ├── ui/                    # Draggable widget, menu modal, settings panel, styles
-│   ├── modules/               # Sub-script definitions (Reading Assistant, Dimmer, Copy)
-│   └── main.js                # Core orchestrator
+├── build.py                   # Automated mega-file bundler
+├── scripts/                   # Standalone modular userscripts
+│   ├── reading-assistant/     # Reading Assistant script
+│   ├── dark-dimmer/           # Night Comfort Dimmer script
+│   ├── quick-copy/            # Markdown Link Copier script
+│   ├── ad-cleaner/            # Ad & Element Cleaner script
+│   ├── color-change/          # Background Color Changer script
+│   ├── SCRIPT_LIST.json       # Metadata & 1-sentence descriptions catalog
+│   └── README.md              # Script hub documentation
 ├── userscript/
-│   └── besing-manager.user.js # Standalone Greasy Fork / Tampermonkey userscript
-├── extension/
-│   ├── manifest.json          # Chrome Manifest V3 configuration
-│   ├── content.js             # Extension content script
-│   ├── popup.html & popup.js  # Toolbar action popup
-│   └── icons/                 # Extension PNG icons (16, 48, 128)
+│   ├── besing-stable.user.js  # Ultra-minimal GitHub bootstrapper (<60 lines)
+│   ├── besing-manager.user.js # Autogenerated mega-file for Greasy Fork
+│   └── besing-manager.meta.js # Lightweight metadata header for updates
+├── extension/                 # Chrome Manifest V3 extension bundle
 ├── demo/
-│   ├── index.html             # Interactive live sandbox page
-│   └── server.py              # Lightweight local server
+│   ├── index.html             # Live sandbox test page
+│   └── server.py              # Local testing server (port 8765)
 └── README.md
 ```
 
 ---
 
-## 🚀 Running the Interactive Demo
+## 🚀 Running the Local Sandbox
 
-Launch the local demo server using Python in the workspace venv:
+Launch the local demo server:
 
 ```powershell
 .\.venv\Scripts\python.exe BESing\demo\server.py
 ```
 
-Then open:
+Then visit:
 👉 **[http://127.0.0.1:8765/demo/index.html](http://127.0.0.1:8765/demo/index.html)**
-
-### Testing Guide
-1. **Move the Widget**: Grab the glowing circular trigger in the bottom-right and drag it around the viewport.
-2. **Open Manager**: Click the widget to open the glassmorphic manager dialog.
-3. **Toggle Sub-Scripts**: Switch *Night Comfort Dimmer* on or off to see live screen tinting. Check out the *Reading Assistant* badge on the bottom-left.
-4. **Disable on Current Site**: Go to the Settings tab (gear icon) and click **"Disable BESing on this site"**. Notice how the widget and scripts disappear cleanly.
-5. **Summon & Unblock**: Press `Alt + Shift + B` (or click the test button in the page) to open Settings, view the Blocked Sites list sorted by added time, and click **"Unblock"** to restore BESing!

@@ -8,7 +8,7 @@
     "author": "BESing Team",
     "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z\"></path><path d=\"M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z\"></path></svg>",
     "githubPath": "scripts/reading-assistant/reading-assistant.user.js",
-    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/main/scripts/reading-assistant/reading-assistant.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/reading-assistant/reading-assistant.user.js",
     "localUrl": "http://127.0.0.1:8765/scripts/reading-assistant/reading-assistant.user.js"
   },
   {
@@ -20,7 +20,7 @@
     "author": "BESing Team",
     "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z\"></path></svg>",
     "githubPath": "scripts/dark-dimmer/dark-dimmer.user.js",
-    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/main/scripts/dark-dimmer/dark-dimmer.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/dark-dimmer/dark-dimmer.user.js",
     "localUrl": "http://127.0.0.1:8765/scripts/dark-dimmer/dark-dimmer.user.js"
   },
   {
@@ -32,7 +32,7 @@
     "author": "BESing Team",
     "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71\"></path><path d=\"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71\"></path></svg>",
     "githubPath": "scripts/quick-copy/quick-copy.user.js",
-    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/main/scripts/quick-copy/quick-copy.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/quick-copy/quick-copy.user.js",
     "localUrl": "http://127.0.0.1:8765/scripts/quick-copy/quick-copy.user.js"
   },
   {
@@ -44,7 +44,7 @@
     "author": "BESing Team",
     "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z\"></path></svg>",
     "githubPath": "scripts/ad-cleaner/ad-cleaner.user.js",
-    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/main/scripts/ad-cleaner/ad-cleaner.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/ad-cleaner/ad-cleaner.user.js",
     "localUrl": "http://127.0.0.1:8765/scripts/ad-cleaner/ad-cleaner.user.js"
   },
   {
@@ -56,7 +56,7 @@
     "author": "BESing Team",
     "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"#ef4444\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"10\"/></svg>",
     "githubPath": "scripts/color-change/color-change.user.js",
-    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/main/scripts/color-change/color-change.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/color-change/color-change.user.js",
     "localUrl": "http://127.0.0.1:8765/scripts/color-change/color-change.user.js"
   }
 ]
