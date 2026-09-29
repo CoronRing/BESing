@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Script Manager
@@ -551,9 +551,67 @@ def build():
         }}
       }});
 
-      BESAdapter.registerMenu('BESing: Script Manager', () => {{
-        this.openModal(this.storage.isCurrentBlocked() ? 'settings' : 'extensions');
+      // Tampermonkey Control Panel Menu Commands
+      if (!window.__BESING_MENU_REGISTERED__) {{
+        window.__BESING_MENU_REGISTERED__ = true;
+        BESAdapter.registerMenu('✨ Show / Pull Up BESing Icon', () => {{
+          this.pullUpIcon();
+        }});
+        BESAdapter.registerMenu('🔄 Reset Icon Position to Default', () => {{
+          this.resetWidgetPosition();
+        }});
+        BESAdapter.registerMenu('⚙️ Open BESing Settings', () => {{
+          this.openModal('settings');
+        }});
+        BESAdapter.registerMenu('📦 Open BESing Extensions', () => {{
+          this.openModal('extensions');
+        }});
+      }}
+
+      // Page Navigation & bfcache Resilience
+      window.addEventListener('pageshow', (e) => {{
+        this.ensureMounted();
+        this.clampWidgetPosition();
+        this.refreshCurrentSiteModules();
       }});
+
+      window.addEventListener('popstate', () => {{
+        this.ensureMounted();
+        this.clampWidgetPosition();
+        this.refreshCurrentSiteModules();
+      }});
+
+      document.addEventListener('visibilitychange', () => {{
+        if (document.visibilityState === 'visible') {{
+          this.ensureMounted();
+          this.clampWidgetPosition();
+        }}
+      }});
+
+      window.addEventListener('resize', () => {{
+        this.clampWidgetPosition();
+        if (this.widgetEl) this.checkEdgeDocking(this.widgetEl);
+      }});
+
+      // Heartbeat DOM guardian (every 2.5s) to catch any random DOM detachments
+      if (!this._heartbeatInterval) {{
+        this._heartbeatInterval = setInterval(() => {{
+          this.ensureMounted();
+        }}, 2500);
+      }}
+
+      // Direct DOM MutationObserver on document.documentElement
+      try {{
+        const targetNode = document.documentElement || document.body;
+        if (targetNode && !this._domObserver) {{
+          this._domObserver = new MutationObserver(() => {{
+            if (this.host && !this.host.isConnected && !this.storage.isCurrentBlocked()) {{
+              this.ensureMounted();
+            }}
+          }});
+          this._domObserver.observe(targetNode, {{ childList: true, subtree: false }});
+        }}
+      }} catch (e) {{}}
 
       if (this.storage.isCurrentBlocked()) {{
         console.log(`[BESing] Inactive on ${{window.location.hostname}} (Site blocked)`);
@@ -586,11 +644,50 @@ def build():
       this.updateBadge();
     }}
 
+    ensureMounted() {{
+      if (this.storage.isCurrentBlocked()) return;
+
+      const docRoot = document.documentElement || document.body;
+      if (!docRoot) return;
+
+      // 1. Host exists in memory, but got detached from DOM (SPA nav, bfcache, framework wipe)
+      if (this.host && !this.host.isConnected) {{
+        docRoot.appendChild(this.host);
+        this.clampWidgetPosition();
+        return;
+      }}
+
+      // 2. Host is null or was removed
+      if (!this.host) {{
+        const existing = document.getElementById('__besing_root__');
+        if (existing) {{
+          existing.remove();
+        }}
+        this.mount();
+        return;
+      }}
+
+      // 3. Make sure widget element is present in shadow DOM
+      if (this.shadow && !this.widgetEl) {{
+        this.renderWidget(this.shadow);
+      }}
+    }}
+
     mount() {{
-      if (this.host) return;
+      const docRoot = document.documentElement || document.body;
+      if (!docRoot) return;
+
+      if (this.host && this.host.isConnected) return;
+
+      if (this.host && !this.host.isConnected) {{
+        docRoot.appendChild(this.host);
+        this.clampWidgetPosition();
+        return;
+      }}
+
       const host = document.createElement('besing-host');
       host.id = '__besing_root__';
-      document.documentElement.appendChild(host);
+      docRoot.appendChild(host);
       this.host = host;
 
       const shadow = host.attachShadow({{ mode: 'open' }});
@@ -599,9 +696,96 @@ def build():
       this.injectStyles(shadow);
       this.renderWidget(shadow);
 
-      window.addEventListener('besing:redirect-blocked', () => {{
-        this.blinkRedirectAlert();
-      }});
+      if (!this._redirectListenerAttached) {{
+        window.addEventListener('besing:redirect-blocked', () => {{
+          this.blinkRedirectAlert();
+        }});
+        this._redirectListenerAttached = true;
+      }}
+    }}
+
+    clampWidgetPosition() {{
+      if (!this.widgetEl) return;
+      const doc = document.documentElement;
+      const maxW = Math.max(300, (doc ? doc.clientWidth : window.innerWidth) || 800);
+      const maxH = Math.max(300, (doc ? doc.clientHeight : window.innerHeight) || 600);
+
+      const currentLeft = parseFloat(this.widgetEl.style.left);
+      const currentTop = parseFloat(this.widgetEl.style.top);
+
+      if (!isNaN(currentLeft) && !isNaN(currentTop)) {{
+        const clampedLeft = Math.max(0, Math.min(maxW - 48, currentLeft));
+        const clampedTop = Math.max(0, Math.min(maxH - 48, currentTop));
+
+        if (clampedLeft !== currentLeft || clampedTop !== currentTop) {{
+          this.widgetEl.style.left = `${{clampedLeft}}px`;
+          this.widgetEl.style.top = `${{clampedTop}}px`;
+          this.widgetEl.style.right = 'auto';
+          this.widgetEl.style.bottom = 'auto';
+          this.storage.setWidgetPosition({{ x: Math.round(clampedLeft), y: Math.round(clampedTop) }});
+        }}
+      }}
+    }}
+
+    pullUpIcon() {{
+      if (this.storage.isCurrentBlocked()) {{
+        console.log('[BESing] Site was blocked. Mounting and opening settings...');
+        this.mount();
+        this.openModal('settings');
+        return;
+      }}
+
+      this.ensureMounted();
+
+      if (!this.widgetEl) {{
+        if (this.shadow) this.renderWidget(this.shadow);
+        else this.mount();
+      }}
+
+      if (!this.widgetEl) return;
+
+      // 1. Un-dock / un-fold
+      this.widgetEl.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
+
+      // 2. Position comfortably in visible viewport (bottom-right)
+      const doc = document.documentElement;
+      const clientW = Math.max(300, (doc ? doc.clientWidth : window.innerWidth) || 800);
+      const clientH = Math.max(300, (doc ? doc.clientHeight : window.innerHeight) || 600);
+      const targetLeft = Math.max(20, clientW - 72);
+      const targetTop = Math.max(20, clientH - 120);
+
+      this.widgetEl.style.left = `${{targetLeft}}px`;
+      this.widgetEl.style.top = `${{targetTop}}px`;
+      this.widgetEl.style.right = 'auto';
+      this.widgetEl.style.bottom = 'auto';
+      this.widgetEl.style.display = 'flex';
+      this.widgetEl.style.opacity = '1';
+      this.widgetEl.style.visibility = 'visible';
+
+      this.storage.setWidgetPosition({{ x: targetLeft, y: targetTop }});
+
+      // 3. Highlight with bright pulse animation
+      this.widgetEl.classList.remove('besing-pulse-alert');
+      void this.widgetEl.offsetWidth; // reflow
+      this.widgetEl.classList.add('besing-pulse-alert');
+      setTimeout(() => {{
+        if (this.widgetEl) this.widgetEl.classList.remove('besing-pulse-alert');
+      }}, 2500);
+
+      console.log(`[BESing] Pull-up icon succeeded at (${{targetLeft}}, ${{targetTop}})`);
+    }}
+
+    resetWidgetPosition() {{
+      if (this.widgetEl) {{
+        this.widgetEl.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
+        this.widgetEl.style.left = '';
+        this.widgetEl.style.top = '';
+        this.widgetEl.style.right = '18px';
+        this.widgetEl.style.bottom = '90px';
+        this.widgetEl.style.display = 'flex';
+      }}
+      this.storage.setWidgetPosition(null);
+      this.pullUpIcon();
     }}
 
     blinkRedirectAlert() {{
@@ -615,6 +799,14 @@ def build():
     }}
 
     teardown() {{
+      if (this._heartbeatInterval) {{
+        clearInterval(this._heartbeatInterval);
+        this._heartbeatInterval = null;
+      }}
+      if (this._domObserver) {{
+        this._domObserver.disconnect();
+        this._domObserver = null;
+      }}
       if (this.outsideClickHandler) {{
         document.removeEventListener('click', this.outsideClickHandler);
         this.outsideClickHandler = null;
@@ -637,9 +829,15 @@ def build():
       btn.id = 'besing-widget-btn';
 
       const savedPos = this.storage.getWidgetPosition();
+      const doc = document.documentElement;
+      const maxW = Math.max(300, (doc ? doc.clientWidth : window.innerWidth) || 800);
+      const maxH = Math.max(300, (doc ? doc.clientHeight : window.innerHeight) || 600);
+
       if (savedPos && savedPos.x !== undefined && savedPos.y !== undefined) {{
-        btn.style.left = `${{savedPos.x}}px`;
-        btn.style.top = `${{savedPos.y}}px`;
+        const clampX = Math.max(0, Math.min(maxW - 48, savedPos.x));
+        const clampY = Math.max(0, Math.min(maxH - 48, savedPos.y));
+        btn.style.left = `${{clampX}}px`;
+        btn.style.top = `${{clampY}}px`;
         btn.style.right = 'auto';
         btn.style.bottom = 'auto';
       }} else {{
@@ -1332,6 +1530,8 @@ def build():
         .besing-trigger.redirect-alert {{ border-color: #ef4444 !important; box-shadow: 0 0 20px rgba(239, 68, 68, 0.9), 0 0 35px rgba(239, 68, 68, 0.6) !important; }}
         .besing-trigger.redirect-alert::before, .besing-trigger.redirect-alert::after {{ background: #ef4444 !important; box-shadow: 0 0 16px #ef4444, 0 0 26px #ef4444 !important; animation: besingBarBlink 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite !important; }}
         @keyframes besingBarBlink {{ 0%, 100% {{ opacity: 1; transform: scale(1.15); }} 50% {{ opacity: 0.15; transform: scale(0.85); }} }}
+        .besing-trigger.besing-pulse-alert {{ border-color: #38bdf8 !important; box-shadow: 0 0 25px rgba(56, 189, 248, 1), 0 0 50px rgba(99, 102, 241, 0.8) !important; animation: besingPulsePop 0.6s cubic-bezier(0.16, 1, 0.3, 1) 3 !important; }}
+        @keyframes besingPulsePop {{ 0%, 100% {{ transform: scale(1); }} 50% {{ transform: scale(1.35); }} }}
         .besing-badge-count {{ position: absolute; top: -2px; right: -2px; background: linear-gradient(135deg, #06b6d4, #3b82f6); color: #fff; font-size: 10px; font-weight: 700; height: 18px; min-width: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #0f172a; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }}
         .besing-pet-eye {{ transform-origin: center; animation: petBlink 4.5s infinite; }}
         .besing-pet-face:hover .besing-pet-eye {{ animation: none; transform: scaleY(0.2) translateY(1px); }}
@@ -1431,6 +1631,11 @@ def build():
   }}
 
   const app = new BESManagerApp();
+  try {{
+    window.__BESING_INSTANCE__ = app;
+    if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_INSTANCE__ = app;
+  }} catch (e) {{}}
+
   if (document.readyState === 'loading') {{
     document.addEventListener('DOMContentLoaded', () => app.init());
   }} else {{
