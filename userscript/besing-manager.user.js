@@ -2184,6 +2184,14 @@
     }
 
     setupDragging(btn) {
+      let lastToggleTime = 0;
+      const doToggle = () => {
+        const now = Date.now();
+        if (now - lastToggleTime < 350) return;
+        lastToggleTime = now;
+        this.toggleModal();
+      };
+
       const onStart = (e) => {
         if (e.target.closest('.besing-bubble-wrapper')) return;
         this.isDragging = true;
@@ -2243,28 +2251,16 @@
         this.storage.setWidgetPosition({ x: Math.round(rect.left), y: Math.round(rect.top) });
         this.checkEdgeDocking(btn);
 
-        let lastToggle = 0;
-        const doToggle = () => {
-          const now = Date.now();
-          if (now - lastToggle < 250) return;
-          lastToggle = now;
-          this.toggleModal();
-        };
-
         if (!this.dragMoved) {
           doToggle();
         }
       };
 
-      let lastClickToggle = 0;
       btn.addEventListener('mousedown', onStart);
       btn.addEventListener('touchstart', onStart, { passive: true });
       btn.addEventListener('click', (e) => {
         if (!this.dragMoved) {
-          const now = Date.now();
-          if (now - lastClickToggle < 250) return;
-          lastClickToggle = now;
-          this.toggleModal();
+          doToggle();
         }
       });
     }
