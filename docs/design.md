@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.5.4  
+**Version:** 1.5.5  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -263,4 +263,11 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Global Shadow DOM SVG Rule**: All SVG elements within `#__besing_root__` are explicitly protected via `svg { display: block !important; overflow: visible !important; flex-shrink: 0 !important; }`, guaranteeing that vector icons, pet faces, and navigation controls render crisply across all websites.
 - **Docked Edge Peeking**: The edge-tucking transform when docked on the right margin is refined to `translateX(20px) !important; clip-path: inset(-12px 20px -12px -12px) !important;` so the pet's animated facial features and glance animations remain clearly visible and interactive while parked.
 - **Defensive Error Boundary in `renderBody()`**: A top-level `try...catch` wrapper surrounds `renderBody()`. If any runtime or data parsing error occurs during panel assembly, a styled error card is rendered with an intuitive "Retry Loading" button rather than leaving the menu in an unrecoverable blank state.
+
+### 7.13 Script Architecture Naming: BESing Stable vs BESing Packed, CORS Resilience & Collision Guard (v1.5.5)
+- **Unambiguous Script Identity**: To prevent confusion between the lightweight dynamic bootstrapper and the standalone bundle, scripts declare distinct identities: **BESing Stable** (`besing-stable.user.js`, ~13 KB loader) vs **BESing Packed** (`besing-manager.user.js`, ~169 KB monolithic offline bundle).
+- **Environment Detection via Metadata**: Previous versions evaluated `isStableLoader()` solely against window environment variables (`window.__BESING_ENVIRONMENT__`), which resulted in false positives if a user had installed both scripts or if residual window state persisted. In v1.5.5, `isStableLoader()` directly inspects `GM_info.script.name`. If the script name contains `Packed`, it deterministically operates as BESing Packed. If it contains `Stable`, it operates as the bootstrapper.
+- **Cross-Origin & @connect Failover**: When userscript managers enforce strict CORS or unapproved `@connect` restrictions that reject `GM_xmlhttpRequest` (e.g. `Blocked by @connect CORS check`), network fetchers automatically fall back to native `fetch()` and mirror requests to public CDNs with universal CORS headers (`cdn.jsdelivr.net`).
+- **Dual-Script Collision Shield**: If a user accidentally enables both BESing Stable and BESing Packed simultaneously in their userscript manager, BESing Stable detects the active Packed instance and gracefully aborts execution, while BESing Packed presents a non-intrusive warning card in Settings advising the user to disable the redundant script.
+
 

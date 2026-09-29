@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         BESing Stable Loader
+// @name         BESing Stable
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.5
+// @version      1.0.6
 // @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub/GreasyFork with silent auto-updates.
 // @author       BESing Team
 // @license      MIT
@@ -12,8 +12,10 @@
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
+// @grant        GM_info
 // @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
+// @connect      github.com
 // @connect      update.greasyfork.org
 // @connect      greasyfork.org
 // @connect      cdn.jsdelivr.net
@@ -24,6 +26,15 @@
 
 (function () {
   'use strict';
+
+  // If BESing Packed is already running or registered, skip running stable bootstrapper to avoid collision
+  const isPackedRunning = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name && GM_info.script.name.includes('Packed')) ||
+    (typeof window !== 'undefined' && window.__BESING_INSTANCE__ && window.__BESING_INSTANCE__.isPacked) ||
+    (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__ && unsafeWindow.__BESING_INSTANCE__.isPacked);
+  if (isPackedRunning) {
+    console.warn('[BESing Stable] BESing Packed is already active. Skipping stable bootstrapper execution to prevent duplicate widgets.');
+    return;
+  }
 
   // Mark environment so inner script knows it is running under the stable bootstrapper
   try {
@@ -119,6 +130,7 @@
         'GM_deleteValue',
         'GM_registerMenuCommand',
         'GM_xmlhttpRequest',
+        'GM_info',
         'unsafeWindow',
         code
       );
@@ -128,9 +140,10 @@
         typeof GM_deleteValue !== 'undefined' ? GM_deleteValue : undefined,
         typeof GM_registerMenuCommand !== 'undefined' ? GM_registerMenuCommand : undefined,
         typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : undefined,
+        typeof GM_info !== 'undefined' ? GM_info : { script: { name: 'BESing Stable' } },
         typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
       );
-      console.log('[BESing Stable Loader] BESing successfully initialized.');
+      console.log('[BESing Stable] BESing successfully initialized.');
     } catch (err) {
       console.error('[BESing Stable Loader] Execution error:', err);
       const isCspError = err && (err.name === 'EvalError' || (err.message && err.message.includes('Content Security Policy')));
@@ -180,8 +193,10 @@
             },
             onerror: (err) => {
               if (resolved) return;
-              // Fallback to fetch with controller
-              fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache', signal: controller ? controller.signal : undefined })
+              const fetchUrl = url.includes('raw.githubusercontent.com')
+                ? url.replace('https://raw.githubusercontent.com/CoronRing/BESing/master/', 'https://cdn.jsdelivr.net/gh/CoronRing/BESing@master/')
+                : url;
+              fetch(`${fetchUrl}${fetchUrl.includes('?') ? '&' : '?'}_t=${Date.now()}`, { cache: 'no-cache', signal: controller ? controller.signal : undefined })
                 .then(r => r.ok ? r.text() : Promise.reject(new Error('Fetch HTTP ' + r.status)))
                 .then(text => { if (!resolved) { resolved = true; clearTimeout(timer); resolve(text); } })
                 .catch(e => { if (!resolved) { resolved = true; clearTimeout(timer); reject(e); } });
@@ -218,19 +233,6 @@
         console.warn(`[BESing Stable Loader] Mirror fetch failed (${url}):`, e.message);
       }
     }
-
-    if (code && code.length > 500) {
-      const ver = parseVersion(code) || '1.0.0';
-      if (typeof GM_setValue === 'function') {
-        GM_setValue('besing_cached_code', code);
-        GM_setValue('besing_cached_version', ver);
-        GM_setValue('besing_last_check', Date.now());
-      }
-      console.log(`[BESing Stable Loader] Successfully fetched and cached latest BESing release (v${ver}).`);
-      return { code, version: ver };
-    }
-    return null;
-  }
 
     if (code && code.length > 500) {
       const ver = parseVersion(code) || '1.0.0';

@@ -27,8 +27,8 @@ Each bundled script provides specialized browser enhancements and includes its o
 
 ### Dual-Channel Distribution
 BESing provides two distinct installation channels depending on your update preferences:
-1. **GitHub Stable Bootstrapper (`besing-stable.user.js`):** A lightweight loader (~12 KB) that automatically fetches and caches the latest mega-bundle in the background from GitHub releases, Greasy Fork, or jsDelivr CDNs with failover. Updates apply silently and seamlessly without requiring manual userscript reinstallations.
-2. **Standalone Mega-Userscript (`besing-manager.user.js`):** A monolithic bundle (~165 KB) containing the manager core and all 8 pre-installed scripts. Ideal for offline environments or strict Greasy Fork distributions where external CDN downloads are prohibited.
+1. **BESing Stable (`besing-stable.user.js`):** A lightweight dynamic bootstrapper (~13 KB) that automatically fetches and caches the latest mega-bundle in the background from GitHub releases, Greasy Fork, or jsDelivr CDNs with failover. Updates apply silently and seamlessly without requiring manual userscript reinstallations.
+2. **BESing Packed (`besing-manager.user.js`):** A monolithic offline bundle (~169 KB) containing the manager core and all 8 pre-installed scripts. Ideal for offline environments or strict Greasy Fork distributions where external CDN downloads are prohibited.
 
 ### Edge-Folding Desktop Pet Widget
 - **Intelligent Docking:** When dragged within 50px of any screen boundary or corner, the widget folds 65% of its width into the margin, leaving only an animated peek tab and ears visible. Hovering expands it back out smoothly.

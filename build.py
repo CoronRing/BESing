@@ -18,13 +18,13 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.5.4"
+VERSION = "1.5.5"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
-// @name         BESing Script Manager
+// @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
 // @version      {VERSION}
-// @description  Universal Browser Extension & Greasy Fork Script Manager with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
+// @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -33,11 +33,15 @@ USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
+// @grant        GM_info
+// @grant        unsafeWindow
 // @connect      127.0.0.1
 // @connect      localhost
 // @connect      raw.githubusercontent.com
+// @connect      github.com
 // @connect      update.greasyfork.org
 // @connect      greasyfork.org
+// @connect      cdn.jsdelivr.net
 // @updateURL    https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.meta.js
 // @downloadURL  https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js
 // @run-at       document-idle
@@ -45,10 +49,10 @@ USER_SCRIPT_HEADER = f"""// ==UserScript==
 """
 
 META_SCRIPT_CONTENT = f"""// ==UserScript==
-// @name         BESing Script Manager
+// @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
 // @version      {VERSION}
-// @description  Universal Browser Extension & Greasy Fork Script Manager with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
+// @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -482,12 +486,15 @@ def build():
     static CURRENT_VERSION = '{VERSION}';
 
     static isStableLoader() {{
+      if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {{
+        if (GM_info.script.name.includes('Packed')) return false;
+        if (GM_info.script.name.includes('Stable')) return true;
+      }}
       const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || (typeof window !== 'undefined' && window);
       return typeof win !== 'undefined' && (
         win.__BESING_ENVIRONMENT__ === 'stable-loader' ||
         typeof win.__BESING_AUTO_UPDATE__ === 'function' ||
-        typeof win.__BESING_RELOAD_LATEST__ === 'function' ||
-        (typeof window !== 'undefined' && (window.__BESING_ENVIRONMENT__ === 'stable-loader' || typeof window.__BESING_AUTO_UPDATE__ === 'function'))
+        typeof win.__BESING_RELOAD_LATEST__ === 'function'
       );
     }}
 
@@ -506,20 +513,33 @@ def build():
 
     static async fetchText(url) {{
       return new Promise((resolve, reject) => {{
-        if (typeof GM_xmlhttpRequest === 'function') {{
-          GM_xmlhttpRequest({{
-            method: 'GET',
-            url: `${{url}}${{url.includes('?') ? '&' : '?'}}_t=${{Date.now()}}`,
-            timeout: 7000,
-            onload: (res) => (res.status >= 200 && res.status < 300) ? resolve(res.responseText) : reject(new Error('HTTP ' + res.status)),
-            onerror: (err) => reject(new Error(err.error || 'Network error')),
-            ontimeout: () => reject(new Error('Timeout'))
-          }});
-        }} else {{
-          fetch(`${{url}}?_t=${{Date.now()}}`, {{ cache: 'no-cache' }})
+        const tryFetch = () => {{
+          const fetchUrl = url.includes('raw.githubusercontent.com')
+            ? url.replace('https://raw.githubusercontent.com/CoronRing/BESing/master/', 'https://cdn.jsdelivr.net/gh/CoronRing/BESing@master/')
+            : url;
+          fetch(`${{fetchUrl}}${{fetchUrl.includes('?') ? '&' : '?'}}_t=${{Date.now()}}`, {{ cache: 'no-cache' }})
             .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
             .then(resolve)
             .catch(reject);
+        }};
+
+        if (typeof GM_xmlhttpRequest === 'function') {{
+          try {{
+            GM_xmlhttpRequest({{
+              method: 'GET',
+              url: `${{url}}${{url.includes('?') ? '&' : '?'}}_t=${{Date.now()}}`,
+              timeout: 7000,
+              onload: (res) => (res.status >= 200 && res.status < 300) ? resolve(res.responseText) : tryFetch(),
+              onerror: () => tryFetch(),
+              ontimeout: () => tryFetch()
+            }});
+            return;
+          }} catch (e) {{
+            tryFetch();
+            return;
+          }}
+        }} else {{
+          tryFetch();
         }}
       }});
     }}
@@ -1223,7 +1243,7 @@ def build():
               </svg>
             </div>
             <div>
-              <span class="besing-title">BESing</span>
+              <span class="besing-title">${{BESUpdater.isStableLoader() ? 'BESing Stable' : 'BESing Packed'}}</span>
               <span class="besing-tag">v${{BESUpdater.CURRENT_VERSION}}</span>
             </div>
           </div>
@@ -1384,8 +1404,13 @@ def build():
                 </span>
               </div>
               <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;">
-                ${{BESUpdater.isStableLoader() ? 'Mode: <strong style="color:#38bdf8;">GitHub Stable Bootstrapper</strong> (Automatic silent updates)' : 'Mode: <strong style="color:#a78bfa;">Standalone Userscript</strong> (Updates via Userscript Manager)'}}
+                ${{BESUpdater.isStableLoader() ? 'Mode: <strong style="color:#38bdf8;">BESing Stable (Bootstrapper)</strong> (Automatic silent updates)' : 'Mode: <strong style="color:#a78bfa;">BESing Packed (Standalone)</strong> (Updates via Userscript Manager)'}}
               </div>
+              ${{(!BESUpdater.isStableLoader() && ((typeof window !== 'undefined' && (window.__BESING_ENVIRONMENT__ === 'stable-loader' || typeof window.__BESING_AUTO_UPDATE__ === 'function')) || (typeof unsafeWindow !== 'undefined' && (unsafeWindow.__BESING_ENVIRONMENT__ === 'stable-loader' || typeof unsafeWindow.__BESING_AUTO_UPDATE__ === 'function')))) ? `
+                <div style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:11px;color:#fca5a5;line-height:1.4;">
+                  ⚠️ <strong>Duplicate Active:</strong> "BESing Stable" bootstrapper is also running on this page. Please disable "BESing Stable" in your userscript manager to prevent conflicts.
+                </div>
+              ` : ''}}
               <div class="besing-update-actions">
                 <button class="besing-btn-sync" id="besing-btn-check-update" style="flex:1;">
                   ${{BESUpdater.isStableLoader() ? 'Check & Auto-Update Now' : 'Check Updates Now'}}
@@ -2489,7 +2514,16 @@ def build():
     }}
   }}
 
+  // Prevent duplicate mounts if another instance is already initialized
+  const existingApp = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                      (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+  if (existingApp && existingApp.host) {{
+    console.warn('[BESing] An instance is already mounted. Skipping duplicate initialization.');
+    return;
+  }}
+
   const app = new BESManagerApp();
+  app.isPacked = !BESUpdater.isStableLoader();
   try {{
     window.__BESING_INSTANCE__ = app;
     if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_INSTANCE__ = app;

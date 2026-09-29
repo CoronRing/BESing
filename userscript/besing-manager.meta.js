@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         BESing Script Manager
+// @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.5.4
-// @description  Universal Browser Extension & Greasy Fork Script Manager with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
+// @version      1.5.5
+// @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*

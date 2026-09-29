@@ -105,42 +105,52 @@ export class BESUpdater {
   static async fetchText(url) {
     // Add cache buster
     const targetUrl = `${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`;
+    const tryFetch = async () => {
+      const fetchUrl = targetUrl.includes('raw.githubusercontent.com')
+        ? targetUrl.replace('https://raw.githubusercontent.com/CoronRing/BESing/master/', 'https://cdn.jsdelivr.net/gh/CoronRing/BESing@master/')
+        : targetUrl;
+      const res = await fetch(fetchUrl, {
+        method: 'GET',
+        cache: 'no-cache',
+        signal: AbortSignal.timeout(6000)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.text();
+    };
 
     // Prefer GM_xmlhttpRequest to bypass CORS in Tampermonkey / Violentmonkey
     if (typeof GM_xmlhttpRequest === 'function') {
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url: targetUrl,
-          nocache: true,
-          timeout: 6000,
-          onload: function (response) {
-            if (response.status >= 200 && response.status < 300) {
-              resolve(response.responseText);
-            } else {
-              reject(new Error(`HTTP ${response.status}`));
+        try {
+          GM_xmlhttpRequest({
+            method: 'GET',
+            url: targetUrl,
+            nocache: true,
+            timeout: 6000,
+            onload: function (response) {
+              if (response.status >= 200 && response.status < 300) {
+                resolve(response.responseText);
+              } else {
+                tryFetch().then(resolve).catch(() => reject(new Error(`HTTP ${response.status}`)));
+              }
+            },
+            onerror: function () {
+              tryFetch().then(resolve).catch(reject);
+            },
+            ontimeout: function () {
+              tryFetch().then(resolve).catch(() => reject(new Error('Update check timed out')));
             }
-          },
-          onerror: function (err) {
-            reject(new Error(err.error || 'Network request failed'));
-          },
-          ontimeout: function () {
-            reject(new Error('Update check timed out'));
-          }
-        });
+          });
+          return;
+        } catch (e) {
+          tryFetch().then(resolve).catch(reject);
+          return;
+        }
       });
     }
 
     // Standard fetch fallback
-    const res = await fetch(targetUrl, {
-      method: 'GET',
-      cache: 'no-cache',
-      signal: AbortSignal.timeout(6000)
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-    return await res.text();
+    return await tryFetch();
   }
 
   /**
