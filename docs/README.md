@@ -1,52 +1,90 @@
 # BESing: Browser Extension Script Hub & Manager
 
-Welcome to **BESing** (**B**rowser **E**xtension **S**cript), a unified framework and script manager engineered for **Greasy Fork userscripts** and **Chrome/Chromium Browser Extensions (Manifest V3)**.
+Welcome to **BESing** (**B**rowser **E**xtension **S**cript), a unified framework and script manager engineered for **Greasy Fork userscripts** and native **Chrome/Chromium Browser Extensions (Manifest V3)**.
+
+BESing combines an edge-folding desktop pet widget, an anchored non-blocking speech bubble manager, and a curated suite of modular productivity, visual comfort, accessibility, and security tools.
 
 ---
 
-## 🎯 Repository Intention & Mission
+## 1. Feature Scripts Documentation
 
-The primary goal of this repository is to author, organize, and distribute browser scripts that:
-1. **Bridge Userscripts & Extensions**: Every script authored in BESing is architected to run seamlessly as a Greasy Fork / Tampermonkey userscript (`.user.js`) and as a standalone Chrome Extension.
-2. **Built-in Smart Script Manager**: A lightweight, floating, draggable script manager that automatically injects onto pages, auto-installs sub-scripts, provides instant on/off toggles, and provides granular domain controls.
-3. **Site Blocker & Privacy Controls**: Easily turn off BESing for any specific site with a single click. When turned off, all UI and scripts completely vanish from that site. A blocked sites manager allows inspecting and unblocking domains ordered chronologically by added time.
-4. **Absolute Security**: Zero dynamic code execution (`no eval`), robust Shadow DOM styling encapsulation, context-isolated storage, and strict sanitization.
+Each bundled script provides specialized browser enhancements and includes its own dedicated documentation page detailing capabilities, technical architecture, and standalone usage:
+
+| Script Name | Category | Version | Summary | Documentation | Source Code |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Ad Cleaner & Element Zapper** | Privacy | 1.2.0 | Suppresses cookie overlays and provides an interactive point-and-click Element Zapper (`Alt + Z`). | [ad-cleaner.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/ad-cleaner.md) | [ad-cleaner.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/ad-cleaner/ad-cleaner.user.js) |
+| **Page Color & Brightness** | Visual | 1.1.0 | Soothing background presets (Eye Protect, Old Paper, Dark) and live brightness dragger on top of site backgrounds. | [color-change.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/color-change.md) | [color-change.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/color-change/color-change.user.js) |
+| **Text Size Enhancer** | Accessibility | 1.0.0 | Scales page text up to 350-400% with preset pills, stepper buttons, and counter-zoom widget protection. | [text-size-control.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/text-size-control.md) | [text-size-control.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/text-size-control/text-size-control.user.js) |
+| **Force Allow Copy & Paste** | Tools | 1.0.0 | Unlocks restricted text selection, copy, cut, paste, and right-click context menus via capture-phase interceptors. | [force-copy.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/force-copy.md) | [force-copy.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/force-copy/force-copy.user.js) |
+| **Reading Assistant** | Productivity | 1.0.0 | Tallies body word count, estimates reading duration, and provides a floating heading outline navigation drawer. | [reading-assistant.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/reading-assistant.md) | [reading-assistant.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/reading-assistant/reading-assistant.user.js) |
+| **Night Comfort Dimmer** | Accessibility | 1.0.0 | Hardware-accelerated contrast-preserving dark backdrop filter for late-night viewing comfort. | [dark-dimmer.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/dark-dimmer.md) | [dark-dimmer.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/dark-dimmer/dark-dimmer.user.js) |
+| **Markdown Link Copier** | Tools | 1.0.0 | Global shortcut `Alt + C` captures page title and URL formatted as `[Title](URL)` with confirmation toast. | [quick-copy.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/quick-copy.md) | [quick-copy.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/quick-copy/quick-copy.user.js) |
+| **Prevent Redirect** | Security | 1.1.0 | Blocks unwanted automatic navigation, popup spam, and tab hijacking by returning mock window objects. | [prevent-redirect.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/prevent-redirect.md) | [prevent-redirect.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/prevent-redirect/prevent-redirect.user.js) |
 
 ---
 
-## 📂 Directory Layout
+## 2. Core Architecture Highlights
 
-- `docs/`
-  - [`design.md`](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/design.md): System architecture, design decisions, and data flow.
-  - [`SECURITY.md`](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/SECURITY.md): Security manifesto, threat models, and safety checklist.
-- `src/`
-  - `core/`: Unified runtime adapter (`adapter.js`), persistent storage (`storage.js`), registry (`registry.js`).
-  - `ui/`: Draggable floating trigger, glassmorphism modal, switch controls, and settings panel.
-  - `modules/`: Auto-installed bundled sub-scripts (Reading Assistant, Dark Dimmer, Quick Copy).
-- `userscript/`
-  - `besing-manager.user.js`: Ready-to-install Greasy Fork / Tampermonkey userscript.
-- `extension/`
+### Dual-Channel Distribution
+BESing provides two distinct installation channels depending on your update preferences:
+1. **GitHub Stable Bootstrapper (`besing-stable.user.js`):** A lightweight loader (~12 KB) that automatically fetches and caches the latest mega-bundle in the background from GitHub releases, Greasy Fork, or jsDelivr CDNs with failover. Updates apply silently and seamlessly without requiring manual userscript reinstallations.
+2. **Standalone Mega-Userscript (`besing-manager.user.js`):** A monolithic bundle (~165 KB) containing the manager core and all 8 pre-installed scripts. Ideal for offline environments or strict Greasy Fork distributions where external CDN downloads are prohibited.
+
+### Edge-Folding Desktop Pet Widget
+- **Intelligent Docking:** When dragged within 50px of any screen boundary or corner, the widget folds 65% of its width into the margin, leaving only an animated peek tab and ears visible. Hovering expands it back out smoothly.
+- **Customizable Avatar Themes:** Choose between **Cyber Pet** (blinking animated eyes), **Neon Orb**, **Prism Crystal**, and **Minimal Dot** via the Settings panel.
+
+### Non-Blocking Anchored Bubble Menu
+- The manager opens as an anchored speech bubble attached directly to the widget via a directional pointer tail.
+- Unlike full-page modal backdrops that freeze the underlying site, the host webpage remains completely interactive and scrollable while managing scripts.
+- An expand button in the upper right allows switching to full modal mode when desired.
+
+### Multi-Tier Configuration & Site Isolation
+- **Global Mode (`ON`):** Settings apply across all websites.
+- **Site-Only Mode (`SITE`):** Settings apply exclusively to the current domain and bypass global settings. Switching a script to `OFF` automatically wipes custom site settings, preventing stale configurations.
+- **Domain Exclusion (`OFF (SITE)`):** Disables a script specifically on one domain (such as banking portals) while keeping it active everywhere else.
+- **Centralized Settings:** All domain overrides across all scripts can be reviewed, toggled, or removed from the **Site Specific Rules** section in Settings.
+
+---
+
+## 3. Directory Layout
+
+- [docs/](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs)
+  - [README.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/README.md): Master documentation hub and index.
+  - [design.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/design.md): System architecture, technical specifications, and release notes.
+  - [SECURITY.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/SECURITY.md): Security manifesto, threat models, and safety checklist.
+  - `scripts/`: Dedicated documentation pages for each feature script.
+- [scripts/](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts)
+  - [SCRIPT_LIST.json](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/SCRIPT_LIST.json): Catalog metadata and bundle registry.
+  - Subdirectories containing standalone userscripts (`ad-cleaner`, `color-change`, etc.).
+- [src/](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/src)
+  - `core/`: Storage adapter, runtime registry, and updater logic.
+  - `ui/`: Shadow DOM components, floating widget, speech bubble layout, and CSS styles.
+- [userscript/](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/userscript)
+  - [besing-manager.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/userscript/besing-manager.user.js): Monolithic userscript distribution.
+  - [besing-stable.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/userscript/besing-stable.user.js): GitHub stable automatic bootstrapper.
+- [extension/](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/extension)
   - Chrome Manifest V3 extension bundle (`manifest.json`, `content.js`, `background.js`, `popup.html`).
-- `demo/`
+- [demo/](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/demo)
   - Interactive live testing sandbox with rich sample webpage and local preview server.
 
 ---
 
-## 🚀 Quick Start
+## 4. Quick Start
 
-### As a Userscript (Greasy Fork / Tampermonkey)
-1. Install Tampermonkey, Violentmonkey, or Greasemonkey in your browser.
-2. Install [`besing-manager.user.js`](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/userscript/besing-manager.user.js).
-3. Visit any web page to see the draggable BESing emblem!
+### As a Userscript
+1. Install a userscript manager (Tampermonkey, Violentmonkey, or Greasemonkey).
+2. Install [besing-stable.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/userscript/besing-stable.user.js) for automatic updates, or install [besing-manager.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/userscript/besing-manager.user.js) for the offline standalone build.
+3. Visit any website. The floating pet emblem will appear on the bottom-right.
 
-### As a Chrome Extension (Developer Mode)
-1. Navigate to `chrome://extensions/` in your Chromium browser.
-2. Enable **Developer mode** (toggle in upper right).
-3. Click **Load unpacked** and select the [`BESing/extension`](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/extension) directory.
+### As a Chrome Extension (Manifest V3)
+1. Open Chromium and navigate to `chrome://extensions/`.
+2. Enable **Developer mode** in the top-right corner.
+3. Click **Load unpacked** and select the [`BESing/extension`](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/extension) folder.
 
 ### Interactive Live Demo
-Run the local demo server:
+Run the local preview server from the repository root:
 ```powershell
-.\.venv\Scripts\python.exe BESing\demo\server.py
+& "..\.venv\Scripts\python.exe" demo/server.py
 ```
-Open `http://127.0.0.1:8765` in your browser.
+Open `http://127.0.0.1:8765/demo/index.html` to explore the interactive sandbox.
