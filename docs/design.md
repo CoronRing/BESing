@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.4.0  
+**Version:** 1.5.0  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -179,5 +179,52 @@ To prevent unnecessary bandwidth consumption, updates use the `.meta.js` compani
 2. Clicking **Update Now** calls `BESUpdater.triggerInstall(downloadUrl)`, which executes `window.open(scriptUrl, '_blank')`.
 3. Userscript managers (Tampermonkey, Violentmonkey, Greasemonkey) intercept `.user.js` URLs natively and prompt the user with a 1-click update confirmation overlay showing code differences.
 4. All existing user data (`GM_setValue`, site blocklists, custom themes, agent URLs) is preserved safely during the update.
+
+---
+
+## 7. Secondary Menu & Per-Script Configuration Architecture (v1.5.0)
+
+BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** for modular scripts, enabling fine-grained, site-isolated configuration with instant visual feedback and automatic lifecycle persistence.
+
+### 7.1 Architecture of Secondary Menus
+- Each script card in the extension list includes an explicit gear button (`⚙️`) and clickable metadata zone to pull up its dedicated secondary menu.
+- The anchored bubble menu cleanly transitions into the script's configuration view with an instant navigation back button (`← All Scripts`), live active scale/dragger widgets, preset swatches, and the 3-stage mode tri-toggle (`OFF | SITE | ON`).
+- Changes made in the secondary menu update the running script instance live via `m.onConfigChange(cfg)` or reactive reload, offering immediate feedback without requiring page reload.
+
+### 7.2 Site-Isolated Configuration Persistence & Automatic Wiping on `OFF`
+- **Global Mode (`ON`)**: Configurations are written to `script_configs[scriptId]` and act as universal defaults across all websites.
+- **Site-Isolated Mode (`SITE`)**:
+  - Configurations are stored exclusively under `siteRules[hostname].configs[scriptId]`, completely bypassing global defaults for that site.
+  - A visual badge indicates `[📍 hostname Config]` in the secondary menu.
+  - **Automatic Wiping on `OFF`**: When a script is toggled to `OFF`, any custom site-specific configuration under `siteRules[hostname].configs[scriptId]` is **immediately wiped**. When switched back to `SITE` or `ON`, the script starts fresh from defaults, ensuring no stale configurations persist.
+
+### 7.3 Text Size Enhancer Script (`text-size-control`)
+- **Problem**: Modern high-resolution monitors and poorly formatted websites often leave fonts unreadably small even at standard browser 200% system zoom limits.
+- **Engine**: Applies documentElement zoom scaling (up to 350-400%) while automatically applying counter-zoom transforms (`zoom: calc(1 / scale)`) on the `#___besing_root__` host element so that the BESing widget, pet animations, and bubble menu maintain crisp, native 1x proportions.
+- **Controls**: Hero live percentage display (`125%`), step adjusters (`−` / `+`), precision range slider (80% to 350%), quick presets (`100%`, `115%`, `125%`, `150%`, `175%`, `200%`, `250%`, `300%`), and one-click reset.
+
+### 7.4 Force Allow Copy & Paste Script (`force-copy`)
+- **Problem**: Websites frequently employ restrictive CSS properties (`user-select: none`) and event blocking scripts (`e.preventDefault()`, `e.stopPropagation()`) on `copy`, `cut`, `paste`, `contextmenu`, and `selectstart`.
+- **Engine**:
+  1. Injects high-priority CSS overrides (`* { user-select: text !important; -webkit-touch-callout: default !important; }`).
+  2. Registers capture-phase event listeners (`addEventListener(..., handler, true)`) on `window` and `document` to intercept and stop propagation of blocking calls before the host page's scripts can cancel them.
+  3. Periodically neutralizes legacy inline event handlers (`document.oncopy = null; document.oncontextmenu = null;`).
+- **Controls**: Feature toggles for selection, copy/cut, paste, context menu, and an embedded sandbox test area to verify unblocked functionality immediately.
+
+### 7.5 Page Color & Brightness Customizer Script (`color-change`)
+- **Problem**: Harsh web contrast strains eyes during extended reading, while naive dark mode scripts destroy existing site styling.
+- **Engine**:
+  1. **Background Comfort Presets**: Offers curated reading palettes:
+     - `Eye Protect`: Soft bean/tea green (`#cce8cf`)
+     - `Old Paper`: Antique warm parchment paper (`#f4ecd8`)
+     - `Dark Mode`: Deep modern charcoal (`#18181b`)
+     - `Soft Sepia`: Warm reader tint (`#eee4cd`)
+     - `Cool Mint`: Soft sky tint (`#e0f2fe`)
+     - `Custom Tone`: Native color picker with hex input.
+  2. **Site Background Brightness Dragger**:
+     - Operates directly **on top of the current website-set background** via an overlaid blend layer (`#besing-bg-brightness-overlay`) sitting between page content and the BESing root widget.
+     - **Dragging Left (`< 0`)**: Lightens the current website background (e.g., deep blue becomes soft light pastel blue).
+     - **Center (`0%`)**: Neutral (100% original site background untouched).
+     - **Dragging Right (`> 0`)**: Deepens and darkens the current website background (e.g., blue becomes rich navy blue and eventually deep dark).
 
 

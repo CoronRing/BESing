@@ -24,6 +24,42 @@
     "localUrl": "http://127.0.0.1:8765/scripts/dark-dimmer/dark-dimmer.user.js"
   },
   {
+    "id": "text-size-control",
+    "name": "Text Size Enhancer",
+    "version": "1.0.0",
+    "description": "Enlarges text and page zoom (125%, 150%, 200%+) with secondary menu and site-isolated settings.",
+    "category": "Accessibility",
+    "author": "BESing Team",
+    "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M4 7V4h16v3M9 20h6M12 4v16\"/></svg>",
+    "githubPath": "scripts/text-size-control/text-size-control.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/text-size-control/text-size-control.user.js",
+    "localUrl": "http://127.0.0.1:8765/scripts/text-size-control/text-size-control.user.js"
+  },
+  {
+    "id": "force-copy",
+    "name": "Force Allow Copy & Paste",
+    "version": "1.0.0",
+    "description": "Unlocks restricted text selection, copy, cut, paste, and right-click on sites that attempt to disable them.",
+    "category": "Tools",
+    "author": "BESing Team",
+    "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2\"></path><rect x=\"8\" y=\"2\" width=\"8\" height=\"4\" rx=\"1\" ry=\"1\"></rect><path d=\"M9 14h6M9 18h4\"></path></svg>",
+    "githubPath": "scripts/force-copy/force-copy.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/force-copy/force-copy.user.js",
+    "localUrl": "http://127.0.0.1:8765/scripts/force-copy/force-copy.user.js"
+  },
+  {
+    "id": "color-change",
+    "name": "Page Color & Brightness",
+    "version": "1.1.0",
+    "description": "Background presets (Eye Protect, Old Paper, Dark) & live brightness dragger on top of site background.",
+    "category": "Visual",
+    "author": "BESing Team",
+    "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"5\"/><path d=\"M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42\"/></svg>",
+    "githubPath": "scripts/color-change/color-change.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/color-change/color-change.user.js",
+    "localUrl": "http://127.0.0.1:8765/scripts/color-change/color-change.user.js"
+  },
+  {
     "id": "quick-copy",
     "name": "Markdown Link Copier",
     "version": "1.0.0",
@@ -46,18 +82,6 @@
     "githubPath": "scripts/ad-cleaner/ad-cleaner.user.js",
     "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/ad-cleaner/ad-cleaner.user.js",
     "localUrl": "http://127.0.0.1:8765/scripts/ad-cleaner/ad-cleaner.user.js"
-  },
-  {
-    "id": "color-change",
-    "name": "Color Change",
-    "version": "1.0.0",
-    "description": "Changes page background color to red for dynamic testing and visual confirmation.",
-    "category": "Visual",
-    "author": "BESing Team",
-    "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"#ef4444\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"10\"/></svg>",
-    "githubPath": "scripts/color-change/color-change.user.js",
-    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/color-change/color-change.user.js",
-    "localUrl": "http://127.0.0.1:8765/scripts/color-change/color-change.user.js"
   },
   {
     "id": "prevent-redirect",

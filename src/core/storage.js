@@ -1,134 +1,220 @@
 /**
  * BESing - State and Persistent Storage Layer
+ * Supports 3-stage toggles (OFF / SITE / ON) and Site-Isolated Script Configs.
  */
 import { BESAdapter } from './adapter.js';
 
 const STORAGE_KEYS = {
-  BLOCKED_SITES: 'blocked_sites',
+  SITE_RULES: 'site_rules',
   ENABLED_SCRIPTS: 'enabled_scripts',
+  SCRIPT_CONFIGS: 'script_configs',
   WIDGET_POS: 'widget_position',
   SETTINGS: 'global_settings'
 };
 
 export class BESStorage {
   constructor() {
-    this._blockedSites = [];
-    this._enabledScripts = {};
-    this._widgetPosition = null;
-    this._settings = {
-      theme: 'cyber-pet', // 'cyber-pet' | 'orb' | 'crystal' | 'minimal'
-      hotkey: 'Alt+Shift+B',
+    this.siteRules = {};
+    this.enabledScripts = {};
+    this.scriptConfigs = {};
+    this.widgetPos = null;
+    this.settings = {
+      theme: 'cyber-pet',
       agentUrl: 'http://127.0.0.1:8765/api/sync',
       authToken: '',
-      autoSync: false
+      updateChannel: 'github',
+      autoCheckUpdates: true
     };
     this._isInitialized = false;
   }
 
-  /**
-   * Load all cached state from persistent storage.
-   */
   async init() {
     if (this._isInitialized) return;
 
-    this._blockedSites = await BESAdapter.get(STORAGE_KEYS.BLOCKED_SITES, []);
-    this._enabledScripts = await BESAdapter.get(STORAGE_KEYS.ENABLED_SCRIPTS, {});
-    this._widgetPosition = await BESAdapter.get(STORAGE_KEYS.WIDGET_POS, null);
-    
-    const loadedSettings = await BESAdapter.get(STORAGE_KEYS.SETTINGS, {});
-    this._settings = { ...this._settings, ...loadedSettings };
+    this.siteRules = await BESAdapter.get(STORAGE_KEYS.SITE_RULES, {});
+    if (!this.siteRules || typeof this.siteRules !== 'object') this.siteRules = {};
 
-    // Validate blockedSites structure
-    if (!Array.isArray(this._blockedSites)) {
-      this._blockedSites = [];
-    }
+    this.enabledScripts = await BESAdapter.get(STORAGE_KEYS.ENABLED_SCRIPTS, {});
+    if (!this.enabledScripts || typeof this.enabledScripts !== 'object') this.enabledScripts = {};
+
+    this.scriptConfigs = await BESAdapter.get(STORAGE_KEYS.SCRIPT_CONFIGS, {});
+    if (!this.scriptConfigs || typeof this.scriptConfigs !== 'object') this.scriptConfigs = {};
+
+    this.widgetPos = await BESAdapter.get(STORAGE_KEYS.WIDGET_POS, null);
+    const s = await BESAdapter.get(STORAGE_KEYS.SETTINGS, {});
+    this.settings = { ...this.settings, ...s };
 
     this._isInitialized = true;
   }
 
-  // --- Blocked Sites Management ---
-
-  isHostBlocked(hostname = window.location.hostname) {
-    const cleanHost = String(hostname).toLowerCase().trim();
-    return this._blockedSites.some(item => item.host.toLowerCase() === cleanHost);
+  getCurrentHost() {
+    return (window.location.hostname || 'localhost').toLowerCase().trim();
   }
 
   isCurrentSiteBlocked() {
-    return this.isHostBlocked(window.location.hostname);
+    return this.isSiteDisabledAll(this.getCurrentHost());
   }
 
-  async blockSite(hostname = window.location.hostname) {
-    const cleanHost = String(hostname).toLowerCase().trim();
-    if (!cleanHost) return false;
-
-    this._blockedSites = this._blockedSites.filter(item => item.host.toLowerCase() !== cleanHost);
-    this._blockedSites.unshift({
-      host: cleanHost,
-      addedAt: Date.now()
-    });
-
-    await BESAdapter.set(STORAGE_KEYS.BLOCKED_SITES, this._blockedSites);
-    return true;
+  isSiteDisabledAll(host = this.getCurrentHost()) {
+    const h = (host || '').toLowerCase().trim();
+    return !!(this.siteRules[h] && this.siteRules[h].disableAll);
   }
 
-  async unblockSite(hostname) {
-    const cleanHost = String(hostname).toLowerCase().trim();
-    const prevCount = this._blockedSites.length;
-    this._blockedSites = this._blockedSites.filter(item => item.host.toLowerCase() !== cleanHost);
+  async setSiteDisabledAll(host, disabled) {
+    const h = (host || this.getCurrentHost()).toLowerCase().trim();
+    if (!h) return;
+    if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+    this.siteRules[h].disableAll = !!disabled;
+    this.cleanupSiteRule(h);
+    await BESAdapter.set(STORAGE_KEYS.SITE_RULES, this.siteRules);
+  }
 
-    if (this._blockedSites.length !== prevCount) {
-      await BESAdapter.set(STORAGE_KEYS.BLOCKED_SITES, this._blockedSites);
-      return true;
+  // Mode: 'off' | 'site' | 'on'
+  getScriptMode(scriptId, host = this.getCurrentHost()) {
+    const h = (host || '').toLowerCase().trim();
+    const siteConfig = this.siteRules[h];
+
+    if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {
+      return siteConfig.scripts[scriptId] ? 'site' : 'off';
     }
-    return false;
+
+    return this.enabledScripts[scriptId] ? 'on' : 'off';
   }
 
-  getBlockedSites() {
-    return [...this._blockedSites].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
-  }
+  isScriptActiveOnSite(scriptId, host = this.getCurrentHost()) {
+    const h = (host || '').toLowerCase().trim();
+    if (this.isSiteDisabledAll(h)) return false;
 
-  // --- Script Enable/Disable Management ---
-
-  isScriptEnabled(scriptId, defaultValue = true) {
-    if (this._enabledScripts[scriptId] !== undefined) {
-      return Boolean(this._enabledScripts[scriptId]);
+    const siteConfig = this.siteRules[h];
+    if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {
+      return !!siteConfig.scripts[scriptId];
     }
-    return defaultValue;
+
+    return !!this.enabledScripts[scriptId];
   }
 
-  async setScriptEnabled(scriptId, isEnabled) {
-    this._enabledScripts[scriptId] = Boolean(isEnabled);
-    await BESAdapter.set(STORAGE_KEYS.ENABLED_SCRIPTS, this._enabledScripts);
+  async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {
+    const h = (host || '').toLowerCase().trim();
+    if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+    if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
+
+    if (mode === 'on') {
+      this.enabledScripts[scriptId] = true;
+      delete this.siteRules[h].scripts[scriptId];
+    } else if (mode === 'site') {
+      this.enabledScripts[scriptId] = false;
+      this.siteRules[h].scripts[scriptId] = true;
+    } else {
+      // OFF: Disable and WIPE site-specific configuration for this script
+      this.enabledScripts[scriptId] = false;
+      delete this.siteRules[h].scripts[scriptId];
+      if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
+        delete this.siteRules[h].configs[scriptId];
+      }
+    }
+
+    this.cleanupSiteRule(h);
+    await BESAdapter.set(STORAGE_KEYS.ENABLED_SCRIPTS, this.enabledScripts);
+    await BESAdapter.set(STORAGE_KEYS.SITE_RULES, this.siteRules);
   }
 
-  // --- Widget Position ---
+  // Script Configs: Site-Isolated vs Global
+  getScriptConfig(scriptId, host = this.getCurrentHost()) {
+    const h = (host || '').toLowerCase().trim();
+    const mode = this.getScriptMode(scriptId, h);
+
+    if (mode === 'site') {
+      if (this.siteRules[h] && this.siteRules[h].configs && this.siteRules[h].configs[scriptId] !== undefined) {
+        return { ...(this.scriptConfigs[scriptId] || {}), ...this.siteRules[h].configs[scriptId] };
+      }
+      return { ...(this.scriptConfigs[scriptId] || {}) };
+    }
+
+    return { ...(this.scriptConfigs[scriptId] || {}) };
+  }
+
+  async setScriptConfig(scriptId, patch, host = this.getCurrentHost()) {
+    const h = (host || '').toLowerCase().trim();
+    const mode = this.getScriptMode(scriptId, h);
+
+    if (mode === 'site') {
+      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+      if (!this.siteRules[h].configs) this.siteRules[h].configs = {};
+      this.siteRules[h].configs[scriptId] = { ...(this.siteRules[h].configs[scriptId] || {}), ...patch };
+      await BESAdapter.set(STORAGE_KEYS.SITE_RULES, this.siteRules);
+    } else {
+      this.scriptConfigs[scriptId] = { ...(this.scriptConfigs[scriptId] || {}), ...patch };
+      await BESAdapter.set(STORAGE_KEYS.SCRIPT_CONFIGS, this.scriptConfigs);
+    }
+  }
+
+  async toggleSiteRule(host, ruleKey, val) {
+    const h = (host || '').toLowerCase().trim();
+    if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+    if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
+
+    if (ruleKey === 'disableAll') {
+      this.siteRules[h].disableAll = !!val;
+    } else {
+      this.siteRules[h].scripts[ruleKey] = !!val;
+    }
+
+    this.cleanupSiteRule(h);
+    await BESAdapter.set(STORAGE_KEYS.SITE_RULES, this.siteRules);
+  }
+
+  cleanupSiteRule(host) {
+    const rule = this.siteRules[host];
+    if (!rule) return;
+    const hasScripts = rule.scripts && Object.keys(rule.scripts).length > 0;
+    const hasConfigs = rule.configs && Object.keys(rule.configs).length > 0;
+    if (!rule.disableAll && !hasScripts && !hasConfigs) {
+      delete this.siteRules[host];
+    }
+  }
+
+  async removeSiteRule(host, ruleKey = null) {
+    const h = (host || '').toLowerCase().trim();
+    if (!this.siteRules[h]) return;
+
+    if (!ruleKey || ruleKey === 'all') {
+      delete this.siteRules[h];
+    } else if (ruleKey === 'disableAll') {
+      this.siteRules[h].disableAll = false;
+      this.cleanupSiteRule(h);
+    } else if (this.siteRules[h].scripts) {
+      delete this.siteRules[h].scripts[ruleKey];
+      if (this.siteRules[h].configs) delete this.siteRules[h].configs[ruleKey];
+      this.cleanupSiteRule(h);
+    }
+
+    await BESAdapter.set(STORAGE_KEYS.SITE_RULES, this.siteRules);
+  }
+
+  getAllSiteRules() {
+    return this.siteRules || {};
+  }
 
   getWidgetPosition() {
-    return this._widgetPosition;
+    return this.widgetPos;
   }
 
   async setWidgetPosition(pos) {
-    this._widgetPosition = pos;
+    this.widgetPos = pos;
     await BESAdapter.set(STORAGE_KEYS.WIDGET_POS, pos);
   }
 
-  // --- Global Settings & Themes ---
-
-  getSettings() {
-    return { ...this._settings };
-  }
-
-  async updateSettings(partial) {
-    this._settings = { ...this._settings, ...partial };
-    await BESAdapter.set(STORAGE_KEYS.SETTINGS, this._settings);
-  }
-
   getTheme() {
-    return this._settings.theme || 'cyber-pet';
+    return this.settings.theme || 'cyber-pet';
   }
 
-  async setTheme(themeName) {
-    this._settings.theme = themeName;
-    await this.updateSettings({ theme: themeName });
+  async setTheme(theme) {
+    this.settings.theme = theme;
+    await BESAdapter.set(STORAGE_KEYS.SETTINGS, this.settings);
+  }
+
+  async updateSettings(patch) {
+    this.settings = { ...this.settings, ...patch };
+    await BESAdapter.set(STORAGE_KEYS.SETTINGS, this.settings);
   }
 }

@@ -12,6 +12,8 @@ import { ReadingAssistantModule } from './modules/reading-assistant.js';
 import { DarkDimmerModule } from './modules/dark-dimmer.js';
 import { QuickCopyModule } from './modules/quick-copy.js';
 import { ColorChangeModule } from './modules/color-change.js';
+import { TextSizeControlModule } from './modules/text-size-control.js';
+import { ForceCopyModule } from './modules/force-copy.js';
 
 export class BESManager {
   constructor() {
@@ -45,6 +47,8 @@ export class BESManager {
     this.registry.register(DarkDimmerModule);
     this.registry.register(QuickCopyModule);
     this.registry.register(ColorChangeModule);
+    this.registry.register(TextSizeControlModule);
+    this.registry.register(ForceCopyModule);
 
     // Register emergency shortcut (Alt + Shift + B)
     this._setupGlobalShortcut();

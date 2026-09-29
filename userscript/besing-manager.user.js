@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Script Manager
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.4.3
+// @version      1.5.0
 // @description  Universal Browser Extension & Greasy Fork Script Manager with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -82,6 +82,7 @@
     constructor() {
       this.siteRules = {};
       this.enabledScripts = {};
+      this.scriptConfigs = {};
       this.widgetPos = null;
       this.settings = {
         theme: 'cyber-pet',
@@ -102,7 +103,7 @@
         for (const item of legacyBlocked) {
           const host = (item.host || '').toLowerCase().trim();
           if (host) {
-            if (!this.siteRules[host]) this.siteRules[host] = { disableAll: true, scripts: {} };
+            if (!this.siteRules[host]) this.siteRules[host] = { disableAll: true, scripts: {}, configs: {} };
             else this.siteRules[host].disableAll = true;
           }
         }
@@ -110,6 +111,9 @@
 
       this.enabledScripts = await BESAdapter.get('enabled_scripts', {});
       if (!this.enabledScripts || typeof this.enabledScripts !== 'object') this.enabledScripts = {};
+
+      this.scriptConfigs = await BESAdapter.get('script_configs', {});
+      if (!this.scriptConfigs || typeof this.scriptConfigs !== 'object') this.scriptConfigs = {};
 
       this.widgetPos = await BESAdapter.get('widget_position', null);
       const s = await BESAdapter.get('global_settings', {});
@@ -132,7 +136,7 @@
     async setSiteDisabledAll(host, disabled) {
       const h = (host || this.getCurrentHost()).toLowerCase().trim();
       if (!h) return;
-      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {} };
+      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
       this.siteRules[h].disableAll = !!disabled;
       this.cleanupSiteRule(h);
       await BESAdapter.set('site_rules', this.siteRules);
@@ -143,11 +147,22 @@
       const h = (host || '').toLowerCase().trim();
       const siteConfig = this.siteRules[h];
 
-      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {
-        return siteConfig.scripts[scriptId] ? 'site' : 'off';
+      // 1. Explicit site override to disabled
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] === false) {
+        return 'off';
       }
 
-      return this.enabledScripts[scriptId] ? 'on' : 'off';
+      // 2. Global ON
+      if (this.enabledScripts[scriptId]) {
+        return 'on';
+      }
+
+      // 3. Site Only ON
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] === true) {
+        return 'site';
+      }
+
+      return 'off';
     }
 
     isScriptActiveOnSite(scriptId, host = this.getCurrentHost()) {
@@ -155,27 +170,35 @@
       if (this.isSiteDisabledAll(h)) return false;
 
       const siteConfig = this.siteRules[h];
-      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {
-        return !!siteConfig.scripts[scriptId];
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] === false) {
+        return false;
       }
 
-      return !!this.enabledScripts[scriptId];
+      if (this.enabledScripts[scriptId]) return true;
+
+      return !!(siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId]);
     }
 
     async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {
       const h = (host || '').toLowerCase().trim();
-      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {} };
+      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
       if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
 
       if (mode === 'on') {
+        // Global ON: active across all sites, clear local site override
         this.enabledScripts[scriptId] = true;
         delete this.siteRules[h].scripts[scriptId];
       } else if (mode === 'site') {
+        // Site Only: active ONLY on this site
         this.enabledScripts[scriptId] = false;
         this.siteRules[h].scripts[scriptId] = true;
       } else {
+        // Turn OFF: wipe globally and for this site
         this.enabledScripts[scriptId] = false;
         delete this.siteRules[h].scripts[scriptId];
+        if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
+          delete this.siteRules[h].configs[scriptId];
+        }
       }
 
       this.cleanupSiteRule(h);
@@ -183,9 +206,39 @@
       await BESAdapter.set('site_rules', this.siteRules);
     }
 
+    // Script Configs: Site-Isolated vs Global
+    getScriptConfig(scriptId, host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      const mode = this.getScriptMode(scriptId, h);
+
+      if (mode === 'site') {
+        if (this.siteRules[h] && this.siteRules[h].configs && this.siteRules[h].configs[scriptId] !== undefined) {
+          return { ...(this.scriptConfigs[scriptId] || {}), ...this.siteRules[h].configs[scriptId] };
+        }
+        return { ...(this.scriptConfigs[scriptId] || {}) };
+      }
+
+      return { ...(this.scriptConfigs[scriptId] || {}) };
+    }
+
+    async setScriptConfig(scriptId, patch, host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      const mode = this.getScriptMode(scriptId, h);
+
+      if (mode === 'site') {
+        if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+        if (!this.siteRules[h].configs) this.siteRules[h].configs = {};
+        this.siteRules[h].configs[scriptId] = { ...(this.siteRules[h].configs[scriptId] || {}), ...patch };
+        await BESAdapter.set('site_rules', this.siteRules);
+      } else {
+        this.scriptConfigs[scriptId] = { ...(this.scriptConfigs[scriptId] || {}), ...patch };
+        await BESAdapter.set('script_configs', this.scriptConfigs);
+      }
+    }
+
     async toggleSiteRule(host, ruleKey, val) {
       const h = (host || '').toLowerCase().trim();
-      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {} };
+      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
       if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
 
       if (ruleKey === 'disableAll') {
@@ -202,7 +255,8 @@
       const rule = this.siteRules[host];
       if (!rule) return;
       const hasScripts = rule.scripts && Object.keys(rule.scripts).length > 0;
-      if (!rule.disableAll && !hasScripts) {
+      const hasConfigs = rule.configs && Object.keys(rule.configs).length > 0;
+      if (!rule.disableAll && !hasScripts && !hasConfigs) {
         delete this.siteRules[host];
       }
     }
@@ -218,6 +272,7 @@
         this.cleanupSiteRule(h);
       } else if (this.siteRules[h].scripts) {
         delete this.siteRules[h].scripts[ruleKey];
+        if (this.siteRules[h].configs) delete this.siteRules[h].configs[ruleKey];
         this.cleanupSiteRule(h);
       }
 
@@ -356,6 +411,364 @@
       return mod;
     })(),
 
+    // Module: Text Size Enhancer
+    (() => {
+      const mod = {
+    id: 'text-size-control',
+    name: 'Text Size Enhancer',
+    version: '1.0.0',
+    description: 'Enlarges text and page zoom (125%, 150%, 200%+) so small website fonts become easily readable.',
+    category: 'Accessibility',
+    _styleNode: null,
+    _config: {
+      fontSizePercent: 125,
+      mode: 'zoom'
+    },
+
+    init(cfg) {
+      this.destroy();
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+      this.applySize();
+    },
+
+    onConfigChange(cfg) {
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+      this.applySize();
+    },
+
+    applySize() {
+      const percent = Math.max(70, Math.min(400, Number(this._config.fontSizePercent) || 125));
+      const scale = percent / 100;
+
+      // Apply zoom to documentElement for full layout and text scaling
+      document.documentElement.style.zoom = scale;
+
+      // Counter-zoom BESing root so manager and widget remain crisp 1x size
+      if (!this._styleNode) {
+        const style = document.createElement('style');
+        style.id = 'besing-text-size-style';
+        (document.head || document.documentElement).appendChild(style);
+        this._styleNode = style;
+      }
+
+      const counterScale = (1 / scale).toFixed(4);
+      this._styleNode.textContent = `
+        #__besing_root__ {
+          zoom: ${counterScale} !important;
+        }
+      `;
+    },
+
+    destroy() {
+      document.documentElement.style.zoom = '';
+      if (this._styleNode) {
+        this._styleNode.remove();
+        this._styleNode = null;
+      }
+      const s = document.getElementById('besing-text-size-style');
+      if (s) s.remove();
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M4 7V4h16v3M9 20h6M12 4v16\"/></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Accessibility";
+      return mod;
+    })(),
+
+    // Module: Force Allow Copy & Paste
+    (() => {
+      const mod = {
+    id: 'force-copy',
+    name: 'Force Allow Copy & Paste',
+    version: '1.0.0',
+    description: 'Enables text selection, copy, cut, paste, and right-click on sites that attempt to disable them.',
+    category: 'Tools',
+    _styleNode: null,
+    _listeners: [],
+    _interval: null,
+    _config: {
+      allowSelect: true,
+      allowCopy: true,
+      allowPaste: true,
+      allowContextMenu: true
+    },
+
+    init(cfg) {
+      this.destroy();
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+
+      // 1. Force enable CSS user-select
+      this._injectStyle();
+
+      // 2. Attach capture listeners to block website event prevention
+      this._attachCaptureInterceptors();
+
+      // 3. Clear legacy inline event handlers
+      this._clearInlineHandlers();
+
+      // 4. Periodic check to neutralize dynamic re-binding
+      this._interval = setInterval(() => this._clearInlineHandlers(), 2000);
+    },
+
+    _injectStyle() {
+      if (!this._styleNode) {
+        const style = document.createElement('style');
+        style.id = 'besing-force-copy-style';
+        style.textContent = `
+          *, *::before, *::after {
+            -webkit-user-select: text !important;
+            -moz-user-select: text !important;
+            -ms-user-select: text !important;
+            user-select: text !important;
+            -webkit-touch-callout: default !important;
+          }
+          input, textarea, [contenteditable="true"] {
+            -webkit-user-select: auto !important;
+            user-select: auto !important;
+          }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+        this._styleNode = style;
+      }
+    },
+
+    _attachCaptureInterceptors() {
+      const handleCapture = (e) => {
+        const type = e.type;
+        if (type === 'copy' || type === 'cut') {
+          if (this._config.allowCopy) e.stopImmediatePropagation();
+        } else if (type === 'paste') {
+          if (this._config.allowPaste) e.stopImmediatePropagation();
+        } else if (type === 'contextmenu') {
+          if (this._config.allowContextMenu) e.stopImmediatePropagation();
+        } else if (type === 'selectstart' || type === 'selectionchange') {
+          if (this._config.allowSelect) e.stopImmediatePropagation();
+        }
+      };
+
+      const handleKeydown = (e) => {
+        if (!this._config.allowCopy) return;
+        if ((e.ctrlKey || e.metaKey) && ['c', 'v', 'x', 'a', 'C', 'V', 'X', 'A'].includes(e.key)) {
+          e.stopImmediatePropagation();
+        }
+      };
+
+      const events = ['copy', 'cut', 'paste', 'contextmenu', 'selectstart', 'dragstart'];
+      events.forEach(evt => {
+        window.addEventListener(evt, handleCapture, { capture: true, passive: false });
+        document.addEventListener(evt, handleCapture, { capture: true, passive: false });
+        this._listeners.push({ target: window, event: evt, fn: handleCapture });
+        this._listeners.push({ target: document, event: evt, fn: handleCapture });
+      });
+
+      window.addEventListener('keydown', handleKeydown, { capture: true, passive: false });
+      this._listeners.push({ target: window, event: 'keydown', fn: handleKeydown });
+    },
+
+    _clearInlineHandlers() {
+      const events = ['oncopy', 'oncut', 'onpaste', 'oncontextmenu', 'onselectstart', 'ondragstart', 'onmousedown', 'onmouseup'];
+      events.forEach(evt => {
+        try {
+          if (document[evt]) document[evt] = null;
+          if (document.body && document.body[evt]) document.body[evt] = null;
+        } catch (e) {}
+      });
+    },
+
+    onConfigChange(cfg) {
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+    },
+
+    destroy() {
+      if (this._interval) {
+        clearInterval(this._interval);
+        this._interval = null;
+      }
+      this._listeners.forEach(l => {
+        try { l.target.removeEventListener(l.event, l.fn, { capture: true }); } catch (e) {}
+      });
+      this._listeners = [];
+
+      if (this._styleNode) {
+        this._styleNode.remove();
+        this._styleNode = null;
+      }
+      const s = document.getElementById('besing-force-copy-style');
+      if (s) s.remove();
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2\"></path><rect x=\"8\" y=\"2\" width=\"8\" height=\"4\" rx=\"1\" ry=\"1\"></rect><path d=\"M9 14h6M9 18h4\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Tools";
+      return mod;
+    })(),
+
+    // Module: Page Color & Brightness
+    (() => {
+      const mod = {
+    id: 'color-change',
+    name: 'Page Color & Brightness',
+    version: '1.1.0',
+    description: 'Adjusts background color presets (Eye Protect, Old Paper, Dark) and site background brightness.',
+    category: 'Visual',
+    _prevBodyBg: null,
+    _prevHtmlBg: null,
+    _presetOverlay: null,
+    _brightnessOverlay: null,
+    _config: {
+      brightness: 0, // -100 (lighten) to +100 (deepen / darken)
+      preset: 'eye-protect', // 'none' | 'eye-protect' | 'old-paper' | 'dark' | 'soft-sepia' | 'cool-mint' | 'custom'
+      customColor: '#cce8cf'
+    },
+
+    PRESETS: {
+      'none': { name: 'Original', color: 'transparent', overlay: 'transparent' },
+      'eye-protect': { name: 'Eye Protect', color: '#cce8cf', overlay: 'rgba(204, 232, 207, 0.45)' },
+      'old-paper': { name: 'Old Paper', color: '#f4ecd8', overlay: 'rgba(244, 236, 216, 0.48)' },
+      'dark': { name: 'Dark Mode', color: '#18181b', overlay: 'rgba(24, 24, 27, 0.65)' },
+      'soft-sepia': { name: 'Soft Sepia', color: '#eee4cd', overlay: 'rgba(238, 228, 205, 0.42)' },
+      'cool-mint': { name: 'Cool Mint', color: '#e0f2fe', overlay: 'rgba(224, 242, 254, 0.42)' }
+    },
+
+    init(cfg) {
+      this.destroy();
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+
+      this._prevBodyBg = document.body ? document.body.style.backgroundColor : null;
+      this._prevHtmlBg = document.documentElement ? document.documentElement.style.backgroundColor : null;
+
+      this._createOverlays();
+      this.applyConfig();
+    },
+
+    _createOverlays() {
+      // 1. Preset tint overlay (z-index 2147483625)
+      if (!this._presetOverlay) {
+        const pLayer = document.createElement('div');
+        pLayer.id = 'besing-bg-preset-overlay';
+        pLayer.style.cssText = `
+          position: fixed !important;
+          inset: 0 !important;
+          pointer-events: none !important;
+          z-index: 2147483625 !important;
+          transition: background-color 0.2s ease, opacity 0.2s ease !important;
+        `;
+        (document.body || document.documentElement).appendChild(pLayer);
+        this._presetOverlay = pLayer;
+      }
+
+      // 2. Brightness dragger overlay (z-index 2147483630, above preset tint but below BESing root 2147483642)
+      if (!this._brightnessOverlay) {
+        const bLayer = document.createElement('div');
+        bLayer.id = 'besing-bg-brightness-overlay';
+        bLayer.style.cssText = `
+          position: fixed !important;
+          inset: 0 !important;
+          pointer-events: none !important;
+          z-index: 2147483630 !important;
+          transition: background-color 0.15s ease, opacity 0.15s ease !important;
+        `;
+        (document.body || document.documentElement).appendChild(bLayer);
+        this._brightnessOverlay = bLayer;
+      }
+    },
+
+    onConfigChange(cfg) {
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+      this.applyConfig();
+    },
+
+    applyConfig() {
+      this._createOverlays();
+
+      const presetKey = this._config.preset || 'none';
+      let presetColor = 'transparent';
+      let presetOverlayColor = 'transparent';
+
+      if (presetKey === 'custom') {
+        presetColor = this._config.customColor || '#cce8cf';
+        presetOverlayColor = presetColor;
+      } else if (this.PRESETS[presetKey]) {
+        presetColor = this.PRESETS[presetKey].color;
+        presetOverlayColor = this.PRESETS[presetKey].overlay;
+      }
+
+      // Apply Preset
+      if (presetKey !== 'none') {
+        if (document.documentElement) document.documentElement.style.backgroundColor = presetColor;
+        if (document.body) document.body.style.backgroundColor = presetColor;
+        if (this._presetOverlay) {
+          this._presetOverlay.style.backgroundColor = presetOverlayColor;
+          this._presetOverlay.style.mixBlendMode = presetKey === 'dark' ? 'multiply' : 'multiply';
+        }
+      } else {
+        if (document.documentElement) document.documentElement.style.backgroundColor = this._prevHtmlBg || '';
+        if (document.body) document.body.style.backgroundColor = this._prevBodyBg || '';
+        if (this._presetOverlay) {
+          this._presetOverlay.style.backgroundColor = 'transparent';
+        }
+      }
+
+      // Apply Brightness Dragger on top of site's current background
+      // Dragging left (< 0): makes it lighter (e.g., blue -> light blue)
+      // Dragging right (> 0): makes it deep and eventually dark (e.g., blue -> deep navy -> dark)
+      const bVal = Math.max(-100, Math.min(100, Number(this._config.brightness) || 0));
+      if (this._brightnessOverlay) {
+        if (bVal < 0) {
+          // Lighter: white overlay with soft screen / mix blend
+          const factor = Math.min(0.88, (Math.abs(bVal) / 100) * 0.95).toFixed(3);
+          this._brightnessOverlay.style.backgroundColor = `rgba(255, 255, 255, ${factor})`;
+          this._brightnessOverlay.style.mixBlendMode = 'screen';
+        } else if (bVal > 0) {
+          // Deeper / Darker: black overlay with multiply / darkening blend
+          const factor = Math.min(0.92, (bVal / 100) * 0.96).toFixed(3);
+          this._brightnessOverlay.style.backgroundColor = `rgba(0, 0, 0, ${factor})`;
+          this._brightnessOverlay.style.mixBlendMode = 'multiply';
+        } else {
+          this._brightnessOverlay.style.backgroundColor = 'transparent';
+        }
+      }
+    },
+
+    destroy() {
+      if (document.documentElement) {
+        document.documentElement.style.backgroundColor = this._prevHtmlBg || '';
+      }
+      if (document.body) {
+        document.body.style.backgroundColor = this._prevBodyBg || '';
+      }
+      if (this._presetOverlay) {
+        this._presetOverlay.remove();
+        this._presetOverlay = null;
+      }
+      if (this._brightnessOverlay) {
+        this._brightnessOverlay.remove();
+        this._brightnessOverlay = null;
+      }
+      const p1 = document.getElementById('besing-bg-preset-overlay');
+      if (p1) p1.remove();
+      const p2 = document.getElementById('besing-bg-brightness-overlay');
+      if (p2) p2.remove();
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"5\"/><path d=\"M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42\"/></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Visual";
+      return mod;
+    })(),
+
     // Module: Markdown Link Copier
     (() => {
       const mod = {
@@ -444,145 +857,301 @@
       return mod;
     })(),
 
-    // Module: Color Change
-    (() => {
-      const mod = {
-    id: 'color-change',
-    name: 'Color Change',
-    version: '1.0.0',
-    description: 'Changes page background color to red.',
-    category: 'Visual',
-    _prevBg: null,
-
-    init() {
-      this._prevBg = document.body ? document.body.style.backgroundColor : null;
-      if (document.body) {
-        document.body.style.backgroundColor = 'red';
-      }
-    },
-
-    destroy() {
-      if (document.body) {
-        document.body.style.backgroundColor = this._prevBg || '';
-      }
-      this._prevBg = null;
-    }
-  };
-      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"#ef4444\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"10\"/></svg>";
-      mod.author = "BESing Team";
-      mod.category = "Visual";
-      return mod;
-    })(),
-
     // Module: Prevent Redirect
     (() => {
       const mod = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.0.0',
-    description: 'Prevents automatic redirects to external sites and strictly blocks unwanted new tab popups.',
+    version: '1.1.0',
+    description: 'Strictly blocks automatic redirects, new tab popups, and external link clicks. Returns mock window to satisfy callers so ad scripts do not retry.',
     category: 'Security',
     _origOpen: null,
+    _origUnsafeOpen: null,
+    _origAnchorClick: null,
     _origAssign: null,
     _origReplace: null,
     _clickHandler: null,
+    _auxClickHandler: null,
+    _injectedScript: null,
 
     _isSameHost(targetUrl) {
       if (!targetUrl || typeof targetUrl !== 'string') return true;
+      const trimmed = targetUrl.trim();
+      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('javascript:') || trimmed.startsWith('mailto:') || trimmed.startsWith('tel:')) {
+        return true;
+      }
       try {
-        const parsed = new URL(targetUrl, window.location.href);
+        const parsed = new URL(trimmed, window.location.href);
         if (parsed.protocol === 'javascript:' || parsed.protocol === 'about:') return true;
         const curHost = (window.location.hostname || '').toLowerCase();
-        const targetHost = parsed.hostname.toLowerCase();
+        const targetHost = (parsed.hostname || '').toLowerCase();
+        if (!targetHost || !curHost) return true;
         return targetHost === curHost || targetHost.endsWith('.' + curHost) || curHost.endsWith('.' + targetHost);
       } catch (e) {
         return false;
       }
     },
 
+    _createFakeWindow(url) {
+      const fake = {
+        closed: false,
+        name: '',
+        opener: window,
+        parent: window,
+        top: window,
+        frames: [],
+        length: 0,
+        close() { this.closed = true; },
+        focus() {},
+        blur() {},
+        postMessage() {},
+        print() {},
+        stop() {},
+        location: {
+          href: url || 'about:blank',
+          hash: '',
+          host: '',
+          hostname: '',
+          origin: '',
+          pathname: '',
+          port: '',
+          protocol: 'https:',
+          search: '',
+          assign() {},
+          replace() {},
+          reload() {},
+          toString() { return url || 'about:blank'; }
+        },
+        document: {
+          open() { return this; },
+          close() {},
+          write() {},
+          writeln() {},
+          createElement(tag) { return document.createElement(tag || 'div'); }
+        },
+        addEventListener() {},
+        removeEventListener() {},
+        dispatchEvent() { return true; }
+      };
+      fake.window = fake;
+      return fake;
+    },
+
     notifyBlocked(targetUrl, reason) {
       console.warn(`[BESing Prevent Redirect] Blocked ${reason}:`, targetUrl);
-      window.dispatchEvent(new CustomEvent('besing:redirect-blocked', {
-        detail: { url: targetUrl, reason }
-      }));
+      try {
+        window.dispatchEvent(new CustomEvent('besing:redirect-blocked', {
+          detail: { url: targetUrl, reason }
+        }));
+      } catch (e) {}
     },
 
     init() {
       this.destroy();
       const self = this;
+      const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
 
-      // 1. Intercept window.open (Strictly block new tabs / popups to external sites or blank)
+      // 1. Hook window.open in current scope and unsafeWindow
+      const hookedOpen = function (url, target, features) {
+        const isExt = url && !self._isSameHost(url);
+        const isNewTab = target === '_blank' || target === '_new' || !target;
+
+        if (isExt || isNewTab) {
+          self.notifyBlocked(url || 'about:blank', isExt ? 'external window.open redirect' : 'new tab popup');
+          // Return a realistic mock window object to satisfy ad caller so it considers the action successful
+          return self._createFakeWindow(url);
+        }
+
+        const orig = self._origUnsafeOpen || self._origOpen || window.open;
+        try {
+          return orig.call(this || window, url, target, features);
+        } catch (e) {
+          return self._createFakeWindow(url);
+        }
+      };
+
       this._origOpen = window.open;
-      window.open = function (url, target, features) {
-        if (url && !self._isSameHost(url)) {
-          self.notifyBlocked(url, 'external window.open redirect');
-          return null;
-        }
-        if (target === '_blank' || !target) {
-          self.notifyBlocked(url || 'about:blank', 'new tab popup');
-          return null;
-        }
-        return self._origOpen.call(window, url, target, features);
-      };
+      window.open = hookedOpen;
+      if (unsafeWin && unsafeWin !== window) {
+        this._origUnsafeOpen = unsafeWin.open;
+        try { unsafeWin.open = hookedOpen; } catch (e) {}
+      }
 
-      // 2. Intercept programmatic location changes
+      // 2. Hook HTMLAnchorElement.prototype.click
       try {
-        this._origAssign = window.location.assign;
-        window.location.assign = function (url) {
-          if (!self._isSameHost(url)) {
-            self.notifyBlocked(url, 'location.assign redirect');
-            return;
+        const anchorProto = (unsafeWin.HTMLAnchorElement || HTMLAnchorElement).prototype;
+        this._origAnchorClick = anchorProto.click;
+        anchorProto.click = function () {
+          const href = this.getAttribute('href') || this.href;
+          const target = (this.getAttribute('target') || this.target || '').toLowerCase();
+          const isExt = href && !self._isSameHost(href);
+          const isNewTab = target === '_blank' || target === '_new';
+
+          if (isExt || isNewTab) {
+            self.notifyBlocked(href || '', 'programmatic anchor.click()');
+            return true; // Return success so calling script proceeds without error
           }
-          return self._origAssign.call(window.location, url);
+          return self._origAnchorClick.call(this);
         };
       } catch (e) {}
 
+      // 3. Hook Location.prototype.assign and replace
       try {
-        this._origReplace = window.location.replace;
-        window.location.replace = function (url) {
-          if (!self._isSameHost(url)) {
-            self.notifyBlocked(url, 'location.replace redirect');
-            return;
-          }
-          return self._origReplace.call(window.location, url);
-        };
+        const locProto = (unsafeWin.Location || Location).prototype;
+        if (locProto && locProto.assign) {
+          this._origAssign = locProto.assign;
+          locProto.assign = function (url) {
+            if (url && !self._isSameHost(url)) {
+              self.notifyBlocked(url, 'location.assign redirect');
+              return;
+            }
+            return self._origAssign.call(this, url);
+          };
+        }
       } catch (e) {}
 
-      // 3. Intercept click events on links with target="_blank" or external redirects
+      try {
+        const locProto = (unsafeWin.Location || Location).prototype;
+        if (locProto && locProto.replace) {
+          this._origReplace = locProto.replace;
+          locProto.replace = function (url) {
+            if (url && !self._isSameHost(url)) {
+              self.notifyBlocked(url, 'location.replace redirect');
+              return;
+            }
+            return self._origReplace.call(this, url);
+          };
+        }
+      } catch (e) {}
+
+      // 4. Capture and block link clicks (both user clicks and script-triggered clicks)
       this._clickHandler = function (e) {
-        const link = e.target.closest('a');
+        const link = e.target && e.target.closest ? e.target.closest('a') : null;
         if (!link) return;
-        const href = link.getAttribute('href');
-        if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+        const href = link.getAttribute('href') || link.href;
+        if (!href) return;
+        const trimmed = href.trim();
+        if (trimmed.startsWith('#') || trimmed.startsWith('javascript:') || trimmed.startsWith('mailto:') || trimmed.startsWith('tel:')) {
+          return;
+        }
 
-        if (!self._isSameHost(href)) {
-          // If it was not a direct user click (e.g. synthetic script click)
-          if (!e.isTrusted) {
+        const target = (link.getAttribute('target') || link.target || '').toLowerCase();
+        const isExternal = !self._isSameHost(href);
+        const isNewTab = target === '_blank' || target === '_new' || e.ctrlKey || e.metaKey || e.shiftKey;
+
+        if (isExternal || isNewTab) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          self.notifyBlocked(href, isNewTab ? 'new tab link click' : 'external redirect link click');
+        }
+      };
+
+      this._auxClickHandler = function (e) {
+        // Middle click
+        if (e.button === 1) {
+          const link = e.target && e.target.closest ? e.target.closest('a') : null;
+          if (link) {
             e.preventDefault();
+            e.stopPropagation();
             e.stopImmediatePropagation();
-            self.notifyBlocked(href, 'synthetic link click');
+            self.notifyBlocked(link.href || '', 'middle-click new tab');
           }
         }
       };
+
+      window.addEventListener('click', this._clickHandler, true);
       document.addEventListener('click', this._clickHandler, true);
+      window.addEventListener('auxclick', this._auxClickHandler, true);
+      document.addEventListener('auxclick', this._auxClickHandler, true);
+
+      // 5. Inject page-context guard for page scripts
+      try {
+        const pageScript = document.createElement('script');
+        pageScript.id = '__besing_pr_guard__';
+        pageScript.textContent = `
+          (function() {
+            if (window.__besing_pr_active__) return;
+            window.__besing_pr_active__ = true;
+            var curHost = (window.location.hostname || '').toLowerCase();
+            function isSame(u) {
+              if (!u || typeof u !== 'string') return true;
+              var t = u.trim();
+              if (!t || t.indexOf('#') === 0 || t.indexOf('javascript:') === 0) return true;
+              try {
+                var p = new URL(t, window.location.href);
+                var h = (p.hostname || '').toLowerCase();
+                return h === curHost || h.endsWith('.' + curHost) || curHost.endsWith('.' + h);
+              } catch(e) { return false; }
+            }
+            function fakeWin(u) {
+              var f = {
+                closed: false, name: '', opener: window, parent: window, top: window, frames: [], length: 0,
+                close: function() { this.closed = true; }, focus: function(){}, blur: function(){},
+                postMessage: function(){}, print: function(){}, stop: function(){},
+                location: { href: u || 'about:blank', assign: function(){}, replace: function(){}, reload: function(){} },
+                document: { open: function(){ return this; }, close: function(){}, write: function(){}, writeln: function(){} }
+              };
+              f.window = f;
+              return f;
+            }
+            var origOpen = window.open;
+            window.open = function(url, target, feat) {
+              var isExt = url && !isSame(url);
+              var isNew = target === '_blank' || target === '_new' || !target;
+              if (isExt || isNew) {
+                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script window.open' } }));
+                return fakeWin(url);
+              }
+              return origOpen.call(this || window, url, target, feat);
+            };
+          })();
+        `;
+        (document.head || document.documentElement).appendChild(pageScript);
+        pageScript.remove();
+      } catch (e) {}
     },
 
     destroy() {
+      const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
       if (this._origOpen) {
         window.open = this._origOpen;
         this._origOpen = null;
       }
+      if (this._origUnsafeOpen && unsafeWin) {
+        try { unsafeWin.open = this._origUnsafeOpen; } catch (e) {}
+        this._origUnsafeOpen = null;
+      }
+      if (this._origAnchorClick) {
+        try {
+          const anchorProto = (unsafeWin.HTMLAnchorElement || HTMLAnchorElement).prototype;
+          anchorProto.click = this._origAnchorClick;
+        } catch (e) {}
+        this._origAnchorClick = null;
+      }
       if (this._origAssign) {
-        window.location.assign = this._origAssign;
+        try {
+          const locProto = (unsafeWin.Location || Location).prototype;
+          locProto.assign = this._origAssign;
+        } catch (e) {}
         this._origAssign = null;
       }
       if (this._origReplace) {
-        window.location.replace = this._origReplace;
+        try {
+          const locProto = (unsafeWin.Location || Location).prototype;
+          locProto.replace = this._origReplace;
+        } catch (e) {}
         this._origReplace = null;
       }
       if (this._clickHandler) {
+        window.removeEventListener('click', this._clickHandler, true);
         document.removeEventListener('click', this._clickHandler, true);
         this._clickHandler = null;
+      }
+      if (this._auxClickHandler) {
+        window.removeEventListener('auxclick', this._auxClickHandler, true);
+        document.removeEventListener('auxclick', this._auxClickHandler, true);
+        this._auxClickHandler = null;
       }
     }
   };
@@ -595,7 +1164,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.4.3';
+    static CURRENT_VERSION = '1.5.0';
 
     static isStableLoader() {
       return typeof window !== 'undefined' && (
@@ -720,6 +1289,7 @@
       this.menuWrapperEl = null;
       this.searchQuery = '';
       this.currentView = 'extensions';
+      this.activeConfigScriptId = null;
       this.isExpanded = false;
       this.isDragging = false;
       this.dragMoved = false;
@@ -746,7 +1316,8 @@
       this.modules.forEach(m => {
         if (this.storage.isScriptActiveOnSite(m.id, currentHost)) {
           try {
-            m.init();
+            const cfg = this.storage.getScriptConfig(m.id, currentHost);
+            m.init(cfg);
             m.running = true;
           } catch (err) {
             console.error(`[BESing] Error initializing ${m.id}:`, err);
@@ -854,9 +1425,10 @@
       const currentHost = this.storage.getCurrentHost();
       this.modules.forEach(m => {
         const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
+        const cfg = this.storage.getScriptConfig(m.id, currentHost);
         if (shouldBeActive && !m.running) {
           try {
-            m.init();
+            m.init(cfg);
             m.running = true;
           } catch (err) {
             console.error(`[BESing] Error initializing ${m.id}:`, err);
@@ -868,9 +1440,36 @@
           } catch (err) {
             console.error(`[BESing] Error destroying ${m.id}:`, err);
           }
+        } else if (shouldBeActive && m.running) {
+          if (typeof m.onConfigChange === 'function') {
+            try { m.onConfigChange(cfg); } catch (e) {}
+          }
         }
       });
       this.updateBadge();
+    }
+
+    async applyScriptConfig(scriptId, patch) {
+      const currentHost = this.storage.getCurrentHost();
+      await this.storage.setScriptConfig(scriptId, patch, currentHost);
+      const updatedCfg = this.storage.getScriptConfig(scriptId, currentHost);
+      const m = this.modules.find(mod => mod.id === scriptId);
+      if (m && m.running) {
+        if (typeof m.onConfigChange === 'function') {
+          try { m.onConfigChange(updatedCfg); } catch (e) {}
+        } else {
+          try {
+            m.destroy();
+            m.init(updatedCfg);
+          } catch (e) {}
+        }
+      }
+    }
+
+    openScriptConfig(scriptId) {
+      this.activeConfigScriptId = scriptId;
+      this.currentView = 'script-config';
+      this.renderBody();
     }
 
     ensureMounted() {
@@ -1621,6 +2220,8 @@
         };
         renderSiteRulesList();
 
+      } else if (this.currentView === 'script-config') {
+        this.renderScriptConfig(body);
       } else {
         // Extensions View: 3-stage toggles (OFF / SITE / ON)
         body.innerHTML = `
@@ -1664,13 +2265,6 @@
             card.className = 'besing-ext-card';
             const currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'on'
 
-            let modeBadge = '';
-            if (currentMode === 'site') {
-              modeBadge = `<span class="besing-site-badge">📍 ${currentHost}</span>`;
-            } else if (currentMode === 'on') {
-              modeBadge = `<span class="besing-global-badge">🌐 Global ON</span>`;
-            }
-
             card.innerHTML = `
               <div class="besing-ext-info-group">
                 <div class="besing-ext-icon">${m.icon || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>'}</div>
@@ -1679,33 +2273,55 @@
                     <span class="besing-ext-name">${m.name}</span>
                     <span class="besing-ext-ver">v${m.version || '1.0.0'}</span>
                     ${m.category ? `<span class="besing-cat-badge">${m.category}</span>` : ''}
-                    ${modeBadge}
                   </div>
                   <p class="besing-ext-desc">${m.description || ''}</p>
                 </div>
               </div>
               <div class="besing-ext-actions">
-                <div class="besing-tri-toggle" title="Toggle: OFF, SITE (${currentHost}), or ON (Global)">
-                  <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off">OFF</button>
-                  <button type="button" class="besing-tri-btn ${currentMode === 'site' ? 'active active-site' : ''}" data-mode="site">SITE</button>
-                  <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on">ON</button>
-                </div>
+                <button type="button" class="besing-btn-script-gear" data-script-id="${m.id}" title="Configure ${m.name}">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                </button>
+                <button type="button" class="besing-rotator-toggle mode-${currentMode}" data-script-id="${m.id}" title="State: ${currentMode.toUpperCase()}. Click to cycle (OFF -> ON -> SITE ONLY)">
+                  <span class="besing-rotator-knob"></span>
+                  <span class="besing-rotator-text">site only</span>
+                </button>
               </div>
             `;
 
-            const btnOff = card.querySelector('[data-mode="off"]');
-            const btnSite = card.querySelector('[data-mode="site"]');
-            const btnOn = card.querySelector('[data-mode="on"]');
-
-            const handleModeChange = async (newMode) => {
-              await this.storage.setScriptMode(m.id, newMode, currentHost);
+            const rotatorBtn = card.querySelector('.besing-rotator-toggle');
+            rotatorBtn.onclick = async (e) => {
+              e.stopPropagation();
+              // Cycle order: off -> on (green) -> site (blue, "site only") -> off (grey)
+              let nextMode = 'on';
+              if (currentMode === 'off') {
+                nextMode = 'on';
+              } else if (currentMode === 'on') {
+                nextMode = 'site';
+              } else {
+                nextMode = 'off';
+              }
+              await this.storage.setScriptMode(m.id, nextMode, currentHost);
               renderCards();
               this.refreshCurrentSiteModules();
             };
 
-            btnOff.onclick = (e) => { e.stopPropagation(); handleModeChange('off'); };
-            btnSite.onclick = (e) => { e.stopPropagation(); handleModeChange('site'); };
-            btnOn.onclick = (e) => { e.stopPropagation(); handleModeChange('on'); };
+            const btnGear = card.querySelector('.besing-btn-script-gear');
+            if (btnGear) {
+              btnGear.onclick = (e) => {
+                e.stopPropagation();
+                this.openScriptConfig(m.id);
+              };
+            }
+
+            const infoGroup = card.querySelector('.besing-ext-info-group');
+            if (infoGroup) {
+              infoGroup.style.cursor = 'pointer';
+              infoGroup.title = 'Click to open configuration for ' + m.name;
+              infoGroup.onclick = (e) => {
+                e.stopPropagation();
+                this.openScriptConfig(m.id);
+              };
+            }
 
             extContainer.appendChild(card);
           });
@@ -1717,6 +2333,380 @@
         };
 
         renderCards();
+      }
+    }
+
+    renderScriptConfig(body) {
+      const m = this.modules.find(mod => mod.id === this.activeConfigScriptId);
+      if (!m) {
+        this.currentView = 'extensions';
+        this.renderBody();
+        return;
+      }
+
+      const currentHost = this.storage.getCurrentHost();
+      const currentMode = this.storage.getScriptMode(m.id, currentHost);
+      const cfg = this.storage.getScriptConfig(m.id, currentHost);
+
+      let scopeNotice = '';
+      if (currentMode === 'site') {
+        scopeNotice = `
+          <div class="besing-config-scope site">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></svg>
+            <div><strong>Site-Only Config (${currentHost}):</strong> Settings are saved exclusively for this site and bypass global settings. Switching to OFF wipes this site's custom settings.</div>
+          </div>
+        `;
+      } else if (currentMode === 'on') {
+        scopeNotice = `
+          <div class="besing-config-scope global">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/></svg>
+            <div><strong>Global Config:</strong> Saved globally across all websites (unless a site-only override exists).</div>
+          </div>
+        `;
+      } else {
+        scopeNotice = `
+          <div class="besing-config-scope off">
+            <div>⚪ <strong>Script is currently OFF.</strong> Switch toggle to <strong>SITE</strong> or <strong>ON</strong> to activate.</div>
+          </div>
+        `;
+      }
+
+      let specificControls = '';
+
+      if (m.id === 'text-size-control') {
+        const curZoom = Math.max(70, Math.min(400, Number(cfg.fontSizePercent) || 125));
+        const presets = [100, 115, 125, 150, 175, 200, 250, 300];
+        const presetsHtml = presets.map(p => `
+          <button type="button" class="besing-zoom-pill ${curZoom === p ? 'active' : ''}" data-zoom="${p}">${p}%</button>
+        `).join('');
+
+        specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-zoom-hero">
+              <div class="besing-zoom-val" id="besing-zoom-val">${curZoom}%</div>
+              <div class="besing-zoom-desc">Active Text & Page Scale (Supports beyond 200% system max)</div>
+            </div>
+
+            <div class="besing-zoom-slider-row">
+              <button type="button" class="besing-stepper-btn" id="btn-zoom-minus" title="Decrease">−</button>
+              <input type="range" class="besing-slider-range" id="zoom-range" min="80" max="350" step="5" value="${curZoom}">
+              <button type="button" class="besing-stepper-btn" id="btn-zoom-plus" title="Increase">+</button>
+            </div>
+
+            <div class="besing-section-title" style="margin-top:10px;">Scale Presets</div>
+            <div class="besing-preset-row">
+              ${presetsHtml}
+            </div>
+
+            <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;">
+              <button type="button" class="besing-btn-sub-action" id="btn-reset-zoom">Reset to 100%</button>
+              <span style="font-size:10px;color:#64748b;">Counter-zoomed widget stays crisp</span>
+            </div>
+          </div>
+        `;
+      } else if (m.id === 'color-change') {
+        const curBrightness = Math.max(-100, Math.min(100, Number(cfg.brightness) || 0));
+        const curPreset = cfg.preset || 'eye-protect';
+        const customColor = cfg.customColor || '#cce8cf';
+
+        const presets = [
+          { key: 'none', name: 'Original', color: 'transparent', border: '#475569' },
+          { key: 'eye-protect', name: 'Eye Protect', color: '#cce8cf', border: '#86efac' },
+          { key: 'old-paper', name: 'Old Paper', color: '#f4ecd8', border: '#fcd34d' },
+          { key: 'dark', name: 'Dark Mode', color: '#18181b', border: '#38bdf8' },
+          { key: 'soft-sepia', name: 'Soft Sepia', color: '#eee4cd', border: '#d97706' },
+          { key: 'cool-mint', name: 'Cool Mint', color: '#e0f2fe', border: '#7dd3fc' }
+        ];
+
+        const presetsHtml = presets.map(p => `
+          <button type="button" class="besing-preset-card ${curPreset === p.key ? 'active' : ''}" data-preset="${p.key}">
+            <span class="besing-preset-swatch" style="background:${p.color};border-color:${p.border}"></span>
+            <span class="besing-preset-label">${p.name}</span>
+          </button>
+        `).join('');
+
+        let bLabel = '🎯 Normal (Original Site BG)';
+        if (curBrightness < 0) bLabel = `☀️ Lighter (+${Math.abs(curBrightness)}%)`;
+        else if (curBrightness > 0) bLabel = `🌙 Deep Dark (+${curBrightness}%)`;
+
+        specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Site BG Brightness Dragger</span>
+              <span class="besing-brightness-badge" id="brightness-badge">${bLabel}</span>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;line-height:1.35;margin-bottom:6px;">
+              Adjusts brightness directly on top of the current website-set background (e.g. blue becomes light blue dragging left, deep navy and dark dragging right).
+            </p>
+            <div class="besing-brightness-labels">
+              <span>☀️ Lighter (Drag Left)</span>
+              <span>🌙 Deep / Dark (Drag Right)</span>
+            </div>
+            <input type="range" class="besing-slider-range brightness-range" id="brightness-range" min="-100" max="100" step="2" value="${curBrightness}">
+            <div class="besing-range-ticks">
+              <span>−100% (Light)</span>
+              <span class="tick-center">0% (Normal)</span>
+              <span>+100% (Dark)</span>
+            </div>
+          </div>
+
+          <div class="besing-config-section" style="margin-top:10px;">
+            <div class="besing-section-title">Background Tone Presets</div>
+            <div class="besing-preset-grid">
+              ${presetsHtml}
+            </div>
+
+            <div class="besing-custom-color-row">
+              <label class="besing-custom-color-label">Custom Tone:</label>
+              <input type="color" id="custom-color-picker" value="${customColor}">
+              <input type="text" id="custom-color-hex" class="besing-input-sm" value="${customColor}">
+              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-color">Apply Custom</button>
+            </div>
+
+            <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+              <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset to Defaults</button>
+            </div>
+          </div>
+        `;
+      } else if (m.id === 'force-copy') {
+        const allowSelect = cfg.allowSelect !== false;
+        const allowCopy = cfg.allowCopy !== false;
+        const allowPaste = cfg.allowPaste !== false;
+        const allowContextMenu = cfg.allowContextMenu !== false;
+
+        specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-unlocked-banner">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+              <div>
+                <div style="font-weight:700;color:#f1f5f9;font-size:12px;">Copy & Selection Shield Active</div>
+                <div style="font-size:10px;color:#94a3b8;">CSS <code>user-select: none</code> restrictions and copy blocking event scripts are bypassed in capture phase.</div>
+              </div>
+            </div>
+
+            <div class="besing-toggle-row-list" style="margin-top:12px;">
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Force Allow Text Selection</div>
+                  <div class="besing-toggle-desc">Overrides CSS <code>user-select: none</code> on all elements</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-allow-select" ${allowSelect ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Force Allow Copy & Cut</div>
+                  <div class="besing-toggle-desc">Bypasses Ctrl+C, Ctrl+X, and clipboard prevention listeners</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-allow-copy" ${allowCopy ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Force Allow Paste</div>
+                  <div class="besing-toggle-desc">Permits pasting into protected password & text inputs</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-allow-paste" ${allowPaste ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Allow Right-Click Context Menu</div>
+                  <div class="besing-toggle-desc">Bypasses right-click blocking event listeners</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-allow-context" ${allowContextMenu ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="besing-copy-test-box">
+              <div style="font-size:11px;font-weight:600;color:#cbd5e1;margin-bottom:4px;">Selection & Copy Sandbox:</div>
+              <div class="besing-test-text" id="besing-test-selection" style="user-select:text;-webkit-user-select:text;">
+                ✨ Try selecting and copying this text (Ctrl+C), then paste below to verify!
+              </div>
+              <input type="text" class="besing-test-input" placeholder="Paste (Ctrl+V) copied text here to test...">
+            </div>
+          </div>
+        `;
+      } else {
+        specificControls = `
+          <div class="besing-config-section">
+            <p style="font-size:11px;color:#94a3b8;line-height:1.4;">${m.description || 'No additional custom options for this script.'}</p>
+            <div style="margin-top:12px;font-size:10px;color:#64748b;">
+              Author: ${m.author || 'BESing Team'} | Category: ${m.category || 'General'}
+            </div>
+          </div>
+        `;
+      }
+
+      body.innerHTML = `
+        <div class="besing-secondary-header">
+          <button type="button" class="besing-btn-back" id="besing-btn-back">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+            <span>All Scripts</span>
+          </button>
+          <div class="besing-secondary-title-group">
+            <div class="besing-ext-icon sm">${m.icon || ''}</div>
+            <div class="besing-secondary-meta">
+              <span class="besing-secondary-title">${m.name}</span>
+              <span class="besing-ext-ver">v${m.version || '1.0.0'}</span>
+            </div>
+          </div>
+          <div class="besing-tri-toggle" title="Toggle: OFF, SITE (${currentHost}), or ON (Global)">
+            <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off">OFF</button>
+            <button type="button" class="besing-tri-btn ${currentMode === 'site' ? 'active active-site' : ''}" data-mode="site">SITE</button>
+            <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on">ON</button>
+          </div>
+        </div>
+
+        ${scopeNotice}
+
+        <div class="besing-secondary-content" style="display:flex;flex-direction:column;gap:10px;">
+          ${specificControls}
+        </div>
+      `;
+
+      // Bind Back Button
+      const btnBack = body.querySelector('#besing-btn-back');
+      if (btnBack) {
+        btnBack.onclick = () => {
+          this.currentView = 'extensions';
+          this.renderBody();
+        };
+      }
+
+      // Bind Tri-Toggle in Secondary Menu
+      const btnOff = body.querySelector('[data-mode="off"]');
+      const btnSite = body.querySelector('[data-mode="site"]');
+      const btnOn = body.querySelector('[data-mode="on"]');
+
+      const handleModeChange = async (newMode) => {
+        await this.storage.setScriptMode(m.id, newMode, currentHost);
+        this.refreshCurrentSiteModules();
+        this.renderBody();
+      };
+
+      if (btnOff) btnOff.onclick = (e) => { e.stopPropagation(); handleModeChange('off'); };
+      if (btnSite) btnSite.onclick = (e) => { e.stopPropagation(); handleModeChange('site'); };
+      if (btnOn) btnOn.onclick = (e) => { e.stopPropagation(); handleModeChange('on'); };
+
+      // Bind Handlers
+      if (m.id === 'text-size-control') {
+        const zoomVal = body.querySelector('#besing-zoom-val');
+        const zoomRange = body.querySelector('#zoom-range');
+        const btnMinus = body.querySelector('#btn-zoom-minus');
+        const btnPlus = body.querySelector('#btn-zoom-plus');
+        const btnReset = body.querySelector('#btn-reset-zoom');
+
+        const updateZoom = async (val) => {
+          const clamped = Math.max(80, Math.min(350, Math.round(val)));
+          if (zoomVal) zoomVal.textContent = `${clamped}%`;
+          if (zoomRange) zoomRange.value = clamped;
+          body.querySelectorAll('.besing-zoom-pill').forEach(btn => {
+            btn.classList.toggle('active', Number(btn.getAttribute('data-zoom')) === clamped);
+          });
+          await this.applyScriptConfig(m.id, { fontSizePercent: clamped });
+        };
+
+        if (zoomRange) {
+          zoomRange.oninput = (e) => updateZoom(e.target.value);
+        }
+        if (btnMinus) {
+          btnMinus.onclick = () => updateZoom(Number(zoomRange.value) - 10);
+        }
+        if (btnPlus) {
+          btnPlus.onclick = () => updateZoom(Number(zoomRange.value) + 10);
+        }
+        if (btnReset) {
+          btnReset.onclick = () => updateZoom(100);
+        }
+        body.querySelectorAll('.besing-zoom-pill').forEach(btn => {
+          btn.onclick = () => updateZoom(Number(btn.getAttribute('data-zoom')));
+        });
+      } else if (m.id === 'color-change') {
+        const bRange = body.querySelector('#brightness-range');
+        const bBadge = body.querySelector('#brightness-badge');
+        const customPicker = body.querySelector('#custom-color-picker');
+        const customHex = body.querySelector('#custom-color-hex');
+        const btnApplyCustom = body.querySelector('#btn-apply-custom-color');
+        const btnResetBg = body.querySelector('#btn-reset-bg');
+
+        const updateBrightness = async (val) => {
+          const b = Number(val);
+          if (bBadge) {
+            if (b < 0) bBadge.textContent = `☀️ Lighter (+${Math.abs(b)}%)`;
+            else if (b > 0) bBadge.textContent = `🌙 Deep Dark (+${b}%)`;
+            else bBadge.textContent = '🎯 Normal (Original BG)';
+          }
+          await this.applyScriptConfig(m.id, { brightness: b });
+        };
+
+        if (bRange) {
+          bRange.oninput = (e) => updateBrightness(e.target.value);
+        }
+
+        body.querySelectorAll('.besing-preset-card').forEach(card => {
+          card.onclick = async () => {
+            const pKey = card.getAttribute('data-preset');
+            body.querySelectorAll('.besing-preset-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            await this.applyScriptConfig(m.id, { preset: pKey });
+          };
+        });
+
+        if (customPicker && customHex) {
+          customPicker.oninput = (e) => {
+            customHex.value = e.target.value;
+          };
+          if (btnApplyCustom) {
+            btnApplyCustom.onclick = async () => {
+              const col = customHex.value.trim() || '#cce8cf';
+              body.querySelectorAll('.besing-preset-card').forEach(c => c.classList.remove('active'));
+              await this.applyScriptConfig(m.id, { preset: 'custom', customColor: col });
+            };
+          }
+        }
+
+        if (btnResetBg) {
+          btnResetBg.onclick = async () => {
+            if (bRange) bRange.value = 0;
+            updateBrightness(0);
+            body.querySelectorAll('.besing-preset-card').forEach(c => {
+              c.classList.toggle('active', c.getAttribute('data-preset') === 'none');
+            });
+            await this.applyScriptConfig(m.id, { brightness: 0, preset: 'none' });
+          };
+        }
+      } else if (m.id === 'force-copy') {
+        const chkSelect = body.querySelector('#chk-allow-select');
+        const chkCopy = body.querySelector('#chk-allow-copy');
+        const chkPaste = body.querySelector('#chk-allow-paste');
+        const chkContext = body.querySelector('#chk-allow-context');
+
+        const saveForceCopy = async () => {
+          await this.applyScriptConfig(m.id, {
+            allowSelect: !!(chkSelect && chkSelect.checked),
+            allowCopy: !!(chkCopy && chkCopy.checked),
+            allowPaste: !!(chkPaste && chkPaste.checked),
+            allowContextMenu: !!(chkContext && chkContext.checked)
+          });
+        };
+
+        if (chkSelect) chkSelect.onchange = saveForceCopy;
+        if (chkCopy) chkCopy.onchange = saveForceCopy;
+        if (chkPaste) chkPaste.onchange = saveForceCopy;
+        if (chkContext) chkContext.onchange = saveForceCopy;
       }
     }
 
@@ -1809,14 +2799,17 @@
         .besing-theme-btn { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 8px 4px; display: flex; flex-direction: column; align-items: center; gap: 4px; color: #cbd5e1; font-size: 11px; cursor: pointer; transition: all 0.15s ease; }
         .besing-theme-btn:hover { background: rgba(255, 255, 255, 0.08); border-color: rgba(99, 102, 241, 0.4); }
         .besing-theme-btn.active { background: rgba(99, 102, 241, 0.2); border-color: #818cf8; color: #f8fafc; box-shadow: 0 0 10px rgba(99, 102, 241, 0.25); }
-        .besing-tri-toggle { display: inline-flex; align-items: center; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px; padding: 2px; gap: 2px; box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4); }
-        .besing-tri-btn { font-family: inherit; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; padding: 3px 8px; border-radius: 14px; border: none; background: transparent; color: #64748b; cursor: pointer; transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
-        .besing-tri-btn:hover { color: #cbd5e1; }
-        .besing-tri-btn.active.active-off { background: #334155; color: #f1f5f9; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3); }
-        .besing-tri-btn.active.active-site { background: linear-gradient(135deg, #0284c7, #0369a1); color: #ffffff; box-shadow: 0 0 10px rgba(56, 189, 248, 0.45); }
-        .besing-tri-btn.active.active-on { background: linear-gradient(135deg, #10b981, #059669); color: #ffffff; box-shadow: 0 0 10px rgba(16, 185, 129, 0.45); }
-        .besing-site-badge { font-size: 9px; font-weight: 600; background: rgba(56, 189, 248, 0.15); color: #38bdf8; padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); }
-        .besing-global-badge { font-size: 9px; font-weight: 600; background: rgba(16, 185, 129, 0.15); color: #34d399; padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.3); }
+        .besing-rotator-toggle { position: relative; width: 62px; height: 24px; border-radius: 12px; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; outline: none; transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1); flex-shrink: 0; box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4); }
+        .besing-rotator-toggle:hover { filter: brightness(1.1); transform: scale(1.02); }
+        .besing-rotator-toggle.mode-off { background-color: #334155; }
+        .besing-rotator-toggle.mode-off .besing-rotator-knob { position: absolute; left: 3px; width: 18px; height: 18px; border-radius: 50%; background-color: #ffffff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35); transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+        .besing-rotator-toggle.mode-off .besing-rotator-text { display: none; }
+        .besing-rotator-toggle.mode-on { background-color: #10b981; box-shadow: 0 0 10px rgba(16, 185, 129, 0.35), inset 0 1px 2px rgba(0, 0, 0, 0.2); }
+        .besing-rotator-toggle.mode-on .besing-rotator-knob { position: absolute; left: 3px; transform: translateX(38px); width: 18px; height: 18px; border-radius: 50%; background-color: #ffffff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35); transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+        .besing-rotator-toggle.mode-on .besing-rotator-text { display: none; }
+        .besing-rotator-toggle.mode-site { background: linear-gradient(135deg, #0284c7, #2563eb); box-shadow: 0 0 10px rgba(56, 189, 248, 0.35), inset 0 1px 2px rgba(0, 0, 0, 0.2); }
+        .besing-rotator-toggle.mode-site .besing-rotator-knob { display: none; }
+        .besing-rotator-toggle.mode-site .besing-rotator-text { display: block; color: #ffffff; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; user-select: none; pointer-events: none; }
         .besing-site-card { background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
         .besing-site-card-header { display: flex; align-items: center; justify-content: space-between; }
         .besing-current-domain { font-size: 12px; font-weight: 600; color: #38bdf8; font-family: monospace; }
@@ -1854,6 +2847,57 @@
         .besing-pill-count { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
         .besing-cat-badge { font-size: 9px; font-weight: 600; padding: 1px 6px; border-radius: 6px; background: rgba(99, 102, 241, 0.15); color: #a5b4fc; margin-left: 4px; }
         .besing-ext-actions { display: flex; align-items: center; gap: 8px; }
+        .besing-btn-script-gear { background: transparent; border: none; color: #64748b; width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; }
+        .besing-btn-script-gear:hover { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; transform: rotate(30deg); }
+        .besing-secondary-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+        .besing-btn-back { display: inline-flex; align-items: center; gap: 4px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #cbd5e1; padding: 5px 9px; border-radius: 7px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.15s ease; }
+        .besing-btn-back:hover { background: rgba(99, 102, 241, 0.2); border-color: #818cf8; color: #fff; }
+        .besing-secondary-title-group { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+        .besing-ext-icon.sm { width: 26px; height: 26px; border-radius: 6px; font-size: 11px; }
+        .besing-secondary-meta { display: flex; flex-direction: column; overflow: hidden; }
+        .besing-secondary-title { font-size: 12px; font-weight: 700; color: #f8fafc; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+        .besing-config-scope { font-size: 11px; line-height: 1.4; padding: 8px 10px; border-radius: 8px; display: flex; align-items: flex-start; gap: 8px; }
+        .besing-config-scope.site { background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.25); color: #7dd3fc; }
+        .besing-config-scope.global { background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); color: #6ee7b7; }
+        .besing-config-scope.off { background: rgba(255, 255, 255, 0.03); border: 1px dashed rgba(255, 255, 255, 0.1); color: #94a3b8; }
+        .besing-config-section { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+        .besing-section-header-row { display: flex; align-items: center; justify-content: space-between; }
+        .besing-brightness-badge { font-size: 10px; font-weight: 700; background: rgba(99, 102, 241, 0.2); color: #a5b4fc; padding: 2px 7px; border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.3); }
+        .besing-zoom-hero { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 14px 10px; background: rgba(15, 23, 42, 0.55); border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.06); }
+        .besing-zoom-val { font-size: 32px; font-weight: 800; color: #38bdf8; letter-spacing: -0.5px; text-shadow: 0 0 16px rgba(56, 189, 248, 0.4); }
+        .besing-zoom-desc { font-size: 10px; color: #64748b; }
+        .besing-zoom-slider-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+        .besing-stepper-btn { width: 28px; height: 28px; border-radius: 8px; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); color: #f1f5f9; font-size: 16px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease; }
+        .besing-stepper-btn:hover { background: rgba(99, 102, 241, 0.3); border-color: #818cf8; }
+        .besing-slider-range { flex: 1; accent-color: #38bdf8; cursor: pointer; height: 6px; border-radius: 3px; }
+        .besing-slider-range.brightness-range { accent-color: #a78bfa; }
+        .besing-preset-row { display: flex; flex-wrap: wrap; gap: 6px; }
+        .besing-zoom-pill { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); color: #cbd5e1; font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease; }
+        .besing-zoom-pill:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+        .besing-zoom-pill.active { background: rgba(56, 189, 248, 0.2); border-color: #38bdf8; color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.3); }
+        .besing-brightness-labels { display: flex; justify-content: space-between; font-size: 10px; color: #94a3b8; }
+        .besing-range-ticks { display: flex; justify-content: space-between; font-size: 9px; color: #64748b; margin-top: -2px; }
+        .besing-preset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        .besing-preset-card { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 6px; display: flex; align-items: center; gap: 6px; cursor: pointer; transition: all 0.15s ease; color: #cbd5e1; }
+        .besing-preset-card:hover { background: rgba(255, 255, 255, 0.07); }
+        .besing-preset-card.active { background: rgba(99, 102, 241, 0.18); border-color: #818cf8; color: #fff; }
+        .besing-preset-swatch { width: 14px; height: 14px; border-radius: 4px; border: 1.5px solid rgba(255, 255, 255, 0.2); flex-shrink: 0; }
+        .besing-preset-label { font-size: 10px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .besing-custom-color-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+        .besing-custom-color-label { font-size: 10px; color: #94a3b8; }
+        .besing-input-sm { background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.1); color: #fff; border-radius: 6px; padding: 3px 6px; font-size: 11px; font-family: monospace; width: 65px; }
+        .besing-btn-sub-action { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); color: #94a3b8; font-size: 10px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease; }
+        .besing-btn-sub-action:hover { background: rgba(255, 255, 255, 0.09); color: #f1f5f9; }
+        .besing-unlocked-banner { display: flex; align-items: center; gap: 10px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 10px; padding: 10px; }
+        .besing-toggle-row-list { display: flex; flex-direction: column; gap: 8px; }
+        .besing-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
+        .besing-toggle-row:last-child { border-bottom: none; }
+        .besing-toggle-title { font-size: 11px; font-weight: 600; color: #f1f5f9; }
+        .besing-toggle-desc { font-size: 10px; color: #64748b; }
+        .besing-copy-test-box { margin-top: 10px; background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 8px; }
+        .besing-test-text { background: rgba(255, 255, 255, 0.04); border-radius: 6px; padding: 6px 8px; font-size: 11px; color: #38bdf8; margin-bottom: 6px; }
+        .besing-test-input { width: 100%; background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; padding: 6px 8px; font-size: 11px; color: #f1f5f9; outline: none; }
+        .besing-test-input:focus { border-color: #10b981; }
       `;
       shadow.appendChild(style);
     }

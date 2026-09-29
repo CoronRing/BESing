@@ -1,15 +1,25 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.1.0: Corner Folding, Desktop Pet Patterns, Non-blocking Anchored Bubble Menu, & Agent Sync
+ * Version 1.5.0
  */
 
 (function () {
   'use strict';
 
+  // 1. Unified Adapter Layer
   const BESAdapter = {
+    isGM: typeof GM_getValue === 'function' && typeof GM_setValue === 'function',
     isExt: typeof chrome !== 'undefined' && !!chrome.storage && !!chrome.storage.local,
 
     async get(key, defaultValue = null) {
+      if (this.isGM) {
+        try {
+          const val = GM_getValue(key, defaultValue);
+          return val !== undefined ? val : defaultValue;
+        } catch (e) {
+          return defaultValue;
+        }
+      }
       if (this.isExt) {
         return new Promise(resolve => {
           chrome.storage.local.get([key], res => {
@@ -26,6 +36,9 @@
     },
 
     async set(key, value) {
+      if (this.isGM) {
+        try { GM_setValue(key, value); return true; } catch (e) { return false; }
+      }
       if (this.isExt) {
         return new Promise(resolve => {
           chrome.storage.local.set({ [key]: value }, () => resolve(true));
@@ -37,13 +50,21 @@
       } catch (e) {
         return false;
       }
+    },
+
+    registerMenu(name, cb) {
+      if (typeof GM_registerMenuCommand === 'function') {
+        try { GM_registerMenuCommand(name, cb); } catch (e) {}
+      }
     }
   };
 
+  // 2. Storage Manager
   class BESStorage {
     constructor() {
-      this.blockedSites = [];
+      this.siteRules = {};
       this.enabledScripts = {};
+      this.scriptConfigs = {};
       this.widgetPos = null;
       this.settings = {
         theme: 'cyber-pet',
@@ -55,47 +76,206 @@
     }
 
     async init() {
-      this.blockedSites = await BESAdapter.get('blocked_sites', []);
+      this.siteRules = await BESAdapter.get('site_rules', {});
+      if (!this.siteRules || typeof this.siteRules !== 'object') this.siteRules = {};
+
+      // Migrate legacy blocked_sites array if present
+      const legacyBlocked = await BESAdapter.get('blocked_sites', []);
+      if (Array.isArray(legacyBlocked)) {
+        for (const item of legacyBlocked) {
+          const host = (item.host || '').toLowerCase().trim();
+          if (host) {
+            if (!this.siteRules[host]) this.siteRules[host] = { disableAll: true, scripts: {}, configs: {} };
+            else this.siteRules[host].disableAll = true;
+          }
+        }
+      }
+
       this.enabledScripts = await BESAdapter.get('enabled_scripts', {});
+      if (!this.enabledScripts || typeof this.enabledScripts !== 'object') this.enabledScripts = {};
+
+      this.scriptConfigs = await BESAdapter.get('script_configs', {});
+      if (!this.scriptConfigs || typeof this.scriptConfigs !== 'object') this.scriptConfigs = {};
+
       this.widgetPos = await BESAdapter.get('widget_position', null);
       const s = await BESAdapter.get('global_settings', {});
       this.settings = { ...this.settings, ...s };
-      if (!Array.isArray(this.blockedSites)) this.blockedSites = [];
+    }
+
+    getCurrentHost() {
+      return (window.location.hostname || 'localhost').toLowerCase().trim();
     }
 
     isCurrentBlocked() {
-      const cur = (window.location.hostname || '').toLowerCase().trim();
-      return this.blockedSites.some(b => b.host.toLowerCase() === cur);
+      return this.isSiteDisabledAll(this.getCurrentHost());
     }
 
-    async blockSite(host = window.location.hostname) {
-      const clean = (host || '').toLowerCase().trim();
-      if (!clean) return;
-      this.blockedSites = this.blockedSites.filter(b => b.host.toLowerCase() !== clean);
-      this.blockedSites.unshift({ host: clean, addedAt: Date.now() });
-      await BESAdapter.set('blocked_sites', this.blockedSites);
+    isSiteDisabledAll(host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      return !!(this.siteRules[h] && this.siteRules[h].disableAll);
     }
 
-    async unblockSite(host) {
-      const clean = (host || '').toLowerCase().trim();
-      this.blockedSites = this.blockedSites.filter(b => b.host.toLowerCase() !== clean);
-      await BESAdapter.set('blocked_sites', this.blockedSites);
+    async setSiteDisabledAll(host, disabled) {
+      const h = (host || this.getCurrentHost()).toLowerCase().trim();
+      if (!h) return;
+      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+      this.siteRules[h].disableAll = !!disabled;
+      this.cleanupSiteRule(h);
+      await BESAdapter.set('site_rules', this.siteRules);
+    }
+
+    // Mode: 'off' | 'site' | 'on'
+    getScriptMode(scriptId, host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      const siteConfig = this.siteRules[h];
+
+      // 1. Explicit site override to disabled
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] === false) {
+        return 'off';
+      }
+
+      // 2. Global ON
+      if (this.enabledScripts[scriptId]) {
+        return 'on';
+      }
+
+      // 3. Site Only ON
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] === true) {
+        return 'site';
+      }
+
+      return 'off';
+    }
+
+    isScriptActiveOnSite(scriptId, host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      if (this.isSiteDisabledAll(h)) return false;
+
+      const siteConfig = this.siteRules[h];
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] === false) {
+        return false;
+      }
+
+      if (this.enabledScripts[scriptId]) return true;
+
+      return !!(siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId]);
+    }
+
+    async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+      if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
+
+      if (mode === 'on') {
+        // Global ON: active across all sites, clear local site override
+        this.enabledScripts[scriptId] = true;
+        delete this.siteRules[h].scripts[scriptId];
+      } else if (mode === 'site') {
+        // Site Only: active ONLY on this site
+        this.enabledScripts[scriptId] = false;
+        this.siteRules[h].scripts[scriptId] = true;
+      } else {
+        // Turn OFF: wipe globally and for this site
+        this.enabledScripts[scriptId] = false;
+        delete this.siteRules[h].scripts[scriptId];
+        if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
+          delete this.siteRules[h].configs[scriptId];
+        }
+      }
+
+      this.cleanupSiteRule(h);
+      await BESAdapter.set('enabled_scripts', this.enabledScripts);
+      await BESAdapter.set('site_rules', this.siteRules);
+    }
+
+    // Script Configs: Site-Isolated vs Global
+    getScriptConfig(scriptId, host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      const mode = this.getScriptMode(scriptId, h);
+
+      if (mode === 'site') {
+        if (this.siteRules[h] && this.siteRules[h].configs && this.siteRules[h].configs[scriptId] !== undefined) {
+          return { ...(this.scriptConfigs[scriptId] || {}), ...this.siteRules[h].configs[scriptId] };
+        }
+        return { ...(this.scriptConfigs[scriptId] || {}) };
+      }
+
+      return { ...(this.scriptConfigs[scriptId] || {}) };
+    }
+
+    async setScriptConfig(scriptId, patch, host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      const mode = this.getScriptMode(scriptId, h);
+
+      if (mode === 'site') {
+        if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+        if (!this.siteRules[h].configs) this.siteRules[h].configs = {};
+        this.siteRules[h].configs[scriptId] = { ...(this.siteRules[h].configs[scriptId] || {}), ...patch };
+        await BESAdapter.set('site_rules', this.siteRules);
+      } else {
+        this.scriptConfigs[scriptId] = { ...(this.scriptConfigs[scriptId] || {}), ...patch };
+        await BESAdapter.set('script_configs', this.scriptConfigs);
+      }
+    }
+
+    async toggleSiteRule(host, ruleKey, val) {
+      const h = (host || '').toLowerCase().trim();
+      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+      if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
+
+      if (ruleKey === 'disableAll') {
+        this.siteRules[h].disableAll = !!val;
+      } else {
+        this.siteRules[h].scripts[ruleKey] = !!val;
+      }
+
+      this.cleanupSiteRule(h);
+      await BESAdapter.set('site_rules', this.siteRules);
+    }
+
+    cleanupSiteRule(host) {
+      const rule = this.siteRules[host];
+      if (!rule) return;
+      const hasScripts = rule.scripts && Object.keys(rule.scripts).length > 0;
+      const hasConfigs = rule.configs && Object.keys(rule.configs).length > 0;
+      if (!rule.disableAll && !hasScripts && !hasConfigs) {
+        delete this.siteRules[host];
+      }
+    }
+
+    async removeSiteRule(host, ruleKey = null) {
+      const h = (host || '').toLowerCase().trim();
+      if (!this.siteRules[h]) return;
+
+      if (!ruleKey || ruleKey === 'all') {
+        delete this.siteRules[h];
+      } else if (ruleKey === 'disableAll') {
+        this.siteRules[h].disableAll = false;
+        this.cleanupSiteRule(h);
+      } else if (this.siteRules[h].scripts) {
+        delete this.siteRules[h].scripts[ruleKey];
+        if (this.siteRules[h].configs) delete this.siteRules[h].configs[ruleKey];
+        this.cleanupSiteRule(h);
+      }
+
+      await BESAdapter.set('site_rules', this.siteRules);
+    }
+
+    getAllSiteRules() {
+      return this.siteRules || {};
     }
 
     getBlockedSites() {
-      return [...this.blockedSites].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+      return Object.keys(this.siteRules)
+        .filter(h => this.siteRules[h] && this.siteRules[h].disableAll)
+        .map(h => ({ host: h, addedAt: Date.now() }));
     }
 
-    isScriptEnabled(id, def = true) {
-      return this.enabledScripts[id] !== undefined ? Boolean(this.enabledScripts[id]) : def;
+    getWidgetPosition() {
+      return this.widgetPos;
     }
 
-    async setScriptEnabled(id, val) {
-      this.enabledScripts[id] = Boolean(val);
-      await BESAdapter.set('enabled_scripts', this.enabledScripts);
-    }
-
-    async setWidgetPos(pos) {
+    async setWidgetPosition(pos) {
       this.widgetPos = pos;
       await BESAdapter.set('widget_position', pos);
     }
@@ -109,384 +289,1043 @@
       await BESAdapter.set('global_settings', this.settings);
     }
 
-    async updateSettings(partial) {
-      this.settings = { ...this.settings, ...partial };
+    async updateSettings(patch) {
+      this.settings = { ...this.settings, ...patch };
       await BESAdapter.set('global_settings', this.settings);
-    }
-
-    async getCustomModules() {
-      return await BESAdapter.get('custom_modules_list', null);
-    }
-
-    async saveCustomModules(modules) {
-      const serializable = modules.map(m => ({
-        id: m.id,
-        name: m.name,
-        version: m.version,
-        description: m.description,
-        category: m.category,
-        author: m.author || 'BESing Team',
-        icon: m.icon,
-        code: m.init ? m.init.toString() : '',
-        destroyCode: m.destroy ? m.destroy.toString() : ''
-      }));
-      await BESAdapter.set('custom_modules_list', serializable);
     }
   }
 
-  const Modules = [
-    {
-      id: 'reading-assistant',
-      name: 'Reading Assistant',
-      version: '1.0.0',
-      description: 'Calculates word count, reading duration, and provides a quick jump heading outline.',
-      category: 'Productivity',
-      enabled: true,
-      icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>`,
-      _dom: null,
-      init() {
-        this.destroy();
-        const text = document.body ? document.body.innerText || '' : '';
-        const words = text.trim().split(/\s+/).filter(Boolean).length;
-        const readMin = Math.max(1, Math.ceil(words / 200));
-        const headings = Array.from(document.querySelectorAll('h1, h2, h3')).filter(h => h.innerText.trim()).slice(0, 15);
+  // 3. Pre-bundled Modules (Off by default, zero remote eval)
+  const BUILTIN_MODULES = [
+    // Module: Reading Assistant
+    (() => {
+      const mod = {
+    id: 'reading-assistant',
+    name: 'Reading Assistant',
+    version: '1.0.0',
+    description: 'Calculates word count, reading duration, and provides a quick jump heading outline.',
+    category: 'Productivity',
+    _dom: null,
 
-        const badge = document.createElement('div');
-        badge.id = 'besing-reading-assistant-badge';
-        badge.style.cssText = `position:fixed;bottom:24px;left:24px;z-index:999980;background:rgba(15,23,42,0.88);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.15);border-radius:9999px;padding:8px 16px;color:#e2e8f0;font-family:-apple-system,sans-serif;font-size:13px;font-weight:500;display:flex;align-items:center;gap:10px;box-shadow:0 8px 24px rgba(0,0,0,0.35);cursor:pointer;user-select:none;transition:all 0.2s ease;`;
-        badge.innerHTML = `<span style="display:flex;align-items:center;gap:5px;color:#38bdf8;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>${readMin} min</span><span style="color:rgba(255,255,255,0.25);">|</span><span style="color:#94a3b8;">${words.toLocaleString()} words</span>${headings.length ? `<span style="background:rgba(56,189,248,0.15);color:#38bdf8;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600;">${headings.length} headings</span>` : ''}`;
+    init() {
+      this.destroy();
+      const text = document.body ? document.body.innerText || '' : '';
+      const words = text.trim().split(/\s+/).filter(Boolean).length;
+      const readMin = Math.max(1, Math.ceil(words / 200));
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3')).filter(h => h.innerText.trim()).slice(0, 15);
 
-        let popover = null;
-        badge.onclick = (e) => {
-          e.stopPropagation();
-          if (popover) { popover.remove(); popover = null; return; }
-          if (!headings.length) return;
-          popover = document.createElement('div');
-          popover.style.cssText = `position:fixed;bottom:74px;left:24px;width:300px;max-height:360px;overflow-y:auto;background:#0f172a;border:1px solid rgba(255,255,255,0.15);border-radius:12px;padding:14px;color:#f1f5f9;font-family:-apple-system,sans-serif;font-size:13px;box-shadow:0 16px 36px rgba(0,0,0,0.5);z-index:999981;`;
-          popover.innerHTML = '<div style="font-weight:600;margin-bottom:8px;color:#38bdf8;font-size:12px;text-transform:uppercase;">Document Outline</div>';
-          headings.forEach(h => {
-            const item = document.createElement('div');
-            const level = parseInt(h.tagName[1], 10);
-            item.style.cssText = `padding:5px 8px;margin-bottom:2px;border-radius:6px;cursor:pointer;padding-left:${(level-1)*12 + 6}px;color:${level===1?'#f8fafc':(level===2?'#cbd5e1':'#94a3b8')};font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
-            item.textContent = h.innerText.trim();
-            item.onmouseenter = () => item.style.background = 'rgba(255,255,255,0.08)';
-            item.onmouseleave = () => item.style.background = 'transparent';
-            item.onclick = (ev) => {
-              ev.stopPropagation();
-              h.scrollIntoView({ behavior: 'smooth', block: 'start' });
-              popover.remove(); popover = null;
-            };
-            popover.appendChild(item);
-          });
-          document.body.appendChild(popover);
-          const closeDoc = () => { if (popover) { popover.remove(); popover = null; } document.removeEventListener('click', closeDoc); };
-          setTimeout(() => document.addEventListener('click', closeDoc), 50);
-        };
+      const badge = document.createElement('div');
+      badge.id = 'besing-reading-assistant-badge';
+      badge.style.cssText = `position:fixed;bottom:24px;left:24px;z-index:999980;background:rgba(15,23,42,0.88);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.15);border-radius:9999px;padding:8px 16px;color:#e2e8f0;font-family:-apple-system,sans-serif;font-size:13px;font-weight:500;display:flex;align-items:center;gap:10px;box-shadow:0 8px 24px rgba(0,0,0,0.35);cursor:pointer;user-select:none;transition:all 0.2s ease;`;
+      badge.innerHTML = `<span style="display:flex;align-items:center;gap:5px;color:#38bdf8;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>${readMin} min</span><span style="color:rgba(255,255,255,0.25);">|</span><span style="color:#94a3b8;">${words.toLocaleString()} words</span>${headings.length ? `<span style="background:rgba(56,189,248,0.15);color:#38bdf8;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600;">${headings.length} headings</span>` : ''}`;
 
-        document.body.appendChild(badge);
-        this._dom = badge;
-      },
-      destroy() {
-        if (this._dom) { this._dom.remove(); this._dom = null; }
-        const b = document.getElementById('besing-reading-assistant-badge');
-        if (b) b.remove();
-      }
+      let popover = null;
+      badge.onclick = (e) => {
+        e.stopPropagation();
+        if (popover) { popover.remove(); popover = null; return; }
+        if (!headings.length) return;
+        popover = document.createElement('div');
+        popover.style.cssText = `position:fixed;bottom:74px;left:24px;width:300px;max-height:360px;overflow-y:auto;background:#0f172a;border:1px solid rgba(255,255,255,0.15);border-radius:12px;padding:14px;color:#f1f5f9;font-family:-apple-system,sans-serif;font-size:13px;box-shadow:0 16px 36px rgba(0,0,0,0.5);z-index:999981;`;
+        popover.innerHTML = '<div style="font-weight:600;margin-bottom:8px;color:#38bdf8;font-size:12px;text-transform:uppercase;">Document Outline</div>';
+        headings.forEach(h => {
+          const item = document.createElement('div');
+          const level = parseInt(h.tagName[1], 10);
+          item.style.cssText = `padding:5px 8px;margin-bottom:2px;border-radius:6px;cursor:pointer;padding-left:${(level-1)*12 + 6}px;color:${level===1?'#f8fafc':(level===2?'#cbd5e1':'#94a3b8')};font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
+          item.textContent = h.innerText.trim();
+          item.onmouseenter = () => item.style.background = 'rgba(255,255,255,0.08)';
+          item.onmouseleave = () => item.style.background = 'transparent';
+          item.onclick = (ev) => {
+            ev.stopPropagation();
+            h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            popover.remove(); popover = null;
+          };
+          popover.appendChild(item);
+        });
+        document.body.appendChild(popover);
+        const closeDoc = () => { if (popover) { popover.remove(); popover = null; } document.removeEventListener('click', closeDoc); };
+        setTimeout(() => document.addEventListener('click', closeDoc), 50);
+      };
+
+      document.body.appendChild(badge);
+      this._dom = badge;
     },
-    {
-      id: 'dark-dimmer',
-      name: 'Night Comfort Dimmer',
-      version: '1.0.0',
-      description: 'Gentle screen dimming filter and tint to soothe eyes during late hours.',
-      category: 'Accessibility',
-      enabled: false,
-      icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`,
-      _node: null,
-      init() {
-        this.destroy();
-        const layer = document.createElement('div');
-        layer.id = 'besing-dark-dimmer-layer';
-        layer.style.cssText = `position:fixed;inset:0;background:rgba(15,23,42,0.32);backdrop-filter:contrast(0.95) brightness(0.9);pointer-events:none;z-index:999970;transition:opacity 0.3s ease;`;
-        document.documentElement.appendChild(layer);
-        this._node = layer;
-      },
-      destroy() {
-        if (this._node) { this._node.remove(); this._node = null; }
-        const l = document.getElementById('besing-dark-dimmer-layer');
-        if (l) l.remove();
-      }
+
+    destroy() {
+      if (this._dom) { this._dom.remove(); this._dom = null; }
+      const b = document.getElementById('besing-reading-assistant-badge');
+      if (b) b.remove();
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z\"></path><path d=\"M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Productivity";
+      return mod;
+    })(),
+
+    // Module: Night Comfort Dimmer
+    (() => {
+      const mod = {
+    id: 'dark-dimmer',
+    name: 'Night Comfort Dimmer',
+    version: '1.0.0',
+    description: 'Gentle screen dimming filter and tint to soothe eyes during late hours.',
+    category: 'Accessibility',
+    _node: null,
+
+    init() {
+      this.destroy();
+      const layer = document.createElement('div');
+      layer.id = 'besing-dark-dimmer-layer';
+      layer.style.cssText = `position:fixed;inset:0;background:rgba(15,23,42,0.32);backdrop-filter:contrast(0.95) brightness(0.9);pointer-events:none;z-index:999970;transition:opacity 0.3s ease;`;
+      document.documentElement.appendChild(layer);
+      this._node = layer;
     },
-    {
-      id: 'quick-copy',
-      name: 'Markdown Link Copier',
-      version: '1.0.0',
-      description: 'Press Alt+C to copy current page title & URL formatted as Markdown [Title](URL).',
-      category: 'Tools',
-      enabled: true,
-      icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>`,
-      _handler: null,
-      init() {
-        this.destroy();
-        this._handler = (e) => {
-          if (e.altKey && (e.key === 'c' || e.key === 'C')) {
-            e.preventDefault();
-            const title = (document.title || 'Untitled').replace(/[\[\]]/g, '');
-            const md = `[${title}](${window.location.href})`;
-            if (navigator.clipboard?.writeText) {
-              navigator.clipboard.writeText(md).then(() => this.toast(title));
-            }
+
+    destroy() {
+      if (this._node) { this._node.remove(); this._node = null; }
+      const l = document.getElementById('besing-dark-dimmer-layer');
+      if (l) l.remove();
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Accessibility";
+      return mod;
+    })(),
+
+    // Module: Text Size Enhancer
+    (() => {
+      const mod = {
+    id: 'text-size-control',
+    name: 'Text Size Enhancer',
+    version: '1.0.0',
+    description: 'Enlarges text and page zoom (125%, 150%, 200%+) so small website fonts become easily readable.',
+    category: 'Accessibility',
+    _styleNode: null,
+    _config: {
+      fontSizePercent: 125,
+      mode: 'zoom'
+    },
+
+    init(cfg) {
+      this.destroy();
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+      this.applySize();
+    },
+
+    onConfigChange(cfg) {
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+      this.applySize();
+    },
+
+    applySize() {
+      const percent = Math.max(70, Math.min(400, Number(this._config.fontSizePercent) || 125));
+      const scale = percent / 100;
+
+      // Apply zoom to documentElement for full layout and text scaling
+      document.documentElement.style.zoom = scale;
+
+      // Counter-zoom BESing root so manager and widget remain crisp 1x size
+      if (!this._styleNode) {
+        const style = document.createElement('style');
+        style.id = 'besing-text-size-style';
+        (document.head || document.documentElement).appendChild(style);
+        this._styleNode = style;
+      }
+
+      const counterScale = (1 / scale).toFixed(4);
+      this._styleNode.textContent = `
+        #__besing_root__ {
+          zoom: ${counterScale} !important;
+        }
+      `;
+    },
+
+    destroy() {
+      document.documentElement.style.zoom = '';
+      if (this._styleNode) {
+        this._styleNode.remove();
+        this._styleNode = null;
+      }
+      const s = document.getElementById('besing-text-size-style');
+      if (s) s.remove();
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M4 7V4h16v3M9 20h6M12 4v16\"/></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Accessibility";
+      return mod;
+    })(),
+
+    // Module: Force Allow Copy & Paste
+    (() => {
+      const mod = {
+    id: 'force-copy',
+    name: 'Force Allow Copy & Paste',
+    version: '1.0.0',
+    description: 'Enables text selection, copy, cut, paste, and right-click on sites that attempt to disable them.',
+    category: 'Tools',
+    _styleNode: null,
+    _listeners: [],
+    _interval: null,
+    _config: {
+      allowSelect: true,
+      allowCopy: true,
+      allowPaste: true,
+      allowContextMenu: true
+    },
+
+    init(cfg) {
+      this.destroy();
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+
+      // 1. Force enable CSS user-select
+      this._injectStyle();
+
+      // 2. Attach capture listeners to block website event prevention
+      this._attachCaptureInterceptors();
+
+      // 3. Clear legacy inline event handlers
+      this._clearInlineHandlers();
+
+      // 4. Periodic check to neutralize dynamic re-binding
+      this._interval = setInterval(() => this._clearInlineHandlers(), 2000);
+    },
+
+    _injectStyle() {
+      if (!this._styleNode) {
+        const style = document.createElement('style');
+        style.id = 'besing-force-copy-style';
+        style.textContent = `
+          *, *::before, *::after {
+            -webkit-user-select: text !important;
+            -moz-user-select: text !important;
+            -ms-user-select: text !important;
+            user-select: text !important;
+            -webkit-touch-callout: default !important;
           }
-        };
-        window.addEventListener('keydown', this._handler);
-      },
-      toast(title) {
-        const t = document.createElement('div');
-        t.style.cssText = `position:fixed;top:24px;right:24px;background:#0f172a;color:#38bdf8;border:1px solid rgba(56,189,248,0.4);padding:10px 18px;border-radius:10px;font-family:-apple-system,sans-serif;font-size:13px;font-weight:500;box-shadow:0 10px 25px rgba(0,0,0,0.5);z-index:999999;display:flex;align-items:center;gap:8px;`;
-        t.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Copied Markdown: "${title.slice(0, 25)}..."</span>`;
-        document.body.appendChild(t);
-        setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s ease'; setTimeout(() => t.remove(), 300); }, 2000);
-      },
-      destroy() {
-        if (this._handler) {
-          window.removeEventListener('keydown', this._handler);
-          this._handler = null;
+          input, textarea, [contenteditable="true"] {
+            -webkit-user-select: auto !important;
+            user-select: auto !important;
+          }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+        this._styleNode = style;
+      }
+    },
+
+    _attachCaptureInterceptors() {
+      const handleCapture = (e) => {
+        const type = e.type;
+        if (type === 'copy' || type === 'cut') {
+          if (this._config.allowCopy) e.stopImmediatePropagation();
+        } else if (type === 'paste') {
+          if (this._config.allowPaste) e.stopImmediatePropagation();
+        } else if (type === 'contextmenu') {
+          if (this._config.allowContextMenu) e.stopImmediatePropagation();
+        } else if (type === 'selectstart' || type === 'selectionchange') {
+          if (this._config.allowSelect) e.stopImmediatePropagation();
+        }
+      };
+
+      const handleKeydown = (e) => {
+        if (!this._config.allowCopy) return;
+        if ((e.ctrlKey || e.metaKey) && ['c', 'v', 'x', 'a', 'C', 'V', 'X', 'A'].includes(e.key)) {
+          e.stopImmediatePropagation();
+        }
+      };
+
+      const events = ['copy', 'cut', 'paste', 'contextmenu', 'selectstart', 'dragstart'];
+      events.forEach(evt => {
+        window.addEventListener(evt, handleCapture, { capture: true, passive: false });
+        document.addEventListener(evt, handleCapture, { capture: true, passive: false });
+        this._listeners.push({ target: window, event: evt, fn: handleCapture });
+        this._listeners.push({ target: document, event: evt, fn: handleCapture });
+      });
+
+      window.addEventListener('keydown', handleKeydown, { capture: true, passive: false });
+      this._listeners.push({ target: window, event: 'keydown', fn: handleKeydown });
+    },
+
+    _clearInlineHandlers() {
+      const events = ['oncopy', 'oncut', 'onpaste', 'oncontextmenu', 'onselectstart', 'ondragstart', 'onmousedown', 'onmouseup'];
+      events.forEach(evt => {
+        try {
+          if (document[evt]) document[evt] = null;
+          if (document.body && document.body[evt]) document.body[evt] = null;
+        } catch (e) {}
+      });
+    },
+
+    onConfigChange(cfg) {
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+    },
+
+    destroy() {
+      if (this._interval) {
+        clearInterval(this._interval);
+        this._interval = null;
+      }
+      this._listeners.forEach(l => {
+        try { l.target.removeEventListener(l.event, l.fn, { capture: true }); } catch (e) {}
+      });
+      this._listeners = [];
+
+      if (this._styleNode) {
+        this._styleNode.remove();
+        this._styleNode = null;
+      }
+      const s = document.getElementById('besing-force-copy-style');
+      if (s) s.remove();
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2\"></path><rect x=\"8\" y=\"2\" width=\"8\" height=\"4\" rx=\"1\" ry=\"1\"></rect><path d=\"M9 14h6M9 18h4\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Tools";
+      return mod;
+    })(),
+
+    // Module: Page Color & Brightness
+    (() => {
+      const mod = {
+    id: 'color-change',
+    name: 'Page Color & Brightness',
+    version: '1.1.0',
+    description: 'Adjusts background color presets (Eye Protect, Old Paper, Dark) and site background brightness.',
+    category: 'Visual',
+    _prevBodyBg: null,
+    _prevHtmlBg: null,
+    _presetOverlay: null,
+    _brightnessOverlay: null,
+    _config: {
+      brightness: 0, // -100 (lighten) to +100 (deepen / darken)
+      preset: 'eye-protect', // 'none' | 'eye-protect' | 'old-paper' | 'dark' | 'soft-sepia' | 'cool-mint' | 'custom'
+      customColor: '#cce8cf'
+    },
+
+    PRESETS: {
+      'none': { name: 'Original', color: 'transparent', overlay: 'transparent' },
+      'eye-protect': { name: 'Eye Protect', color: '#cce8cf', overlay: 'rgba(204, 232, 207, 0.45)' },
+      'old-paper': { name: 'Old Paper', color: '#f4ecd8', overlay: 'rgba(244, 236, 216, 0.48)' },
+      'dark': { name: 'Dark Mode', color: '#18181b', overlay: 'rgba(24, 24, 27, 0.65)' },
+      'soft-sepia': { name: 'Soft Sepia', color: '#eee4cd', overlay: 'rgba(238, 228, 205, 0.42)' },
+      'cool-mint': { name: 'Cool Mint', color: '#e0f2fe', overlay: 'rgba(224, 242, 254, 0.42)' }
+    },
+
+    init(cfg) {
+      this.destroy();
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+
+      this._prevBodyBg = document.body ? document.body.style.backgroundColor : null;
+      this._prevHtmlBg = document.documentElement ? document.documentElement.style.backgroundColor : null;
+
+      this._createOverlays();
+      this.applyConfig();
+    },
+
+    _createOverlays() {
+      // 1. Preset tint overlay (z-index 2147483625)
+      if (!this._presetOverlay) {
+        const pLayer = document.createElement('div');
+        pLayer.id = 'besing-bg-preset-overlay';
+        pLayer.style.cssText = `
+          position: fixed !important;
+          inset: 0 !important;
+          pointer-events: none !important;
+          z-index: 2147483625 !important;
+          transition: background-color 0.2s ease, opacity 0.2s ease !important;
+        `;
+        (document.body || document.documentElement).appendChild(pLayer);
+        this._presetOverlay = pLayer;
+      }
+
+      // 2. Brightness dragger overlay (z-index 2147483630, above preset tint but below BESing root 2147483642)
+      if (!this._brightnessOverlay) {
+        const bLayer = document.createElement('div');
+        bLayer.id = 'besing-bg-brightness-overlay';
+        bLayer.style.cssText = `
+          position: fixed !important;
+          inset: 0 !important;
+          pointer-events: none !important;
+          z-index: 2147483630 !important;
+          transition: background-color 0.15s ease, opacity 0.15s ease !important;
+        `;
+        (document.body || document.documentElement).appendChild(bLayer);
+        this._brightnessOverlay = bLayer;
+      }
+    },
+
+    onConfigChange(cfg) {
+      if (cfg && typeof cfg === 'object') {
+        this._config = { ...this._config, ...cfg };
+      }
+      this.applyConfig();
+    },
+
+    applyConfig() {
+      this._createOverlays();
+
+      const presetKey = this._config.preset || 'none';
+      let presetColor = 'transparent';
+      let presetOverlayColor = 'transparent';
+
+      if (presetKey === 'custom') {
+        presetColor = this._config.customColor || '#cce8cf';
+        presetOverlayColor = presetColor;
+      } else if (this.PRESETS[presetKey]) {
+        presetColor = this.PRESETS[presetKey].color;
+        presetOverlayColor = this.PRESETS[presetKey].overlay;
+      }
+
+      // Apply Preset
+      if (presetKey !== 'none') {
+        if (document.documentElement) document.documentElement.style.backgroundColor = presetColor;
+        if (document.body) document.body.style.backgroundColor = presetColor;
+        if (this._presetOverlay) {
+          this._presetOverlay.style.backgroundColor = presetOverlayColor;
+          this._presetOverlay.style.mixBlendMode = presetKey === 'dark' ? 'multiply' : 'multiply';
+        }
+      } else {
+        if (document.documentElement) document.documentElement.style.backgroundColor = this._prevHtmlBg || '';
+        if (document.body) document.body.style.backgroundColor = this._prevBodyBg || '';
+        if (this._presetOverlay) {
+          this._presetOverlay.style.backgroundColor = 'transparent';
+        }
+      }
+
+      // Apply Brightness Dragger on top of site's current background
+      // Dragging left (< 0): makes it lighter (e.g., blue -> light blue)
+      // Dragging right (> 0): makes it deep and eventually dark (e.g., blue -> deep navy -> dark)
+      const bVal = Math.max(-100, Math.min(100, Number(this._config.brightness) || 0));
+      if (this._brightnessOverlay) {
+        if (bVal < 0) {
+          // Lighter: white overlay with soft screen / mix blend
+          const factor = Math.min(0.88, (Math.abs(bVal) / 100) * 0.95).toFixed(3);
+          this._brightnessOverlay.style.backgroundColor = `rgba(255, 255, 255, ${factor})`;
+          this._brightnessOverlay.style.mixBlendMode = 'screen';
+        } else if (bVal > 0) {
+          // Deeper / Darker: black overlay with multiply / darkening blend
+          const factor = Math.min(0.92, (bVal / 100) * 0.96).toFixed(3);
+          this._brightnessOverlay.style.backgroundColor = `rgba(0, 0, 0, ${factor})`;
+          this._brightnessOverlay.style.mixBlendMode = 'multiply';
+        } else {
+          this._brightnessOverlay.style.backgroundColor = 'transparent';
         }
       }
     },
-    {
-      id: 'color-change',
-      name: 'Color Change',
-      version: '1.0.0',
-      description: 'Changes page background color to red.',
-      category: 'Visual',
-      enabled: true,
-      icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="#ef4444" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>`,
-      _prevBg: null,
-      init() {
-        this._prevBg = document.body.style.backgroundColor;
-        document.body.style.backgroundColor = 'red';
-      },
-      destroy() {
-        document.body.style.backgroundColor = this._prevBg || '';
-        this._prevBg = null;
+
+    destroy() {
+      if (document.documentElement) {
+        document.documentElement.style.backgroundColor = this._prevHtmlBg || '';
+      }
+      if (document.body) {
+        document.body.style.backgroundColor = this._prevBodyBg || '';
+      }
+      if (this._presetOverlay) {
+        this._presetOverlay.remove();
+        this._presetOverlay = null;
+      }
+      if (this._brightnessOverlay) {
+        this._brightnessOverlay.remove();
+        this._brightnessOverlay = null;
+      }
+      const p1 = document.getElementById('besing-bg-preset-overlay');
+      if (p1) p1.remove();
+      const p2 = document.getElementById('besing-bg-brightness-overlay');
+      if (p2) p2.remove();
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"5\"/><path d=\"M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42\"/></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Visual";
+      return mod;
+    })(),
+
+    // Module: Markdown Link Copier
+    (() => {
+      const mod = {
+    id: 'quick-copy',
+    name: 'Markdown Link Copier',
+    version: '1.0.0',
+    description: 'Press Alt+C to copy current page title & URL formatted as Markdown [Title](URL).',
+    category: 'Tools',
+    _handler: null,
+
+    init() {
+      this.destroy();
+      this._handler = (e) => {
+        if (e.altKey && (e.key === 'c' || e.key === 'C')) {
+          e.preventDefault();
+          const title = (document.title || 'Untitled').replace(/[\[\]]/g, '');
+          const md = `[${title}](${window.location.href})`;
+          if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(md).then(() => this.toast(title));
+          }
+        }
+      };
+      window.addEventListener('keydown', this._handler);
+    },
+
+    toast(title) {
+      const t = document.createElement('div');
+      t.style.cssText = `position:fixed;top:24px;right:24px;background:#0f172a;color:#38bdf8;border:1px solid rgba(56,189,248,0.4);padding:10px 18px;border-radius:10px;font-family:-apple-system,sans-serif;font-size:13px;font-weight:500;box-shadow:0 10px 25px rgba(0,0,0,0.5);z-index:999999;display:flex;align-items:center;gap:8px;`;
+      t.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Copied Markdown: "${title.slice(0, 25)}..."</span>`;
+      document.body.appendChild(t);
+      setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s ease'; setTimeout(() => t.remove(), 300); }, 2000);
+    },
+
+    destroy() {
+      if (this._handler) {
+        window.removeEventListener('keydown', this._handler);
+        this._handler = null;
       }
     }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71\"></path><path d=\"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Tools";
+      return mod;
+    })(),
+
+    // Module: Ad Cleaner Lite
+    (() => {
+      const mod = {
+    id: 'ad-cleaner',
+    name: 'Ad Cleaner Lite',
+    version: '1.0.0',
+    description: 'Hides intrusive floating overlays, sticky marketing banners, and cookie popups.',
+    category: 'Privacy',
+    _styleEl: null,
+
+    init() {
+      this.destroy();
+      const style = document.createElement('style');
+      style.id = 'besing-ad-cleaner-style';
+      style.textContent = `
+        [class*="cookie-banner"], [id*="cookie-banner"],
+        [class*="consent-banner"], [id*="consent-banner"],
+        [class*="popup-overlay"]:not(#__besing_root__ *),
+        [class*="newsletter-popup"], [id*="newsletter-modal"],
+        .ad-banner, .ads-placement {
+          display: none !important;
+        }
+      `;
+      document.head.appendChild(style);
+      this._styleEl = style;
+    },
+
+    destroy() {
+      if (this._styleEl) {
+        this._styleEl.remove();
+        this._styleEl = null;
+      }
+      const el = document.getElementById('besing-ad-cleaner-style');
+      if (el) el.remove();
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Privacy";
+      return mod;
+    })(),
+
+    // Module: Prevent Redirect
+    (() => {
+      const mod = {
+    id: 'prevent-redirect',
+    name: 'Prevent Redirect',
+    version: '1.1.0',
+    description: 'Strictly blocks automatic redirects, new tab popups, and external link clicks. Returns mock window to satisfy callers so ad scripts do not retry.',
+    category: 'Security',
+    _origOpen: null,
+    _origUnsafeOpen: null,
+    _origAnchorClick: null,
+    _origAssign: null,
+    _origReplace: null,
+    _clickHandler: null,
+    _auxClickHandler: null,
+    _injectedScript: null,
+
+    _isSameHost(targetUrl) {
+      if (!targetUrl || typeof targetUrl !== 'string') return true;
+      const trimmed = targetUrl.trim();
+      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('javascript:') || trimmed.startsWith('mailto:') || trimmed.startsWith('tel:')) {
+        return true;
+      }
+      try {
+        const parsed = new URL(trimmed, window.location.href);
+        if (parsed.protocol === 'javascript:' || parsed.protocol === 'about:') return true;
+        const curHost = (window.location.hostname || '').toLowerCase();
+        const targetHost = (parsed.hostname || '').toLowerCase();
+        if (!targetHost || !curHost) return true;
+        return targetHost === curHost || targetHost.endsWith('.' + curHost) || curHost.endsWith('.' + targetHost);
+      } catch (e) {
+        return false;
+      }
+    },
+
+    _createFakeWindow(url) {
+      const fake = {
+        closed: false,
+        name: '',
+        opener: window,
+        parent: window,
+        top: window,
+        frames: [],
+        length: 0,
+        close() { this.closed = true; },
+        focus() {},
+        blur() {},
+        postMessage() {},
+        print() {},
+        stop() {},
+        location: {
+          href: url || 'about:blank',
+          hash: '',
+          host: '',
+          hostname: '',
+          origin: '',
+          pathname: '',
+          port: '',
+          protocol: 'https:',
+          search: '',
+          assign() {},
+          replace() {},
+          reload() {},
+          toString() { return url || 'about:blank'; }
+        },
+        document: {
+          open() { return this; },
+          close() {},
+          write() {},
+          writeln() {},
+          createElement(tag) { return document.createElement(tag || 'div'); }
+        },
+        addEventListener() {},
+        removeEventListener() {},
+        dispatchEvent() { return true; }
+      };
+      fake.window = fake;
+      return fake;
+    },
+
+    notifyBlocked(targetUrl, reason) {
+      console.warn(`[BESing Prevent Redirect] Blocked ${reason}:`, targetUrl);
+      try {
+        window.dispatchEvent(new CustomEvent('besing:redirect-blocked', {
+          detail: { url: targetUrl, reason }
+        }));
+      } catch (e) {}
+    },
+
+    init() {
+      this.destroy();
+      const self = this;
+      const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+
+      // 1. Hook window.open in current scope and unsafeWindow
+      const hookedOpen = function (url, target, features) {
+        const isExt = url && !self._isSameHost(url);
+        const isNewTab = target === '_blank' || target === '_new' || !target;
+
+        if (isExt || isNewTab) {
+          self.notifyBlocked(url || 'about:blank', isExt ? 'external window.open redirect' : 'new tab popup');
+          // Return a realistic mock window object to satisfy ad caller so it considers the action successful
+          return self._createFakeWindow(url);
+        }
+
+        const orig = self._origUnsafeOpen || self._origOpen || window.open;
+        try {
+          return orig.call(this || window, url, target, features);
+        } catch (e) {
+          return self._createFakeWindow(url);
+        }
+      };
+
+      this._origOpen = window.open;
+      window.open = hookedOpen;
+      if (unsafeWin && unsafeWin !== window) {
+        this._origUnsafeOpen = unsafeWin.open;
+        try { unsafeWin.open = hookedOpen; } catch (e) {}
+      }
+
+      // 2. Hook HTMLAnchorElement.prototype.click
+      try {
+        const anchorProto = (unsafeWin.HTMLAnchorElement || HTMLAnchorElement).prototype;
+        this._origAnchorClick = anchorProto.click;
+        anchorProto.click = function () {
+          const href = this.getAttribute('href') || this.href;
+          const target = (this.getAttribute('target') || this.target || '').toLowerCase();
+          const isExt = href && !self._isSameHost(href);
+          const isNewTab = target === '_blank' || target === '_new';
+
+          if (isExt || isNewTab) {
+            self.notifyBlocked(href || '', 'programmatic anchor.click()');
+            return true; // Return success so calling script proceeds without error
+          }
+          return self._origAnchorClick.call(this);
+        };
+      } catch (e) {}
+
+      // 3. Hook Location.prototype.assign and replace
+      try {
+        const locProto = (unsafeWin.Location || Location).prototype;
+        if (locProto && locProto.assign) {
+          this._origAssign = locProto.assign;
+          locProto.assign = function (url) {
+            if (url && !self._isSameHost(url)) {
+              self.notifyBlocked(url, 'location.assign redirect');
+              return;
+            }
+            return self._origAssign.call(this, url);
+          };
+        }
+      } catch (e) {}
+
+      try {
+        const locProto = (unsafeWin.Location || Location).prototype;
+        if (locProto && locProto.replace) {
+          this._origReplace = locProto.replace;
+          locProto.replace = function (url) {
+            if (url && !self._isSameHost(url)) {
+              self.notifyBlocked(url, 'location.replace redirect');
+              return;
+            }
+            return self._origReplace.call(this, url);
+          };
+        }
+      } catch (e) {}
+
+      // 4. Capture and block link clicks (both user clicks and script-triggered clicks)
+      this._clickHandler = function (e) {
+        const link = e.target && e.target.closest ? e.target.closest('a') : null;
+        if (!link) return;
+        const href = link.getAttribute('href') || link.href;
+        if (!href) return;
+        const trimmed = href.trim();
+        if (trimmed.startsWith('#') || trimmed.startsWith('javascript:') || trimmed.startsWith('mailto:') || trimmed.startsWith('tel:')) {
+          return;
+        }
+
+        const target = (link.getAttribute('target') || link.target || '').toLowerCase();
+        const isExternal = !self._isSameHost(href);
+        const isNewTab = target === '_blank' || target === '_new' || e.ctrlKey || e.metaKey || e.shiftKey;
+
+        if (isExternal || isNewTab) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          self.notifyBlocked(href, isNewTab ? 'new tab link click' : 'external redirect link click');
+        }
+      };
+
+      this._auxClickHandler = function (e) {
+        // Middle click
+        if (e.button === 1) {
+          const link = e.target && e.target.closest ? e.target.closest('a') : null;
+          if (link) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            self.notifyBlocked(link.href || '', 'middle-click new tab');
+          }
+        }
+      };
+
+      window.addEventListener('click', this._clickHandler, true);
+      document.addEventListener('click', this._clickHandler, true);
+      window.addEventListener('auxclick', this._auxClickHandler, true);
+      document.addEventListener('auxclick', this._auxClickHandler, true);
+
+      // 5. Inject page-context guard for page scripts
+      try {
+        const pageScript = document.createElement('script');
+        pageScript.id = '__besing_pr_guard__';
+        pageScript.textContent = `
+          (function() {
+            if (window.__besing_pr_active__) return;
+            window.__besing_pr_active__ = true;
+            var curHost = (window.location.hostname || '').toLowerCase();
+            function isSame(u) {
+              if (!u || typeof u !== 'string') return true;
+              var t = u.trim();
+              if (!t || t.indexOf('#') === 0 || t.indexOf('javascript:') === 0) return true;
+              try {
+                var p = new URL(t, window.location.href);
+                var h = (p.hostname || '').toLowerCase();
+                return h === curHost || h.endsWith('.' + curHost) || curHost.endsWith('.' + h);
+              } catch(e) { return false; }
+            }
+            function fakeWin(u) {
+              var f = {
+                closed: false, name: '', opener: window, parent: window, top: window, frames: [], length: 0,
+                close: function() { this.closed = true; }, focus: function(){}, blur: function(){},
+                postMessage: function(){}, print: function(){}, stop: function(){},
+                location: { href: u || 'about:blank', assign: function(){}, replace: function(){}, reload: function(){} },
+                document: { open: function(){ return this; }, close: function(){}, write: function(){}, writeln: function(){} }
+              };
+              f.window = f;
+              return f;
+            }
+            var origOpen = window.open;
+            window.open = function(url, target, feat) {
+              var isExt = url && !isSame(url);
+              var isNew = target === '_blank' || target === '_new' || !target;
+              if (isExt || isNew) {
+                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script window.open' } }));
+                return fakeWin(url);
+              }
+              return origOpen.call(this || window, url, target, feat);
+            };
+          })();
+        `;
+        (document.head || document.documentElement).appendChild(pageScript);
+        pageScript.remove();
+      } catch (e) {}
+    },
+
+    destroy() {
+      const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+      if (this._origOpen) {
+        window.open = this._origOpen;
+        this._origOpen = null;
+      }
+      if (this._origUnsafeOpen && unsafeWin) {
+        try { unsafeWin.open = this._origUnsafeOpen; } catch (e) {}
+        this._origUnsafeOpen = null;
+      }
+      if (this._origAnchorClick) {
+        try {
+          const anchorProto = (unsafeWin.HTMLAnchorElement || HTMLAnchorElement).prototype;
+          anchorProto.click = this._origAnchorClick;
+        } catch (e) {}
+        this._origAnchorClick = null;
+      }
+      if (this._origAssign) {
+        try {
+          const locProto = (unsafeWin.Location || Location).prototype;
+          locProto.assign = this._origAssign;
+        } catch (e) {}
+        this._origAssign = null;
+      }
+      if (this._origReplace) {
+        try {
+          const locProto = (unsafeWin.Location || Location).prototype;
+          locProto.replace = this._origReplace;
+        } catch (e) {}
+        this._origReplace = null;
+      }
+      if (this._clickHandler) {
+        window.removeEventListener('click', this._clickHandler, true);
+        document.removeEventListener('click', this._clickHandler, true);
+        this._clickHandler = null;
+      }
+      if (this._auxClickHandler) {
+        window.removeEventListener('auxclick', this._auxClickHandler, true);
+        document.removeEventListener('auxclick', this._auxClickHandler, true);
+        this._auxClickHandler = null;
+      }
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><rect x=\"3\" y=\"11\" width=\"18\" height=\"11\" rx=\"2\" ry=\"2\"></rect><path d=\"M7 11V7a5 5 0 0 1 10 0v4\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Security";
+      return mod;
+    })()
   ];
 
-  // Automated Self-Update Engine
+  // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    constructor({ currentVersion = '1.4.0', storage = null, onUpdateFound = null }) {
-      this.currentVersion = currentVersion;
-      this.storage = storage;
-      this.onUpdateFound = onUpdateFound;
-      this.isChecking = false;
-      this.lastCheckResult = null;
+    static CURRENT_VERSION = '1.5.0';
 
-      this.channels = {
-        github: {
-          id: 'github',
-          name: 'GitHub (Bleeding-Edge / Instant)',
-          metaUrl: 'https://raw.githubusercontent.com/Granine/BESing/main/BESing/userscript/besing-manager.meta.js',
-          scriptUrl: 'https://raw.githubusercontent.com/Granine/BESing/main/BESing/userscript/besing-manager.user.js',
-          desc: 'Instant updates directly upon git push.'
-        },
-        greasyfork: {
-          id: 'greasyfork',
-          name: 'Greasy Fork (Curated Stable)',
-          metaUrl: 'https://update.greasyfork.org/scripts/512345/BESing%20Script%20Manager.meta.js',
-          scriptUrl: 'https://update.greasyfork.org/scripts/512345/BESing%20Script%20Manager.user.js',
-          desc: 'Curated and moderated releases on Greasy Fork.'
-        },
-        local: {
-          id: 'local',
-          name: 'Local Server (Dev / Test)',
-          metaUrl: 'http://127.0.0.1:8765/userscript/besing-manager.meta.js',
-          scriptUrl: 'http://127.0.0.1:8765/userscript/besing-manager.user.js',
-          desc: 'Connected to local BESing demo server for instant dev hot-reloads.'
-        }
-      };
+    static isStableLoader() {
+      return typeof window !== 'undefined' && (
+        window.__BESING_ENVIRONMENT__ === 'stable-loader' ||
+        typeof window.__BESING_AUTO_UPDATE__ === 'function' ||
+        typeof window.__BESING_RELOAD_LATEST__ === 'function'
+      );
     }
 
-    async getConfig() {
-      const settings = (this.storage && this.storage.settings) ? this.storage.settings : {};
-      const channelId = settings.updateChannel || 'github';
-      const channelDef = this.channels[channelId] || this.channels.github;
-      return {
-        channelId,
-        channelName: channelDef.name,
-        metaUrl: channelDef.metaUrl,
-        scriptUrl: channelDef.scriptUrl,
-        autoCheck: settings.autoCheckUpdates !== false
-      };
+    static CHANNELS = {
+      github: {
+        name: 'GitHub Releases',
+        metaUrl: 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.meta.js',
+        userUrl: 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js'
+      },
+      greasyfork: {
+        name: 'Greasy Fork (Public)',
+        metaUrl: 'https://update.greasyfork.org/scripts/597772/BESing%20Script%20Manager.meta.js',
+        userUrl: 'https://update.greasyfork.org/scripts/597772/BESing%20Script%20Manager.user.js'
+      }
+    };
+
+    static async fetchText(url) {
+      return new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest === 'function') {
+          GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`,
+            timeout: 7000,
+            onload: (res) => (res.status >= 200 && res.status < 300) ? resolve(res.responseText) : reject(new Error('HTTP ' + res.status)),
+            onerror: (err) => reject(new Error(err.error || 'Network error')),
+            ontimeout: () => reject(new Error('Timeout'))
+          });
+        } else {
+          fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache' })
+            .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(resolve)
+            .catch(reject);
+        }
+      });
+    }
+
+    static parseVersion(metaText) {
+      const match = metaText.match(/@version\s+([0-9\.]+)/i);
+      return match ? match[1].trim() : null;
     }
 
     static compareVersions(vA, vB) {
-      if (!vA || !vB) return 0;
-      const cleanA = vA.replace(/^v/i, '').trim();
-      const cleanB = vB.replace(/^v/i, '').trim();
-      const partsA = cleanA.split('.').map(n => parseInt(n, 10) || 0);
-      const partsB = cleanB.split('.').map(n => parseInt(n, 10) || 0);
-      const maxLen = Math.max(partsA.length, partsB.length);
-
-      for (let i = 0; i < maxLen; i++) {
-        const a = partsA[i] || 0;
-        const b = partsB[i] || 0;
-        if (a > b) return 1;
-        if (a < b) return -1;
+      const a = (vA || '0').split('.').map(n => parseInt(n, 10) || 0);
+      const b = (vB || '0').split('.').map(n => parseInt(n, 10) || 0);
+      const len = Math.max(a.length, b.length);
+      for (let i = 0; i < len; i++) {
+        const numA = a[i] || 0;
+        const numB = b[i] || 0;
+        if (numA > numB) return 1;
+        if (numA < numB) return -1;
       }
       return 0;
     }
 
-    static parseVersion(codeText) {
-      if (!codeText) return null;
-      const match = codeText.match(/@version\s+([0-9A-Za-z.\-_]+)/i);
-      return match ? match[1].trim() : null;
-    }
-
-    static async fetchText(url) {
-      const targetUrl = `${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`;
-      const res = await fetch(targetUrl, {
-        method: 'GET',
-        cache: 'no-cache',
-        signal: AbortSignal.timeout(6000)
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      return await res.text();
-    }
-
-    async checkForUpdates(force = false) {
-      if (this.isChecking) return this.lastCheckResult;
-      this.isChecking = true;
-
+    async checkForUpdates(manual = false) {
+      const channelKey = 'github';
+      const channel = BESUpdater.CHANNELS[channelKey];
+      const isStable = BESUpdater.isStableLoader();
       try {
-        const config = await this.getConfig();
-        const text = await BESUpdater.fetchText(config.metaUrl);
-        const remoteVersion = BESUpdater.parseVersion(text);
+        const text = await BESUpdater.fetchText(channel.metaUrl);
+        const remoteVer = BESUpdater.parseVersion(text);
+        if (!remoteVer) throw new Error('Could not parse remote version header');
+        const hasUpdate = BESUpdater.compareVersions(remoteVer, BESUpdater.CURRENT_VERSION) > 0;
 
-        if (!remoteVersion) {
-          throw new Error('Failed to parse remote @version from metadata');
+        let autoUpdated = false;
+        if (hasUpdate && isStable) {
+          if (typeof window.__BESING_AUTO_UPDATE__ === 'function') {
+            await window.__BESING_AUTO_UPDATE__(true);
+            autoUpdated = true;
+          } else if (typeof GM_setValue === 'function') {
+            const newCode = await BESUpdater.fetchText(channel.userUrl);
+            if (newCode && newCode.length > 500) {
+              GM_setValue('besing_cached_code', newCode);
+              GM_setValue('besing_cached_version', remoteVer);
+              autoUpdated = true;
+            }
+          }
         }
 
-        const hasUpdate = BESUpdater.compareVersions(remoteVersion, this.currentVersion) > 0;
-        const result = {
+        return {
           ok: true,
+          isStableLoader: isStable,
+          channelName: channel.name,
+          currentVersion: BESUpdater.CURRENT_VERSION,
+          remoteVersion: remoteVer,
           hasUpdate,
-          currentVersion: this.currentVersion,
-          remoteVersion,
-          channel: config.channelId,
-          channelName: config.channelName,
-          metaUrl: config.metaUrl,
-          downloadUrl: config.scriptUrl,
-          checkedAt: Date.now()
+          autoUpdated,
+          downloadUrl: channel.userUrl
         };
-
-        this.lastCheckResult = result;
-
-        if (hasUpdate && typeof this.onUpdateFound === 'function') {
-          this.onUpdateFound(result);
-        }
-
-        return result;
       } catch (err) {
-        const config = await this.getConfig().catch(() => ({ channelId: 'unknown', channelName: 'Unknown' }));
-        const result = {
+        return {
           ok: false,
-          hasUpdate: false,
-          currentVersion: this.currentVersion,
-          remoteVersion: null,
-          channel: config.channelId,
-          channelName: config.channelName,
-          error: err.message,
-          checkedAt: Date.now()
+          isStableLoader: isStable,
+          channelName: channel.name,
+          currentVersion: BESUpdater.CURRENT_VERSION,
+          error: err.message
         };
-        this.lastCheckResult = result;
-        return result;
-      } finally {
-        this.isChecking = false;
       }
     }
 
     triggerInstall(downloadUrl) {
-      const url = downloadUrl || this.channels.github.scriptUrl;
-      console.log('[BESing Updater] Opening update installation URL:', url);
+      const url = downloadUrl || BESUpdater.CHANNELS.github.userUrl;
       window.open(url, '_blank');
     }
   }
 
+  // 5. App Core & UI Controller
   class BESManagerApp {
     constructor() {
       this.storage = new BESStorage();
-      this.updater = new BESUpdater({
-        currentVersion: '1.4.0',
-        storage: this.storage,
-        onUpdateFound: (res) => this.onUpdateFound(res)
-      });
-      this.updateAvailable = null;
-      this.availableCatalog = null;
-      this.modules = [...Modules];
+      this.updater = new BESUpdater();
+      this.modules = [];
       this.host = null;
       this.shadow = null;
       this.widgetEl = null;
-      this.avatarWrap = null;
       this.menuWrapperEl = null;
-      this.currentView = 'extensions';
-      this.isExpanded = false;
       this.searchQuery = '';
-      this._idleTimer = null;
-    }
-
-    onUpdateFound(res) {
-      this.updateAvailable = res;
-      this.updateBadge();
-      if (this.menuWrapperEl) {
-        const tagEl = this.menuWrapperEl.querySelector('.besing-tag');
-        if (tagEl) {
-          tagEl.innerHTML = `v1.4 <span style="background:#ec4899;color:#fff;font-size:9px;padding:1px 5px;border-radius:4px;margin-left:4px;font-weight:700;">UPDATE</span>`;
-        }
-      }
+      this.currentView = 'extensions';
+      this.activeConfigScriptId = null;
+      this.isExpanded = false;
+      this.isDragging = false;
+      this.dragMoved = false;
+      this.startX = 0;
+      this.startY = 0;
+      this.initialLeft = 0;
+      this.initialTop = 0;
+      this.updateAvailable = null;
+      this.lastFoldSide = null;
+      this.outsideClickHandler = null;
     }
 
     async init() {
       await this.storage.init();
+      const currentHost = this.storage.getCurrentHost();
 
-      // Restore custom installed modules if any
-      const saved = await this.storage.getCustomModules();
-      if (Array.isArray(saved) && saved.length > 0) {
-        this.modules = saved.map(s => {
-          let initFn = () => {};
-          let destroyFn = () => {};
-          if (typeof s.code === 'string') {
-            try { initFn = new Function(s.code); } catch (e) {}
-          }
-          if (typeof s.destroyCode === 'string') {
-            try { destroyFn = new Function(s.destroyCode); } catch (e) {}
-          }
-          return {
-            id: s.id,
-            name: s.name || s.id,
-            version: s.version || '1.0.0',
-            description: s.description || '',
-            category: s.category || 'General',
-            author: s.author || 'BESing Team',
-            icon: s.icon || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>',
-            enabled: this.storage.isScriptEnabled(s.id, true),
-            init: initFn,
-            destroy: destroyFn
-          };
-        });
-      }
+      // Initialize pre-bundled modules
+      this.modules = BUILTIN_MODULES.map(m => ({
+        ...m,
+        running: false
+      }));
 
-      // Check for updates: ONLY once a day or on launch if > 24 hours
-      const lastCheck = await BESAdapter.get('last_update_check_time', 0);
-      const ONE_DAY = 24 * 60 * 60 * 1000;
-      if (Date.now() - (lastCheck || 0) > ONE_DAY) {
+      // Run any modules that are active on current site
+      this.modules.forEach(m => {
+        if (this.storage.isScriptActiveOnSite(m.id, currentHost)) {
+          try {
+            const cfg = this.storage.getScriptConfig(m.id, currentHost);
+            m.init(cfg);
+            m.running = true;
+          } catch (err) {
+            console.error(`[BESing] Error initializing ${m.id}:`, err);
+          }
+        }
+      });
+
+      // Throttled Update Check:
+      // If running inside stable loader: auto-check in background and silently auto-update!
+      // If running full script: check once every 24 hours
+      if (BESUpdater.isStableLoader()) {
         setTimeout(async () => {
           await this.updater.checkForUpdates(false).catch(() => {});
-          await BESAdapter.set('last_update_check_time', Date.now());
-        }, 4000);
+        }, 3000);
+      } else {
+        const lastCheck = await BESAdapter.get('last_update_check_time', 0);
+        const ONE_DAY = 24 * 60 * 60 * 1000;
+        if (Date.now() - (lastCheck || 0) > ONE_DAY) {
+          setTimeout(async () => {
+            await this.updater.checkForUpdates(false).catch(() => {});
+            await BESAdapter.set('last_update_check_time', Date.now());
+          }, 4000);
+        }
       }
 
+      // Hotkey: Alt + Shift + B
       window.addEventListener('keydown', (e) => {
         if (e.altKey && e.shiftKey && (e.key === 'b' || e.key === 'B')) {
           e.preventDefault();
@@ -494,185 +1333,171 @@
         }
       });
 
+      // Tampermonkey Control Panel Menu Commands
+      if (!window.__BESING_MENU_REGISTERED__) {
+        window.__BESING_MENU_REGISTERED__ = true;
+        BESAdapter.registerMenu('✨ Show / Pull Up BESing Icon', () => {
+          this.pullUpIcon();
+        });
+        BESAdapter.registerMenu('🔄 Reset Icon Position to Default', () => {
+          this.resetWidgetPosition();
+        });
+        BESAdapter.registerMenu('⚙️ Open BESing Settings', () => {
+          this.openModal('settings');
+        });
+        BESAdapter.registerMenu('📦 Open BESing Extensions', () => {
+          this.openModal('extensions');
+        });
+      }
+
+      // Page Navigation & bfcache Resilience
+      window.addEventListener('pageshow', (e) => {
+        this.ensureMounted();
+        this.clampWidgetPosition();
+        this.refreshCurrentSiteModules();
+      });
+
+      window.addEventListener('popstate', () => {
+        this.ensureMounted();
+        this.clampWidgetPosition();
+        this.refreshCurrentSiteModules();
+      });
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          this.ensureMounted();
+          this.clampWidgetPosition();
+        }
+      });
+
+      window.addEventListener('resize', () => {
+        this.clampWidgetPosition();
+        if (this.widgetEl) this.checkEdgeDocking(this.widgetEl);
+      });
+
+      // Heartbeat DOM guardian (every 2.5s) to catch any random DOM detachments
+      if (!this._heartbeatInterval) {
+        this._heartbeatInterval = setInterval(() => {
+          this.ensureMounted();
+        }, 2500);
+      }
+
+      // Direct DOM MutationObserver on document.documentElement
+      try {
+        const targetNode = document.documentElement || document.body;
+        if (targetNode && !this._domObserver) {
+          this._domObserver = new MutationObserver(() => {
+            if (this.host && !this.host.isConnected && !this.storage.isCurrentBlocked()) {
+              this.ensureMounted();
+            }
+          });
+          this._domObserver.observe(targetNode, { childList: true, subtree: false });
+        }
+      } catch (e) {}
+
       if (this.storage.isCurrentBlocked()) {
-        console.log(`[BESing Extension] Inactive on ${window.location.hostname} (Site disabled)`);
+        console.log(`[BESing] Inactive on ${window.location.hostname} (Site blocked)`);
         return;
       }
 
       this.mount();
     }
 
-    async loadAvailableCatalog() {
-      if (this.availableCatalog && this.availableCatalog.length) return this.availableCatalog;
-      try {
-        let res = await fetch('http://127.0.0.1:8765/scripts/SCRIPT_LIST.json', { cache: 'no-cache', signal: AbortSignal.timeout(2000) }).catch(() => null);
-        if (!res || !res.ok) {
-          res = await fetch('https://raw.githubusercontent.com/CoronRing/BESing/main/BESing/scripts/SCRIPT_LIST.json', { cache: 'no-cache', signal: AbortSignal.timeout(4000) }).catch(() => null);
+    refreshCurrentSiteModules() {
+      const currentHost = this.storage.getCurrentHost();
+      this.modules.forEach(m => {
+        const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
+        const cfg = this.storage.getScriptConfig(m.id, currentHost);
+        if (shouldBeActive && !m.running) {
+          try {
+            m.init(cfg);
+            m.running = true;
+          } catch (err) {
+            console.error(`[BESing] Error initializing ${m.id}:`, err);
+          }
+        } else if (!shouldBeActive && m.running) {
+          try {
+            m.destroy();
+            m.running = false;
+          } catch (err) {
+            console.error(`[BESing] Error destroying ${m.id}:`, err);
+          }
+        } else if (shouldBeActive && m.running) {
+          if (typeof m.onConfigChange === 'function') {
+            try { m.onConfigChange(cfg); } catch (e) {}
+          }
         }
-        if (res && res.ok) {
-          this.availableCatalog = await res.json();
-          return this.availableCatalog;
-        }
-      } catch (e) {
-        console.warn('[BESing Store] Catalog load fallback:', e);
-      }
-
-      this.availableCatalog = [
-        {
-          id: 'reading-assistant',
-          name: 'Reading Assistant',
-          version: '1.0.0',
-          description: 'Calculates word count, reading duration, and provides a quick jump heading outline for any article or webpage.',
-          category: 'Productivity',
-          author: 'BESing Team',
-          icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>',
-          localUrl: 'http://127.0.0.1:8765/scripts/reading-assistant/reading-assistant.user.js',
-          rawUrl: 'https://raw.githubusercontent.com/CoronRing/BESing/main/BESing/scripts/reading-assistant/reading-assistant.user.js'
-        },
-        {
-          id: 'dark-dimmer',
-          name: 'Night Comfort Dimmer',
-          version: '1.0.0',
-          description: 'Gentle screen dimming filter and tint to soothe eyes during late hours.',
-          category: 'Accessibility',
-          author: 'BESing Team',
-          icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>',
-          localUrl: 'http://127.0.0.1:8765/scripts/dark-dimmer/dark-dimmer.user.js',
-          rawUrl: 'https://raw.githubusercontent.com/CoronRing/BESing/main/BESing/scripts/dark-dimmer/dark-dimmer.user.js'
-        },
-        {
-          id: 'quick-copy',
-          name: 'Markdown Link Copier',
-          version: '1.0.0',
-          description: 'Press Alt+C to copy current page title & URL formatted as Markdown [Title](URL).',
-          category: 'Tools',
-          author: 'BESing Team',
-          icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>',
-          localUrl: 'http://127.0.0.1:8765/scripts/quick-copy/quick-copy.user.js',
-          rawUrl: 'https://raw.githubusercontent.com/CoronRing/BESing/main/BESing/scripts/quick-copy/quick-copy.user.js'
-        },
-        {
-          id: 'ad-cleaner',
-          name: 'Ad Cleaner Lite',
-          version: '1.0.0',
-          description: 'Hides intrusive floating overlays, sticky marketing banners, and cookie consent popups.',
-          category: 'Privacy',
-          author: 'BESing Team',
-          icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>',
-          localUrl: 'http://127.0.0.1:8765/scripts/ad-cleaner/ad-cleaner.user.js',
-          rawUrl: 'https://raw.githubusercontent.com/CoronRing/BESing/main/BESing/scripts/ad-cleaner/ad-cleaner.user.js'
-        },
-        {
-          id: 'color-change',
-          name: 'Color Change',
-          version: '1.0.0',
-          description: 'Changes page background color to red for dynamic testing and visual confirmation.',
-          category: 'Visual',
-          author: 'BESing Team',
-          icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="#ef4444" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>',
-          localUrl: 'http://127.0.0.1:8765/scripts/color-change/color-change.user.js',
-          rawUrl: 'https://raw.githubusercontent.com/CoronRing/BESing/main/BESing/scripts/color-change/color-change.user.js'
-        }
-      ];
-      return this.availableCatalog;
+      });
+      this.updateBadge();
     }
 
-    async installScript(item, btn) {
-      if (btn) {
-        btn.disabled = true;
-        btn.innerHTML = `<span class="besing-spinner"></span> Searching GF...`;
-      }
-      let code = null;
-      let source = 'GitHub';
-
-      try {
-        // 1. Search Greasy Fork for same-name script
-        try {
-          const gfUrl = `https://greasyfork.org/scripts.json?q=${encodeURIComponent(item.name)}`;
-          const gfResText = await BESUpdater.fetchText(gfUrl);
-          const gfList = JSON.parse(gfResText);
-          if (Array.isArray(gfList) && gfList.length > 0) {
-            const match = gfList.find(s => s.name.toLowerCase() === item.name.toLowerCase()) || gfList[0];
-            if (match && match.code_url) {
-              if (btn) btn.innerHTML = `<span class="besing-spinner"></span> Downloading GF...`;
-              code = await BESUpdater.fetchText(match.code_url);
-              source = 'Greasy Fork';
-            }
-          }
-        } catch (gfErr) {
-          console.log('[BESing Store] Greasy Fork note:', gfErr.message);
-        }
-
-        // 2. Fallback to GitHub / Local Server
-        if (!code) {
-          if (btn) btn.innerHTML = `<span class="besing-spinner"></span> Downloading GitHub...`;
-          try {
-            code = await BESUpdater.fetchText(item.localUrl || item.rawUrl);
-            source = item.localUrl ? 'Local Dev Server' : 'GitHub';
-          } catch (ghErr) {
-            code = await BESUpdater.fetchText(item.rawUrl);
-            source = 'GitHub';
-          }
-        }
-
-        if (!code) {
-          throw new Error('Failed to retrieve script code from Greasy Fork or GitHub');
-        }
-
-        // 3. Compile & Instantiate
-        window.__BESING_SCRIPTS__ = window.__BESING_SCRIPTS__ || {};
-        window.__BESING_EMBEDDED__ = true;
-        try {
-          const exec = new Function(code);
-          exec();
-        } catch (compErr) {
-          console.error('[BESing Store] Compile error:', compErr);
-        }
-
-        const exported = window.__BESING_SCRIPTS__[item.id];
-        const newMod = {
-          id: item.id,
-          name: item.name,
-          version: item.version,
-          description: item.description,
-          category: item.category,
-          author: item.author,
-          icon: item.icon,
-          enabled: true,
-          init: exported && exported.init ? exported.init.bind(exported) : (new Function(code)),
-          destroy: exported && exported.destroy ? exported.destroy.bind(exported) : (() => {})
-        };
-
-        const idx = this.modules.findIndex(m => m.id === item.id);
-        if (idx >= 0) {
-          try { this.modules[idx].destroy(); } catch (e) {}
-          this.modules[idx] = newMod;
+    async applyScriptConfig(scriptId, patch) {
+      const currentHost = this.storage.getCurrentHost();
+      await this.storage.setScriptConfig(scriptId, patch, currentHost);
+      const updatedCfg = this.storage.getScriptConfig(scriptId, currentHost);
+      const m = this.modules.find(mod => mod.id === scriptId);
+      if (m && m.running) {
+        if (typeof m.onConfigChange === 'function') {
+          try { m.onConfigChange(updatedCfg); } catch (e) {}
         } else {
-          this.modules.push(newMod);
+          try {
+            m.destroy();
+            m.init(updatedCfg);
+          } catch (e) {}
         }
+      }
+    }
 
-        await this.storage.setScriptEnabled(item.id, true);
-        await this.storage.saveCustomModules(this.modules);
-        try { newMod.init(); } catch (err) {}
-        this.updateBadge();
+    openScriptConfig(scriptId) {
+      this.activeConfigScriptId = scriptId;
+      this.currentView = 'script-config';
+      this.renderBody();
+    }
 
-        alert(`Successfully installed "${item.name}" from ${source}!`);
-      } catch (err) {
-        alert(`Installation failed: ${err.message}`);
-      } finally {
-        if (btn) {
-          btn.disabled = false;
-          btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Install`;
+    ensureMounted() {
+      if (this.storage.isCurrentBlocked()) return;
+
+      const docRoot = document.documentElement || document.body;
+      if (!docRoot) return;
+
+      // 1. Host exists in memory, but got detached from DOM (SPA nav, bfcache, framework wipe)
+      if (this.host && !this.host.isConnected) {
+        docRoot.appendChild(this.host);
+        this.clampWidgetPosition();
+        return;
+      }
+
+      // 2. Host is null or was removed
+      if (!this.host) {
+        const existing = document.getElementById('__besing_root__');
+        if (existing) {
+          existing.remove();
         }
+        this.mount();
+        return;
+      }
+
+      // 3. Make sure widget element is present in shadow DOM
+      if (this.shadow && !this.widgetEl) {
+        this.renderWidget(this.shadow);
       }
     }
 
     mount() {
-      if (this.host) return;
+      const docRoot = document.documentElement || document.body;
+      if (!docRoot) return;
+
+      if (this.host && this.host.isConnected) return;
+
+      if (this.host && !this.host.isConnected) {
+        docRoot.appendChild(this.host);
+        this.clampWidgetPosition();
+        return;
+      }
 
       const host = document.createElement('besing-host');
       host.id = '__besing_root__';
-      document.documentElement.appendChild(host);
+      docRoot.appendChild(host);
       this.host = host;
 
       const shadow = host.attachShadow({ mode: 'open' });
@@ -680,151 +1505,125 @@
 
       this.injectStyles(shadow);
       this.renderWidget(shadow);
-      this.startEnabledModules();
 
-      // Start automatic two-way agent sync loop
-      this.startAutoSync();
-    }
-
-    startAutoSync() {
-      if (this._syncTimer) clearInterval(this._syncTimer);
-      // Run initial sync after 500ms
-      setTimeout(() => {
-        this.syncPush(false).then(() => this.syncPull(false));
-      }, 500);
-
-      this._syncTimer = setInterval(async () => {
-        try {
-          await this.syncPush(false);
-          await this.syncPull(false);
-        } catch (e) {}
-      }, 2500);
-    }
-
-    stopAutoSync() {
-      if (this._syncTimer) {
-        clearInterval(this._syncTimer);
-        this._syncTimer = null;
-      }
-    }
-
-    async syncPush(notify = false) {
-      const url = (this.storage.settings.agentUrl || 'http://127.0.0.1:8765/api/sync').replace(/\/+$/, '');
-      const payload = {
-        site: window.location.hostname,
-        url: window.location.href,
-        title: document.title,
-        extensions: this.modules.map(m => ({
-          id: m.id,
-          name: m.name,
-          version: m.version,
-          enabled: this.storage.isScriptEnabled(m.id, m.enabled),
-          description: m.description,
-          category: m.category || 'General',
-          code: m.init ? m.init.toString() : '',
-          destroyCode: m.destroy ? m.destroy.toString() : ''
-        })),
-        blockedSites: this.storage.getBlockedSites(),
-        timestamp: Date.now()
-      };
-
-      try {
-        const res = await fetch(`${url}/push`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(3500)
+      if (!this._redirectListenerAttached) {
+        window.addEventListener('besing:redirect-blocked', () => {
+          this.blinkRedirectAlert();
         });
-        return res.ok;
-      } catch (err) {
-        return false;
+        this._redirectListenerAttached = true;
       }
     }
 
-    async syncPull(notify = false) {
-      const url = (this.storage.settings.agentUrl || 'http://127.0.0.1:8765/api/sync').replace(/\/+$/, '');
-      let res;
-      try {
-        res = await fetch(`${url}/pull`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ site: window.location.hostname, timestamp: Date.now() }),
-          signal: AbortSignal.timeout(3500)
-        });
-      } catch (e) {
-        return false;
-      }
-      if (!res.ok) return false;
-      const data = await res.json();
-      const commands = data.commands || [];
+    clampWidgetPosition() {
+      if (!this.widgetEl) return;
+      const doc = document.documentElement;
+      const maxW = Math.max(300, (doc ? doc.clientWidth : window.innerWidth) || 800);
+      const maxH = Math.max(300, (doc ? doc.clientHeight : window.innerHeight) || 600);
 
-      let modified = false;
-      for (const cmd of commands) {
-        if (cmd.action === 'set_status') {
-          const { id, enabled } = cmd;
-          if (id) {
-            await this.storage.setScriptEnabled(id, Boolean(enabled));
-            const m = this.modules.find(x => x.id === id);
-            if (m) {
-              if (enabled) {
-                try { m.init(); } catch (e) {}
-              } else {
-                try { m.destroy(); } catch (e) {}
-              }
-              modified = true;
-            }
-          }
-        } else if (cmd.action === 'insert_script' || cmd.action === 'modify_script' || cmd.action === 'upsert_script') {
-          const s = cmd.script || cmd;
-          if (s && s.id) {
-            let initFn = () => {};
-            let destroyFn = () => {};
-            if (typeof s.code === 'string') {
-              try { initFn = new Function(s.code); } catch (e) { console.error('[Agent Sync compile error]', e); }
-            }
-            if (typeof s.destroyCode === 'string') {
-              try { destroyFn = new Function(s.destroyCode); } catch (e) { console.error('[Agent Sync compile error]', e); }
-            }
-            const existingIdx = this.modules.findIndex(x => x.id === s.id);
-            const modDef = {
-              id: s.id,
-              name: s.name || s.id,
-              version: s.version || '1.0.0',
-              description: s.description || 'Agent script',
-              category: s.category || 'Agent Scripts',
-              enabled: s.enabled !== false,
-              icon: s.icon || '<svg width="18" height="18" viewBox="0 0 24 24" fill="#38bdf8" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>',
-              init: initFn,
-              destroy: destroyFn
-            };
-            if (existingIdx >= 0) {
-              try { this.modules[existingIdx].destroy(); } catch (e) {}
-              this.modules[existingIdx] = modDef;
-            } else {
-              this.modules.push(modDef);
-            }
-            await this.storage.setScriptEnabled(s.id, modDef.enabled);
-            if (modDef.enabled) {
-              try { modDef.init(); } catch (e) {}
-            }
-            modified = true;
-          }
+      const currentLeft = parseFloat(this.widgetEl.style.left);
+      const currentTop = parseFloat(this.widgetEl.style.top);
+
+      if (!isNaN(currentLeft) && !isNaN(currentTop)) {
+        const clampedLeft = Math.max(0, Math.min(maxW - 48, currentLeft));
+        const clampedTop = Math.max(0, Math.min(maxH - 48, currentTop));
+
+        if (clampedLeft !== currentLeft || clampedTop !== currentTop) {
+          this.widgetEl.style.left = `${clampedLeft}px`;
+          this.widgetEl.style.top = `${clampedTop}px`;
+          this.widgetEl.style.right = 'auto';
+          this.widgetEl.style.bottom = 'auto';
+          this.storage.setWidgetPosition({ x: Math.round(clampedLeft), y: Math.round(clampedTop) });
         }
       }
+    }
 
-      if (modified) {
-        this.updateBadge();
-        if (this.menuWrapperEl) this.renderBody();
+    pullUpIcon() {
+      if (this.storage.isCurrentBlocked()) {
+        console.log('[BESing] Site was blocked. Mounting and opening settings...');
+        this.mount();
+        this.openModal('settings');
+        return;
       }
-      return true;
+
+      this.ensureMounted();
+
+      if (!this.widgetEl) {
+        if (this.shadow) this.renderWidget(this.shadow);
+        else this.mount();
+      }
+
+      if (!this.widgetEl) return;
+
+      // 1. Un-dock / un-fold
+      this.widgetEl.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
+
+      // 2. Position comfortably in visible viewport (bottom-right)
+      const doc = document.documentElement;
+      const clientW = Math.max(300, (doc ? doc.clientWidth : window.innerWidth) || 800);
+      const clientH = Math.max(300, (doc ? doc.clientHeight : window.innerHeight) || 600);
+      const targetLeft = Math.max(20, clientW - 72);
+      const targetTop = Math.max(20, clientH - 120);
+
+      this.widgetEl.style.left = `${targetLeft}px`;
+      this.widgetEl.style.top = `${targetTop}px`;
+      this.widgetEl.style.right = 'auto';
+      this.widgetEl.style.bottom = 'auto';
+      this.widgetEl.style.display = 'flex';
+      this.widgetEl.style.opacity = '1';
+      this.widgetEl.style.visibility = 'visible';
+
+      this.storage.setWidgetPosition({ x: targetLeft, y: targetTop });
+
+      // 3. Highlight with bright pulse animation
+      this.widgetEl.classList.remove('besing-pulse-alert');
+      void this.widgetEl.offsetWidth; // reflow
+      this.widgetEl.classList.add('besing-pulse-alert');
+      setTimeout(() => {
+        if (this.widgetEl) this.widgetEl.classList.remove('besing-pulse-alert');
+      }, 2500);
+
+      console.log(`[BESing] Pull-up icon succeeded at (${targetLeft}, ${targetTop})`);
+    }
+
+    resetWidgetPosition() {
+      if (this.widgetEl) {
+        this.widgetEl.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
+        this.widgetEl.style.left = '';
+        this.widgetEl.style.top = '';
+        this.widgetEl.style.right = '18px';
+        this.widgetEl.style.bottom = '90px';
+        this.widgetEl.style.display = 'flex';
+      }
+      this.storage.setWidgetPosition(null);
+      this.pullUpIcon();
+    }
+
+    blinkRedirectAlert() {
+      if (!this.widgetEl) return;
+      this.widgetEl.classList.remove('redirect-alert');
+      void this.widgetEl.offsetWidth;
+      this.widgetEl.classList.add('redirect-alert');
+      setTimeout(() => {
+        if (this.widgetEl) this.widgetEl.classList.remove('redirect-alert');
+      }, 1200);
     }
 
     teardown() {
-      this.stopAutoSync();
+      if (this._heartbeatInterval) {
+        clearInterval(this._heartbeatInterval);
+        this._heartbeatInterval = null;
+      }
+      if (this._domObserver) {
+        this._domObserver.disconnect();
+        this._domObserver = null;
+      }
+      if (this.outsideClickHandler) {
+        document.removeEventListener('click', this.outsideClickHandler);
+        this.outsideClickHandler = null;
+      }
       this.modules.forEach(m => {
         try { m.destroy(); } catch (e) {}
       });
-
       if (this.host) {
         this.host.remove();
         this.host = null;
@@ -834,232 +1633,209 @@
       }
     }
 
-    async startEnabledModules() {
-      for (const m of this.modules) {
-        if (this.storage.isScriptEnabled(m.id, m.enabled)) {
-          try { m.init(); } catch (e) { console.error('[BESing] Init error in module ' + m.id, e); }
-        }
-      }
-      this.updateBadge();
-    }
-
     renderWidget(shadow) {
-      const widget = document.createElement('div');
-      widget.className = 'besing-trigger';
-      widget.title = 'BESing Script Manager & Desktop Pet (Click to open, Drag to move)';
+      const btn = document.createElement('div');
+      btn.className = 'besing-trigger';
+      btn.id = 'besing-widget-btn';
 
-      const avatar = document.createElement('div');
-      avatar.className = 'besing-avatar-wrap';
-      widget.appendChild(avatar);
-      this.avatarWrap = avatar;
+      const savedPos = this.storage.getWidgetPosition();
+      const doc = document.documentElement;
+      const maxW = Math.max(300, (doc ? doc.clientWidth : window.innerWidth) || 800);
+      const maxH = Math.max(300, (doc ? doc.clientHeight : window.innerHeight) || 600);
 
-      const badge = document.createElement('div');
-      badge.className = 'besing-badge-count';
-      badge.style.display = 'none';
-      widget.appendChild(badge);
-
-      this.widgetEl = widget;
-      this.setTheme(this.storage.getTheme());
-
-      const getViewport = () => {
-        const doc = document.documentElement;
-        return {
-          clientWidth: doc ? doc.clientWidth : window.innerWidth,
-          clientHeight: doc ? doc.clientHeight : window.innerHeight
-        };
-      };
-
-      const saved = this.storage.widgetPos;
-      const vp = getViewport();
-      let left = vp.clientWidth - 64;
-      let top = vp.clientHeight - 110;
-      if (saved && typeof saved.x === 'number') {
-        left = Math.max(0, Math.min(vp.clientWidth - 48, saved.x));
-        top = Math.max(8, Math.min(vp.clientHeight - 56, saved.y));
-      }
-      widget.style.left = `${left}px`;
-      widget.style.top = `${top}px`;
-
-      // Draggable & Edge Folding with Mobile Touch Support & Scrollbar Awareness
-      let isDragging = false, hasMoved = false, startX = 0, startY = 0, initLeft = 0, initTop = 0;
-
-      const startDrag = (cx, cy) => {
-        isDragging = true;
-        hasMoved = false;
-        startX = cx;
-        startY = cy;
-        const rect = widget.getBoundingClientRect();
-        initLeft = rect.left;
-        initTop = rect.top;
-        widget.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
-      };
-
-      const moveDrag = (cx, cy) => {
-        if (!isDragging) return;
-        const dx = cx - startX;
-        const dy = cy - startY;
-        if (!hasMoved && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) hasMoved = true;
-        if (hasMoved) {
-          const { clientWidth, clientHeight } = getViewport();
-          let nl = Math.max(0, Math.min(clientWidth - 48, initLeft + dx));
-          let nt = Math.max(8, Math.min(clientHeight - 56, initTop + dy));
-          widget.style.left = `${nl}px`;
-          widget.style.top = `${nt}px`;
-        }
-      };
-
-      const endDrag = () => {
-        if (!isDragging) return;
-        isDragging = false;
-        if (hasMoved) {
-          const rect = widget.getBoundingClientRect();
-          this.storage.setWidgetPos({ x: rect.left, y: rect.top });
-          checkEdgeFold();
-        } else {
-          if (this.menuWrapperEl) {
-            this.closeModal();
-          } else {
-            this.openModal('extensions');
-          }
-        }
-      };
-
-      const checkEdgeFold = () => {
-        const rect = widget.getBoundingClientRect();
-        const { clientWidth, clientHeight } = getViewport();
-        const threshold = 40;
-
-        const isNearLeft = rect.left <= threshold;
-        const isNearRight = rect.right >= clientWidth - threshold;
-        const isNearTop = rect.top <= threshold;
-        const isNearBottom = rect.bottom >= clientHeight - threshold;
-
-        widget.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
-
-        if (isNearLeft) widget.classList.add('folded-left');
-        if (isNearRight) widget.classList.add('folded-right');
-        if (isNearTop) widget.classList.add('folded-top');
-        if (isNearBottom) widget.classList.add('folded-bottom');
-      };
-
-      // Pointer Events
-      widget.addEventListener('pointerdown', (e) => {
-        if (e.button !== 0 && e.pointerType === 'mouse') return;
-        startDrag(e.clientX, e.clientY);
-        try { widget.setPointerCapture(e.pointerId); } catch (err) {}
-        const onPointerMove = (ev) => moveDrag(ev.clientX, ev.clientY);
-        const onPointerUp = (ev) => {
-          try { widget.releasePointerCapture(ev.pointerId); } catch (err) {}
-          widget.removeEventListener('pointermove', onPointerMove);
-          widget.removeEventListener('pointerup', onPointerUp);
-          endDrag();
-        };
-        widget.addEventListener('pointermove', onPointerMove);
-        widget.addEventListener('pointerup', onPointerUp);
-      });
-
-      // Mobile Touch Events (iOS Safari & Android Chrome/Edge)
-      widget.addEventListener('touchstart', (e) => {
-        if (e.touches && e.touches.length === 1) {
-          startDrag(e.touches[0].clientX, e.touches[0].clientY);
-        }
-      }, { passive: false });
-
-      widget.addEventListener('touchmove', (e) => {
-        if (isDragging && e.touches && e.touches.length === 1) {
-          e.preventDefault(); // Stop mobile page scroll while dragging pet
-          moveDrag(e.touches[0].clientX, e.touches[0].clientY);
-        }
-      }, { passive: false });
-
-      widget.addEventListener('touchend', endDrag);
-      widget.addEventListener('touchcancel', endDrag);
-
-      widget.addEventListener('mouseenter', () => {
-        clearTimeout(this._idleTimer);
-        widget.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
-      });
-
-      widget.addEventListener('mouseleave', () => {
-        this._idleTimer = setTimeout(checkEdgeFold, 1200);
-      });
-
-      shadow.appendChild(widget);
-      checkEdgeFold();
-      this.updateBadge();
-    }
-
-    setTheme(theme) {
-      if (!this.avatarWrap) return;
-      if (theme === 'cyber-pet') {
-        this.avatarWrap.innerHTML = `
-          <svg class="besing-pet-face" width="28" height="28" viewBox="0 0 32 32" fill="none">
-            <path d="M7 10L10 4L14 9" stroke="#818cf8" stroke-width="2" stroke-linecap="round"/>
-            <path d="M25 10L22 4L18 9" stroke="#818cf8" stroke-width="2" stroke-linecap="round"/>
-            <rect x="5" y="8" width="22" height="18" rx="8" fill="#1e1b4b" stroke="#818cf8" stroke-width="1.5"/>
-            <ellipse class="besing-pet-eye" cx="11.5" cy="16.5" rx="2.5" ry="3.5" fill="#38bdf8"/>
-            <ellipse class="besing-pet-eye" cx="20.5" cy="16.5" rx="2.5" ry="3.5" fill="#38bdf8"/>
-          </svg>
-        `;
-      } else if (theme === 'orb') {
-        this.avatarWrap.innerHTML = `
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="9" stroke="#818cf8" stroke-width="1.8" stroke-dasharray="3 3"/>
-            <circle cx="12" cy="12" r="6" fill="#6366f1" opacity="0.85"/>
-          </svg>
-        `;
-      } else if (theme === 'crystal') {
-        this.avatarWrap.innerHTML = `
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.8">
-            <polygon points="12 2 20 8 16 22 8 22 4 8 12 2"/>
-          </svg>
-        `;
+      if (savedPos && savedPos.x !== undefined && savedPos.y !== undefined) {
+        const clampX = Math.max(0, Math.min(maxW - 48, savedPos.x));
+        const clampY = Math.max(0, Math.min(maxH - 48, savedPos.y));
+        btn.style.left = `${clampX}px`;
+        btn.style.top = `${clampY}px`;
+        btn.style.right = 'auto';
+        btn.style.bottom = 'auto';
       } else {
-        this.avatarWrap.innerHTML = `
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2.5">
-            <circle cx="12" cy="12" r="4" fill="#6366f1"/>
-          </svg>
-        `;
+        btn.style.right = '18px';
+        btn.style.bottom = '90px';
       }
+
+      this.widgetEl = btn;
+      this.updatePetIcon(btn);
+      this.updateBadge();
+      this.setupDragging(btn);
+      shadow.appendChild(btn);
+
+      setTimeout(() => this.checkEdgeDocking(btn), 150);
     }
 
     updateBadge() {
       if (!this.widgetEl) return;
-      const countEl = this.widgetEl.querySelector('.besing-badge-count');
-      const activeCount = this.modules.filter(m => this.storage.isScriptEnabled(m.id, m.enabled)).length;
-      if (this.updateAvailable) {
-        countEl.textContent = '⚡';
-        countEl.style.display = 'flex';
-        countEl.style.background = '#ec4899';
-        countEl.title = `Update available: v${this.updateAvailable.remoteVersion}`;
-      } else if (activeCount > 0) {
-        countEl.textContent = String(activeCount);
-        countEl.style.display = 'flex';
-        countEl.style.background = '';
-        countEl.title = `${activeCount} active script${activeCount > 1 ? 's' : ''}`;
+      let badge = this.widgetEl.querySelector('.besing-badge-count');
+      const currentHost = this.storage.getCurrentHost();
+      const activeCount = this.modules.filter(m => this.storage.isScriptActiveOnSite(m.id, currentHost)).length;
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'besing-badge-count';
+        this.widgetEl.appendChild(badge);
+      }
+      badge.textContent = activeCount;
+      badge.style.display = activeCount > 0 ? 'flex' : 'none';
+    }
+
+    updatePetIcon(btn) {
+      const theme = this.storage.getTheme();
+      let inner = '';
+      if (theme === 'minimal') {
+        inner = `
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+            <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+            <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+            <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+          </svg>
+        `;
+      } else if (theme === 'pixel-dino') {
+        inner = `
+          <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+            <rect x="6" y="8" width="20" height="18" rx="6" fill="#14532d" stroke="#4ade80" stroke-width="1.5"/>
+            <rect x="10" y="13" width="3" height="4" fill="#86efac" class="besing-pet-eye"/>
+            <rect x="19" y="13" width="3" height="4" fill="#86efac" class="besing-pet-eye"/>
+            <path d="M12 21h8" stroke="#86efac" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        `;
+      } else if (theme === 'slime') {
+        inner = `
+          <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+            <path d="M7 22C7 13 10 9 16 9C22 9 25 13 25 22C25 25 21 26 16 26C11 26 7 25 7 22Z" fill="#065f46" stroke="#34d399" stroke-width="1.5"/>
+            <circle cx="12" cy="17" r="2" fill="#a7f3d0" class="besing-pet-eye"/>
+            <circle cx="20" cy="17" r="2" fill="#a7f3d0" class="besing-pet-eye"/>
+            <path d="M14 21C15 22 17 22 18 21" stroke="#a7f3d0" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        `;
       } else {
-        countEl.style.display = 'none';
+        // Cyber Pet (Default)
+        inner = `
+          <svg class="besing-pet-face" width="30" height="30" viewBox="0 0 32 32" fill="none">
+            <path d="M7 10L11 14V11C11 9 13 7 16 7C19 7 21 9 21 11V14L25 10C26 9 27 10 27 12V21C27 24 24 26 21 26H11C8 26 5 24 5 21V12C5 10 6 9 7 10Z" fill="#1e1b4b" stroke="#818cf8" stroke-width="1.5"/>
+            <ellipse class="besing-pet-eye" cx="11.5" cy="17" rx="2" ry="3" fill="#38bdf8"/>
+            <ellipse class="besing-pet-eye" cx="20.5" cy="17" rx="2" ry="3" fill="#38bdf8"/>
+            <path d="M14 21.5C15 22.5 17 22.5 18 21.5" stroke="#c084fc" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        `;
+      }
+      btn.innerHTML = inner;
+      this.updateBadge();
+    }
+
+    setupDragging(btn) {
+      const onStart = (e) => {
+        if (e.target.closest('.besing-bubble-wrapper')) return;
+        this.isDragging = true;
+        this.dragMoved = false;
+        const pt = e.touches ? e.touches[0] : e;
+        this.startX = pt.clientX;
+        this.startY = pt.clientY;
+
+        const rect = btn.getBoundingClientRect();
+        this.initialLeft = rect.left;
+        this.initialTop = rect.top;
+
+        btn.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
+        btn.style.transition = 'none';
+
+        window.addEventListener('mousemove', onMove, { passive: false });
+        window.addEventListener('mouseup', onEnd);
+        window.addEventListener('touchmove', onMove, { passive: false });
+        window.addEventListener('touchend', onEnd);
+      };
+
+      const onMove = (e) => {
+        if (!this.isDragging) return;
+        const pt = e.touches ? e.touches[0] : e;
+        const dx = pt.clientX - this.startX;
+        const dy = pt.clientY - this.startY;
+
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+          this.dragMoved = true;
+          if (e.cancelable) e.preventDefault();
+        }
+
+        const newL = Math.max(0, Math.min(window.innerWidth - 48, this.initialLeft + dx));
+        const newT = Math.max(0, Math.min(window.innerHeight - 48, this.initialTop + dy));
+
+        btn.style.left = `${newL}px`;
+        btn.style.top = `${newT}px`;
+        btn.style.right = 'auto';
+        btn.style.bottom = 'auto';
+
+        if (this.menuWrapperEl) {
+          this.positionBubble(this.menuWrapperEl, this.menuWrapperEl.querySelector('.besing-bubble-panel'), this.menuWrapperEl.querySelector('.besing-bubble-arrow'));
+        }
+      };
+
+      const onEnd = () => {
+        if (!this.isDragging) return;
+        this.isDragging = false;
+        btn.style.transition = '';
+
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onEnd);
+        window.removeEventListener('touchmove', onMove);
+        window.removeEventListener('touchend', onEnd);
+
+        const rect = btn.getBoundingClientRect();
+        this.storage.setWidgetPosition({ x: Math.round(rect.left), y: Math.round(rect.top) });
+        this.checkEdgeDocking(btn);
+
+        if (!this.dragMoved) {
+          this.toggleModal();
+        }
+      };
+
+      btn.addEventListener('mousedown', onStart);
+      btn.addEventListener('touchstart', onStart, { passive: true });
+    }
+
+    checkEdgeDocking(btn) {
+      const doc = document.documentElement;
+      const clientW = doc ? doc.clientWidth : window.innerWidth;
+      const clientH = doc ? doc.clientHeight : window.innerHeight;
+      const rect = btn.getBoundingClientRect();
+      const margin = 14;
+
+      btn.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
+
+      if (rect.right >= clientW - margin) {
+        btn.classList.add('folded-right');
+      } else if (rect.left <= margin) {
+        btn.classList.add('folded-left');
+      }
+
+      if (rect.top <= margin) {
+        btn.classList.add('folded-top');
+      } else if (rect.bottom >= clientH - margin) {
+        btn.classList.add('folded-bottom');
+      }
+    }
+
+    toggleModal() {
+      if (this.menuWrapperEl) {
+        this.closeModal();
+      } else {
+        this.openModal('extensions');
       }
     }
 
     openModal(view = 'extensions') {
-      if (!this.shadow) {
-        const host = document.createElement('besing-host');
-        host.id = '__besing_root__';
-        document.documentElement.appendChild(host);
-        this.host = host;
-        this.shadow = host.attachShadow({ mode: 'open' });
-        this.injectStyles(this.shadow);
+      if (this.outsideClickHandler) {
+        document.removeEventListener('click', this.outsideClickHandler, true);
+        document.removeEventListener('click', this.outsideClickHandler, false);
+        this.outsideClickHandler = null;
       }
-
-      if (this.menuWrapperEl) this.menuWrapperEl.remove();
+      if (this.menuWrapperEl) this.closeModal();
       this.currentView = view;
 
       const wrapper = document.createElement('div');
       wrapper.className = 'besing-bubble-wrapper';
 
       const arrow = document.createElement('div');
-      arrow.className = 'besing-bubble-arrow arrow-bottom';
+      arrow.className = 'besing-bubble-arrow';
       wrapper.appendChild(arrow);
 
       const panel = document.createElement('div');
@@ -1070,22 +1846,37 @@
         <div class="besing-header">
           <div class="besing-logo-group">
             <div class="besing-logo-icon">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                <polyline points="2 17 12 22 22 17"></polyline>
+                <polyline points="2 12 12 17 22 12"></polyline>
+              </svg>
             </div>
             <div>
-              <span class="besing-title">BESing Hub</span>
-              <span class="besing-tag">${this.updateAvailable ? 'v1.4 <span style="background:#ec4899;color:#fff;font-size:9px;padding:1px 5px;border-radius:4px;margin-left:4px;font-weight:700;">UPDATE</span>' : 'v1.4'}</span>
+              <span class="besing-title">BESing</span>
+              <span class="besing-tag">v${BESUpdater.CURRENT_VERSION}</span>
             </div>
           </div>
           <div class="besing-header-actions">
-            <button class="besing-btn-icon" id="besing-btn-expand" title="Toggle Compact / Expanded">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+            <button class="besing-btn-icon" id="besing-btn-settings" title="Settings">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+              </svg>
             </button>
-            <button class="besing-btn-icon ${this.currentView === 'settings' ? 'active' : ''}" id="besing-btn-settings" title="Settings">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <button class="besing-btn-icon" id="besing-btn-expand" title="Toggle Size">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <polyline points="9 21 3 21 3 15"></polyline>
+                <line x1="21" y1="3" x2="14" y2="10"></line>
+                <line x1="3" y1="21" x2="10" y2="14"></line>
+              </svg>
             </button>
             <button class="besing-btn-icon" id="besing-btn-close" title="Close">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
             </button>
           </div>
         </div>
@@ -1097,32 +1888,39 @@
 
       this.positionBubble(wrapper, panel, arrow);
 
-      panel.querySelector('#besing-btn-close').onclick = () => this.closeModal();
+      wrapper.addEventListener('click', (e) => e.stopPropagation());
+      wrapper.addEventListener('mousedown', (e) => e.stopPropagation());
 
-      panel.querySelector('#besing-btn-expand').onclick = () => {
+      panel.querySelector('#besing-btn-close').onclick = (e) => {
+        e.stopPropagation();
+        this.closeModal();
+      };
+      panel.querySelector('#besing-btn-expand').onclick = (e) => {
+        e.stopPropagation();
         this.isExpanded = !this.isExpanded;
         panel.classList.toggle('is-expanded', this.isExpanded);
         this.positionBubble(wrapper, panel, arrow);
       };
 
       const settingsBtn = panel.querySelector('#besing-btn-settings');
-      settingsBtn.onclick = () => {
+      settingsBtn.onclick = (e) => {
+        e.stopPropagation();
         this.currentView = this.currentView === 'settings' ? 'extensions' : 'settings';
         settingsBtn.classList.toggle('active', this.currentView === 'settings');
         this.renderBody();
       };
 
       setTimeout(() => {
-        const outsideHandler = (e) => {
+        if (!this.menuWrapperEl || this.menuWrapperEl !== wrapper) return;
+        this.outsideClickHandler = (e) => {
           if (!this.menuWrapperEl) return;
           const path = e.composedPath ? e.composedPath() : [];
           if (!path.includes(wrapper) && (!this.widgetEl || !path.includes(this.widgetEl))) {
             this.closeModal();
-            document.removeEventListener('click', outsideHandler);
           }
         };
-        document.addEventListener('click', outsideHandler);
-      }, 50);
+        document.addEventListener('click', this.outsideClickHandler);
+      }, 80);
 
       this.renderBody();
     }
@@ -1170,9 +1968,6 @@
       } else {
         wrapper.style.right = '20px';
         wrapper.style.bottom = '80px';
-        wrapper.style.left = 'auto';
-        wrapper.style.top = 'auto';
-        wrapper.style.transform = 'none';
         arrow.style.display = 'none';
       }
     }
@@ -1183,7 +1978,6 @@
 
       if (this.currentView === 'settings') {
         const currentHost = window.location.hostname || 'localhost';
-        const blocked = this.storage.getBlockedSites();
         const curTheme = this.storage.getTheme();
 
         body.innerHTML = `
@@ -1195,90 +1989,64 @@
                   <svg width="20" height="20" viewBox="0 0 32 32" fill="none"><rect x="5" y="8" width="22" height="18" rx="8" fill="#1e1b4b" stroke="#818cf8" stroke-width="2"/><ellipse cx="11.5" cy="16.5" rx="2.5" ry="3.5" fill="#38bdf8"/><ellipse cx="20.5" cy="16.5" rx="2.5" ry="3.5" fill="#38bdf8"/></svg>
                   <span>Cyber Pet</span>
                 </button>
-                <button class="besing-theme-btn ${curTheme==='orb'?'active':''}" data-t="orb">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#818cf8" stroke-width="2"/><circle cx="12" cy="12" r="5" fill="#6366f1"/></svg>
-                  <span>Neon Orb</span>
+                <button class="besing-theme-btn ${curTheme==='slime'?'active':''}" data-t="slime">
+                  <svg width="20" height="20" viewBox="0 0 32 32" fill="none"><path d="M7 22C7 13 10 9 16 9C22 9 25 13 25 22C25 25 21 26 16 26C11 26 7 25 7 22Z" fill="#065f46" stroke="#34d399" stroke-width="2"/></svg>
+                  <span>Cozy Slime</span>
                 </button>
-                <button class="besing-theme-btn ${curTheme==='crystal'?'active':''}" data-t="crystal">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2"><polygon points="12 2 20 8 16 22 8 22 4 8 12 2"/></svg>
-                  <span>Crystal</span>
+                <button class="besing-theme-btn ${curTheme==='pixel-dino'?'active':''}" data-t="pixel-dino">
+                  <svg width="20" height="20" viewBox="0 0 32 32" fill="none"><rect x="6" y="8" width="20" height="18" rx="6" fill="#14532d" stroke="#4ade80" stroke-width="2"/></svg>
+                  <span>Pixel Dino</span>
                 </button>
                 <button class="besing-theme-btn ${curTheme==='minimal'?'active':''}" data-t="minimal">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2"><circle cx="12" cy="12" r="5" fill="#6366f1"/></svg>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
                   <span>Minimal</span>
                 </button>
               </div>
             </div>
 
-            <!-- Automated Software Updates -->
             <div class="besing-update-card">
               <div class="besing-update-header">
-                <div class="besing-section-title" style="color:#c084fc;">Automated Software Updates</div>
-                <span class="besing-status-pill ${this.updateAvailable ? 'update-ready' : 'idle'}" id="besing-update-pill">
-                  <span style="width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;"></span>
-                  <span id="besing-update-pill-text">${this.updateAvailable ? 'Update Ready' : 'v' + this.updater.currentVersion}</span>
+                <span class="besing-section-title">Update Channel</span>
+                <span class="besing-status-pill connected" id="besing-update-pill">
+                  <span id="besing-update-pill-text">v${BESUpdater.CURRENT_VERSION}</span>
                 </span>
               </div>
-              <div class="besing-version-row">
-                <div class="besing-version-col">
-                  <span class="besing-version-label">Current Version</span>
-                  <span class="besing-version-val">v${this.updater.currentVersion}</span>
-                </div>
-                <div class="besing-version-col">
-                  <span class="besing-version-label">Update Channel</span>
-                  <select id="besing-channel-select" class="besing-channel-select">
-                    <option value="github" ${(this.storage.settings.updateChannel || 'github') === 'github' ? 'selected' : ''}>GitHub (Bleeding-edge / Instant)</option>
-                    <option value="greasyfork" ${this.storage.settings.updateChannel === 'greasyfork' ? 'selected' : ''}>Greasy Fork (Curated Stable)</option>
-                    <option value="local" ${this.storage.settings.updateChannel === 'local' ? 'selected' : ''}>Local Server (Dev / Test)</option>
-                  </select>
-                </div>
+              <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;">
+                ${BESUpdater.isStableLoader() ? 'Mode: <strong style="color:#38bdf8;">GitHub Stable Bootstrapper</strong> (Automatic silent updates)' : 'Mode: <strong style="color:#a78bfa;">Standalone Userscript</strong> (Updates via Userscript Manager)'}
               </div>
               <div class="besing-update-actions">
-                <button class="besing-btn-sync" id="besing-btn-check-update">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
-                  Check Updates
-                </button>
-                <button class="besing-btn-update ${this.updateAvailable ? '' : 'hidden'}" id="besing-btn-install-update">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                  Update Now
+                <button class="besing-btn-sync" id="besing-btn-check-update" style="flex:1;">
+                  ${BESUpdater.isStableLoader() ? 'Check & Auto-Update Now' : 'Check Updates Now'}
                 </button>
               </div>
-              <div id="besing-update-msg" class="besing-update-msg">${this.updateAvailable ? `🚀 Update ready: v${this.updateAvailable.remoteVersion} via ${this.updateAvailable.channelName}` : 'Ready to check for latest release.'}</div>
-            </div>
-
-            <div class="besing-agent-card">
-              <div class="besing-agent-status-row">
-                <div class="besing-section-title" style="color:#38bdf8;">Targeted Agent Sync</div>
-                <span class="besing-status-pill idle" id="besing-agent-status-pill">
-                  <span style="width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;"></span>
-                  <span>Idle</span>
-                </span>
+              <div class="besing-update-msg" id="besing-update-msg">
+                ${BESUpdater.isStableLoader() ? 'Updates download and apply automatically in background.' : 'Checks against Greasy Fork / GitHub releases.'}
               </div>
-              <div style="display:flex;gap:6px;">
-                <input type="text" id="besing-agent-url-input" class="besing-search-input" style="padding-left:10px;font-size:11px;" value="${this.storage.settings.agentUrl}">
-                <button class="besing-btn-unblock" id="besing-btn-test">Test</button>
-              </div>
-              <div class="besing-sync-btn-group">
-                <button class="besing-btn-sync" id="besing-btn-pull">Pull Scripts</button>
-                <button class="besing-btn-sync" id="besing-btn-push">Push State</button>
-              </div>
-              <div id="besing-sync-status-text" style="font-size:10px;color:#94a3b8;"></div>
             </div>
 
             <div class="besing-site-card">
               <div class="besing-site-card-header">
-                <span style="font-size:11px;font-weight:700;color:#cbd5e1;text-transform:uppercase;">Current Site Control</span>
-                <span class="besing-current-domain">${currentHost}</span>
+                <div>
+                  <div class="besing-section-title" style="color:#38bdf8;">Current Website</div>
+                  <div class="besing-current-domain">${currentHost}</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;">
+                  <span style="font-size:11px;color:${this.storage.isCurrentBlocked() ? '#f87171' : '#94a3b8'};">${this.storage.isCurrentBlocked() ? 'Site Disabled' : 'Disable on this site'}</span>
+                  <label class="besing-switch" title="Disable all scripts on ${currentHost}">
+                    <input type="checkbox" id="besing-btn-turn-off-site" ${this.storage.isCurrentBlocked() ? 'checked' : ''}>
+                    <span class="besing-slider"></span>
+                  </label>
+                </div>
               </div>
-              <p class="besing-site-warn">Turn off BESing on <strong>${currentHost}</strong>. Button and scripts will disappear.</p>
-              <button class="besing-btn-danger" id="besing-btn-turn-off-site">Disable BESing on this site</button>
             </div>
 
-            <div class="besing-blocklist-header">
-              <span class="besing-blocklist-title">Blocked Sites (By Added Time)</span>
-              <span class="besing-blocklist-count" id="besing-block-count">${blocked.length} blocked</span>
+            <div class="besing-site-rules-wrap">
+              <div class="besing-blocklist-header">
+                <span class="besing-blocklist-title">Site Specific Rules</span>
+                <span class="besing-blocklist-count" id="besing-rules-count">0</span>
+              </div>
+              <div class="besing-site-rules-list" id="besing-site-rules-container"></div>
             </div>
-            <div class="besing-blocked-list" id="besing-blocked-container"></div>
           </div>
         `;
 
@@ -1286,182 +2054,162 @@
           btn.onclick = async () => {
             const t = btn.getAttribute('data-t');
             await this.storage.setTheme(t);
-            this.setTheme(t);
+            this.updatePetIcon(this.widgetEl);
             body.querySelectorAll('.besing-theme-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
           };
         });
 
-        // Update actions
-        const channelSelect = body.querySelector('#besing-channel-select');
-        const checkUpdateBtn = body.querySelector('#besing-btn-check-update');
-        const installUpdateBtn = body.querySelector('#besing-btn-install-update');
-        const updatePill = body.querySelector('#besing-update-pill');
-        const updatePillText = body.querySelector('#besing-update-pill-text');
+        const checkBtn = body.querySelector('#besing-btn-check-update');
         const updateMsg = body.querySelector('#besing-update-msg');
-
-        channelSelect.onchange = async () => {
-          const val = channelSelect.value;
-          await this.storage.updateSettings({ updateChannel: val });
-          updateMsg.textContent = `Channel switched to: ${channelSelect.options[channelSelect.selectedIndex].text}`;
-        };
-
-        checkUpdateBtn.onclick = async () => {
-          checkUpdateBtn.disabled = true;
-          checkUpdateBtn.style.opacity = '0.6';
+        checkBtn.onclick = async () => {
+          checkBtn.disabled = true;
           updateMsg.textContent = 'Checking for updates...';
-          updatePill.className = 'besing-status-pill idle';
-          updatePillText.textContent = 'Checking...';
-
           try {
             const res = await this.updater.checkForUpdates(true);
             if (res.ok) {
               if (res.hasUpdate) {
-                this.onUpdateFound(res);
-                updatePill.className = 'besing-status-pill update-ready';
-                updatePillText.textContent = `v${res.remoteVersion} Available`;
-                installUpdateBtn.classList.remove('hidden');
-                updateMsg.innerHTML = `<span style="color:#a78bfa;font-weight:600;">Update found!</span> v${res.remoteVersion} is available via ${res.channelName}. Click <strong>Update Now</strong> to install.`;
+                if (res.isStableLoader && res.autoUpdated) {
+                  updateMsg.innerHTML = `<span style="color:#10b981;font-weight:700;">✅ Auto-Updated to v${res.remoteVersion}!</span> The latest code is installed. <button id="besing-btn-reload-now" style="margin-left:8px;padding:3px 8px;font-size:11px;background:#10b981;color:#fff;border:none;border-radius:4px;cursor:pointer;">Reload Page</button> to activate.`;
+                  const rBtn = body.querySelector('#besing-btn-reload-now');
+                  if (rBtn) rBtn.onclick = () => window.location.reload();
+                } else {
+                  updateMsg.innerHTML = `<span style="color:#a78bfa;font-weight:700;">Update found!</span> v${res.remoteVersion} available. <a href="${res.downloadUrl}" target="_blank" style="color:#38bdf8;text-decoration:underline;">Click here to install update via Userscript Manager</a>.`;
+                }
               } else {
-                updatePill.className = 'besing-status-pill connected';
-                updatePillText.textContent = 'Up to date';
-                installUpdateBtn.classList.add('hidden');
-                updateMsg.textContent = `✅ BESing is up to date (Latest: v${res.remoteVersion} via ${res.channelName}).`;
+                updateMsg.textContent = `✅ BESing is up to date (v${res.currentVersion}).`;
               }
             } else {
-              updatePill.className = 'besing-status-pill error';
-              updatePillText.textContent = 'Check Failed';
-              updateMsg.textContent = `Update check failed: ${res.error || 'Network error'}`;
+              updateMsg.textContent = `Check failed: ${res.error}`;
             }
-          } catch (e) {
-            updatePill.className = 'besing-status-pill error';
-            updatePillText.textContent = 'Error';
-            updateMsg.textContent = `Error: ${e.message}`;
+          } catch (err) {
+            updateMsg.textContent = `Error: ${err.message}`;
           } finally {
-            checkUpdateBtn.disabled = false;
-            checkUpdateBtn.style.opacity = '1';
+            checkBtn.disabled = false;
           }
         };
 
-        installUpdateBtn.onclick = () => {
-          const downloadUrl = this.updateAvailable ? this.updateAvailable.downloadUrl : null;
-          this.updater.triggerInstall(downloadUrl);
+        body.querySelector('#besing-btn-turn-off-site').onchange = async (e) => {
+          const val = e.target.checked;
+          await this.storage.setSiteDisabledAll(currentHost, val);
+          this.refreshCurrentSiteModules();
+          renderSiteRulesList();
         };
 
-        const urlInput = body.querySelector('#besing-agent-url-input');
-        const statusPill = body.querySelector('#besing-agent-status-pill');
-        const syncText = body.querySelector('#besing-sync-status-text');
-
-        body.querySelector('#besing-btn-test').onclick = async () => {
-          const url = urlInput.value.trim();
-          await this.storage.updateSettings({ agentUrl: url });
-          syncText.textContent = 'Testing connection...';
-          try {
-            const res = await fetch(`${url.replace(/\/+$/, '')}/health`, { signal: AbortSignal.timeout(3000) });
-            if (res.ok) {
-              statusPill.className = 'besing-status-pill connected';
-              statusPill.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;"></span> Connected';
-              syncText.textContent = 'Connected to Agent endpoint successfully.';
-            } else { throw new Error('HTTP ' + res.status); }
-          } catch (e) {
-            statusPill.className = 'besing-status-pill error';
-            statusPill.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;"></span> Offline';
-            syncText.textContent = 'Agent unreachable: ' + e.message;
-          }
-        };
-
-        body.querySelector('#besing-btn-pull').onclick = async () => {
-          const url = urlInput.value.trim();
-          await this.storage.updateSettings({ agentUrl: url });
-          syncText.textContent = 'Pulling from agent...';
-          try {
-            const res = await fetch(`${url.replace(/\/+$/, '')}/pull`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ site: window.location.hostname })
-            });
-            if (res.ok) {
-              const data = await res.json();
-              statusPill.className = 'besing-status-pill connected';
-              syncText.textContent = `Pulled successfully! Agent returned ${data.scripts?.length || 0} scripts.`;
-            } else { throw new Error('HTTP ' + res.status); }
-          } catch (e) {
-            statusPill.className = 'besing-status-pill error';
-            syncText.textContent = 'Pull error: ' + e.message;
-          }
-        };
-
-        body.querySelector('#besing-btn-push').onclick = async () => {
-          const url = urlInput.value.trim();
-          await this.storage.updateSettings({ agentUrl: url });
-          syncText.textContent = 'Pushing state...';
-          try {
-            const res = await fetch(`${url.replace(/\/+$/, '')}/push`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ site: window.location.hostname, url: window.location.href, timestamp: Date.now() })
-            });
-            if (res.ok) {
-              statusPill.className = 'besing-status-pill connected';
-              syncText.textContent = 'Current state pushed to agent.';
-            } else { throw new Error('HTTP ' + res.status); }
-          } catch (e) {
-            statusPill.className = 'besing-status-pill error';
-            syncText.textContent = 'Push error: ' + e.message;
-          }
-        };
-
-        body.querySelector('#besing-btn-turn-off-site').onclick = async () => {
-          if (confirm(`Disable BESing on ${currentHost}?`)) {
-            await this.storage.blockSite(currentHost);
-            this.teardown();
-          }
-        };
-
-        const renderBlockedRows = () => {
-          const container = body.querySelector('#besing-blocked-container');
-          const list = this.storage.getBlockedSites();
-          body.querySelector('#besing-block-count').textContent = `${list.length} blocked`;
+        const renderSiteRulesList = () => {
+          const container = body.querySelector('#besing-site-rules-container');
+          const countEl = body.querySelector('#besing-rules-count');
+          if (!container) return;
           container.innerHTML = '';
-          if (!list.length) {
-            container.innerHTML = '<div class="besing-empty-state">No sites are currently blocked.</div>';
+          const allRules = this.storage.getAllSiteRules();
+          const hosts = Object.keys(allRules).sort();
+          if (countEl) countEl.textContent = hosts.length;
+
+          if (!hosts.length) {
+            container.innerHTML = '<div class="besing-empty-state">No site-specific rules configured.<br><span style="font-size:10px;color:#64748b;">Set a script to "SITE" in the main list to enable it for a single site.</span></div>';
             return;
           }
-          list.forEach(item => {
-            const row = document.createElement('div');
-            row.className = 'besing-blocked-item';
-            const diff = Date.now() - (item.addedAt || 0);
-            const m = Math.floor(diff/60000);
-            const timeStr = m < 1 ? 'Just now' : (m < 60 ? `${m}m ago` : new Date(item.addedAt).toLocaleDateString());
-            row.innerHTML = `
-              <div>
-                <span class="besing-blocked-domain">${item.host}</span>
-                <span class="besing-blocked-date">${timeStr}</span>
+
+          hosts.forEach(host => {
+            const rule = allRules[host];
+            const group = document.createElement('div');
+            group.className = 'besing-site-group';
+
+            const groupHeader = document.createElement('div');
+            groupHeader.className = 'besing-site-group-header';
+            groupHeader.innerHTML = `
+              <div class="besing-site-group-title">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                <span>${host}</span>
               </div>
-              <button class="besing-btn-unblock">Unblock</button>
+              <button class="besing-btn-del-site" title="Remove all rules for ${host}">Remove Site</button>
             `;
-            row.querySelector('.besing-btn-unblock').onclick = async () => {
-              await this.storage.unblockSite(item.host);
-              renderBlockedRows();
-              if (item.host.toLowerCase() === currentHost.toLowerCase()) {
-                if (!this.widgetEl) {
-                  this.renderWidget(this.shadow);
-                  this.startEnabledModules();
-                }
-              }
+            groupHeader.querySelector('.besing-btn-del-site').onclick = async () => {
+              await this.storage.removeSiteRule(host, 'all');
+              renderSiteRulesList();
+              this.refreshCurrentSiteModules();
             };
-            container.appendChild(row);
+            group.appendChild(groupHeader);
+
+            const rulesList = document.createElement('div');
+            rulesList.className = 'besing-site-subrules';
+
+            if (rule.disableAll) {
+              const row = document.createElement('div');
+              row.className = 'besing-site-rule-row';
+              row.innerHTML = `
+                <div class="besing-site-rule-info">
+                  <span class="besing-site-rule-name" style="color:#f87171;font-weight:600;">Disable all</span>
+                  <span class="besing-site-rule-tag" style="background:rgba(239,68,68,0.15);color:#fca5a5;">Site Disabled</span>
+                </div>
+                <div class="besing-site-rule-actions">
+                  <label class="besing-switch besing-switch-sm">
+                    <input type="checkbox" checked>
+                    <span class="besing-slider"></span>
+                  </label>
+                  <button class="besing-rule-remove" title="Remove rule">✕</button>
+                </div>
+              `;
+              row.querySelector('input').onchange = async (e) => {
+                await this.storage.toggleSiteRule(host, 'disableAll', e.target.checked);
+                renderSiteRulesList();
+                this.refreshCurrentSiteModules();
+              };
+              row.querySelector('.besing-rule-remove').onclick = async () => {
+                await this.storage.removeSiteRule(host, 'disableAll');
+                renderSiteRulesList();
+                this.refreshCurrentSiteModules();
+              };
+              rulesList.appendChild(row);
+            }
+
+            if (rule.scripts) {
+              Object.keys(rule.scripts).forEach(scriptId => {
+                const isEnabled = !!rule.scripts[scriptId];
+                const m = this.modules.find(mod => mod.id === scriptId) || { name: scriptId };
+                const row = document.createElement('div');
+                row.className = 'besing-site-rule-row';
+                row.innerHTML = `
+                  <div class="besing-site-rule-info">
+                    <span class="besing-site-rule-name">${m.name}</span>
+                    <span class="besing-site-rule-tag" style="background:rgba(56,189,248,0.15);color:#38bdf8;">${isEnabled ? 'Site ON' : 'Site OFF'}</span>
+                  </div>
+                  <div class="besing-site-rule-actions">
+                    <label class="besing-switch besing-switch-sm">
+                      <input type="checkbox" ${isEnabled ? 'checked' : ''}>
+                      <span class="besing-slider"></span>
+                    </label>
+                    <button class="besing-rule-remove" title="Remove rule">✕</button>
+                  </div>
+                `;
+                row.querySelector('input').onchange = async (e) => {
+                  await this.storage.toggleSiteRule(host, scriptId, e.target.checked);
+                  renderSiteRulesList();
+                  this.refreshCurrentSiteModules();
+                };
+                row.querySelector('.besing-rule-remove').onclick = async () => {
+                  await this.storage.removeSiteRule(host, scriptId);
+                  renderSiteRulesList();
+                  this.refreshCurrentSiteModules();
+                };
+                rulesList.appendChild(row);
+              });
+            }
+
+            group.appendChild(rulesList);
+            container.appendChild(group);
           });
         };
+        renderSiteRulesList();
 
-        renderBlockedRows();
-
+      } else if (this.currentView === 'script-config') {
+        this.renderScriptConfig(body);
       } else {
-        // Extensions List View: Installed on Top, Available Store on Bottom
+        // Extensions View: 3-stage toggles (OFF / SITE / ON)
         body.innerHTML = `
           <div class="besing-search-wrap">
             <svg class="besing-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input type="text" class="besing-search-input" placeholder="Search installed or store scripts..." value="${this.searchQuery}">
+            <input type="text" class="besing-search-input" placeholder="Search installed scripts..." value="${this.searchQuery}">
           </div>
           <div class="besing-ext-list" id="besing-ext-container"></div>
         `;
@@ -1469,164 +2217,487 @@
         const searchInput = body.querySelector('.besing-search-input');
         const extContainer = body.querySelector('#besing-ext-container');
 
-        if (!this.availableCatalog) {
-          this.loadAvailableCatalog().then(() => renderExtCards());
-        }
-
-        const renderExtCards = () => {
+        const renderCards = () => {
           extContainer.innerHTML = '';
           const q = this.searchQuery;
-
-          // 1. Installed Scripts
-          const installed = this.modules.filter(m => {
+          const currentHost = this.storage.getCurrentHost();
+          const filtered = this.modules.filter(m => {
             if (!q) return true;
             return (m.name || '').toLowerCase().includes(q) || (m.description || '').toLowerCase().includes(q);
           });
 
-          // 2. Uninstalled Catalog Scripts
-          const catalog = (this.availableCatalog || []).filter(c => {
-            return !this.modules.some(m => m.id === c.id);
-          }).filter(c => {
-            if (!q) return true;
-            return (c.name || '').toLowerCase().includes(q) || (c.description || '').toLowerCase().includes(q);
-          });
-
-          // Section 1: Installed
-          const installedHeader = document.createElement('div');
-          installedHeader.className = 'besing-section-heading';
-          installedHeader.innerHTML = `
+          const header = document.createElement('div');
+          header.className = 'besing-section-heading';
+          header.innerHTML = `
             <span>Installed Scripts</span>
-            <span class="besing-pill-count">${installed.length}</span>
+            <span class="besing-pill-count">${filtered.length}</span>
           `;
-          extContainer.appendChild(installedHeader);
+          extContainer.appendChild(header);
 
-          if (!installed.length) {
-            const emptyInstalled = document.createElement('div');
-            emptyInstalled.className = 'besing-empty-state';
-            emptyInstalled.style.padding = '10px';
-            emptyInstalled.textContent = q ? 'No installed scripts match your query.' : 'No scripts installed yet. Browse below to install.';
-            extContainer.appendChild(emptyInstalled);
-          } else {
-            installed.forEach(m => {
-              const card = document.createElement('div');
-              card.className = 'besing-ext-card';
-              const isEnabled = this.storage.isScriptEnabled(m.id, m.enabled);
-              card.innerHTML = `
-                <div class="besing-ext-info-group">
-                  <div class="besing-ext-icon">${m.icon || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>'}</div>
-                  <div class="besing-ext-meta">
-                    <div class="besing-ext-title-row">
-                      <span class="besing-ext-name">${m.name}</span>
-                      <span class="besing-ext-ver">v${m.version || '1.0.0'}</span>
-                      ${m.category ? `<span class="besing-cat-badge">${m.category}</span>` : ''}
-                    </div>
-                    <p class="besing-ext-desc">${m.description || ''}</p>
-                  </div>
-                </div>
-                <div class="besing-ext-actions">
-                  <label class="besing-switch" title="Toggle ${m.name}">
-                    <input type="checkbox" ${isEnabled ? 'checked' : ''}>
-                    <span class="besing-slider"></span>
-                  </label>
-                  <button class="besing-btn-uninstall" title="Uninstall Script">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                  </button>
-                </div>
-              `;
-
-              card.querySelector('input').onchange = async (e) => {
-                const val = e.target.checked;
-                await this.storage.setScriptEnabled(m.id, val);
-                if (val) {
-                  try { m.init(); } catch (err) {}
-                } else {
-                  try { m.destroy(); } catch (err) {}
-                }
-                this.updateBadge();
-              };
-
-              card.querySelector('.besing-btn-uninstall').onclick = async () => {
-                if (confirm(`Uninstall "${m.name}"? It will move back to Available Store Scripts.`)) {
-                  try { m.destroy(); } catch (err) {}
-                  this.modules = this.modules.filter(x => x.id !== m.id);
-                  await this.storage.setScriptEnabled(m.id, false);
-                  await this.storage.saveCustomModules(this.modules);
-                  this.updateBadge();
-                  renderExtCards();
-                }
-              };
-
-              extContainer.appendChild(card);
-            });
+          if (!filtered.length) {
+            const empty = document.createElement('div');
+            empty.className = 'besing-empty-state';
+            empty.textContent = q ? 'No scripts match your search.' : 'No scripts found.';
+            extContainer.appendChild(empty);
+            return;
           }
 
-          // Section 2: Available in Store
-          const storeHeader = document.createElement('div');
-          storeHeader.className = 'besing-section-heading store-heading';
-          storeHeader.innerHTML = `
-            <div style="display:flex;align-items:center;gap:6px;">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5"><circle cx="9" cy="21" r="1"></circle><circle cx="20" cy="21" r="1"></circle><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"></path></svg>
-              <span>Available in Store</span>
-            </div>
-            <span class="besing-pill-count">${catalog.length}</span>
-          `;
-          extContainer.appendChild(storeHeader);
+          filtered.forEach(m => {
+            const card = document.createElement('div');
+            card.className = 'besing-ext-card';
+            const currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'on'
 
-          if (!catalog.length) {
-            const emptyCatalog = document.createElement('div');
-            emptyCatalog.className = 'besing-empty-state';
-            emptyCatalog.style.padding = '10px';
-            emptyCatalog.textContent = q ? 'No store scripts match your query.' : 'All available scripts are installed!';
-            extContainer.appendChild(emptyCatalog);
-          } else {
-            catalog.forEach(item => {
-              const card = document.createElement('div');
-              card.className = 'besing-ext-card store-card';
-              card.innerHTML = `
-                <div class="besing-ext-info-group">
-                  <div class="besing-ext-icon">${item.icon || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>'}</div>
-                  <div class="besing-ext-meta">
-                    <div class="besing-ext-title-row">
-                      <span class="besing-ext-name">${item.name}</span>
-                      <span class="besing-ext-ver">v${item.version}</span>
-                      ${item.category ? `<span class="besing-cat-badge store">${item.category}</span>` : ''}
-                    </div>
-                    <p class="besing-ext-desc">${item.description}</p>
-                    <div class="besing-store-meta-line">
-                      <span>by ${item.author || 'Community'}</span>
-                      <span class="besing-source-tag">GF & GitHub</span>
-                    </div>
+            card.innerHTML = `
+              <div class="besing-ext-info-group">
+                <div class="besing-ext-icon">${m.icon || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>'}</div>
+                <div class="besing-ext-meta">
+                  <div class="besing-ext-title-row">
+                    <span class="besing-ext-name">${m.name}</span>
+                    <span class="besing-ext-ver">v${m.version || '1.0.0'}</span>
+                    ${m.category ? `<span class="besing-cat-badge">${m.category}</span>` : ''}
                   </div>
+                  <p class="besing-ext-desc">${m.description || ''}</p>
                 </div>
-                <div class="besing-ext-actions">
-                  <button class="besing-btn-install" id="install-btn-${item.id}">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                    Install
-                  </button>
-                </div>
-              `;
+              </div>
+              <div class="besing-ext-actions">
+                <button type="button" class="besing-btn-script-gear" data-script-id="${m.id}" title="Configure ${m.name}">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                </button>
+                <button type="button" class="besing-rotator-toggle mode-${currentMode}" data-script-id="${m.id}" title="State: ${currentMode.toUpperCase()}. Click to cycle (OFF -> ON -> SITE ONLY)">
+                  <span class="besing-rotator-knob"></span>
+                  <span class="besing-rotator-text">site only</span>
+                </button>
+              </div>
+            `;
 
-              const installBtn = card.querySelector(`#install-btn-${item.id}`);
-              installBtn.onclick = async () => {
-                await this.installScript(item, installBtn);
-                renderExtCards();
+            const rotatorBtn = card.querySelector('.besing-rotator-toggle');
+            rotatorBtn.onclick = async (e) => {
+              e.stopPropagation();
+              // Cycle order: off -> on (green) -> site (blue, "site only") -> off (grey)
+              let nextMode = 'on';
+              if (currentMode === 'off') {
+                nextMode = 'on';
+              } else if (currentMode === 'on') {
+                nextMode = 'site';
+              } else {
+                nextMode = 'off';
+              }
+              await this.storage.setScriptMode(m.id, nextMode, currentHost);
+              renderCards();
+              this.refreshCurrentSiteModules();
+            };
+
+            const btnGear = card.querySelector('.besing-btn-script-gear');
+            if (btnGear) {
+              btnGear.onclick = (e) => {
+                e.stopPropagation();
+                this.openScriptConfig(m.id);
               };
+            }
 
-              extContainer.appendChild(card);
-            });
-          }
+            const infoGroup = card.querySelector('.besing-ext-info-group');
+            if (infoGroup) {
+              infoGroup.style.cursor = 'pointer';
+              infoGroup.title = 'Click to open configuration for ' + m.name;
+              infoGroup.onclick = (e) => {
+                e.stopPropagation();
+                this.openScriptConfig(m.id);
+              };
+            }
+
+            extContainer.appendChild(card);
+          });
         };
 
         searchInput.oninput = (e) => {
           this.searchQuery = e.target.value.toLowerCase().trim();
-          renderExtCards();
+          renderCards();
         };
 
-        renderExtCards();
+        renderCards();
+      }
+    }
+
+    renderScriptConfig(body) {
+      const m = this.modules.find(mod => mod.id === this.activeConfigScriptId);
+      if (!m) {
+        this.currentView = 'extensions';
+        this.renderBody();
+        return;
+      }
+
+      const currentHost = this.storage.getCurrentHost();
+      const currentMode = this.storage.getScriptMode(m.id, currentHost);
+      const cfg = this.storage.getScriptConfig(m.id, currentHost);
+
+      let scopeNotice = '';
+      if (currentMode === 'site') {
+        scopeNotice = `
+          <div class="besing-config-scope site">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></svg>
+            <div><strong>Site-Only Config (${currentHost}):</strong> Settings are saved exclusively for this site and bypass global settings. Switching to OFF wipes this site's custom settings.</div>
+          </div>
+        `;
+      } else if (currentMode === 'on') {
+        scopeNotice = `
+          <div class="besing-config-scope global">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/></svg>
+            <div><strong>Global Config:</strong> Saved globally across all websites (unless a site-only override exists).</div>
+          </div>
+        `;
+      } else {
+        scopeNotice = `
+          <div class="besing-config-scope off">
+            <div>⚪ <strong>Script is currently OFF.</strong> Switch toggle to <strong>SITE</strong> or <strong>ON</strong> to activate.</div>
+          </div>
+        `;
+      }
+
+      let specificControls = '';
+
+      if (m.id === 'text-size-control') {
+        const curZoom = Math.max(70, Math.min(400, Number(cfg.fontSizePercent) || 125));
+        const presets = [100, 115, 125, 150, 175, 200, 250, 300];
+        const presetsHtml = presets.map(p => `
+          <button type="button" class="besing-zoom-pill ${curZoom === p ? 'active' : ''}" data-zoom="${p}">${p}%</button>
+        `).join('');
+
+        specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-zoom-hero">
+              <div class="besing-zoom-val" id="besing-zoom-val">${curZoom}%</div>
+              <div class="besing-zoom-desc">Active Text & Page Scale (Supports beyond 200% system max)</div>
+            </div>
+
+            <div class="besing-zoom-slider-row">
+              <button type="button" class="besing-stepper-btn" id="btn-zoom-minus" title="Decrease">−</button>
+              <input type="range" class="besing-slider-range" id="zoom-range" min="80" max="350" step="5" value="${curZoom}">
+              <button type="button" class="besing-stepper-btn" id="btn-zoom-plus" title="Increase">+</button>
+            </div>
+
+            <div class="besing-section-title" style="margin-top:10px;">Scale Presets</div>
+            <div class="besing-preset-row">
+              ${presetsHtml}
+            </div>
+
+            <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;">
+              <button type="button" class="besing-btn-sub-action" id="btn-reset-zoom">Reset to 100%</button>
+              <span style="font-size:10px;color:#64748b;">Counter-zoomed widget stays crisp</span>
+            </div>
+          </div>
+        `;
+      } else if (m.id === 'color-change') {
+        const curBrightness = Math.max(-100, Math.min(100, Number(cfg.brightness) || 0));
+        const curPreset = cfg.preset || 'eye-protect';
+        const customColor = cfg.customColor || '#cce8cf';
+
+        const presets = [
+          { key: 'none', name: 'Original', color: 'transparent', border: '#475569' },
+          { key: 'eye-protect', name: 'Eye Protect', color: '#cce8cf', border: '#86efac' },
+          { key: 'old-paper', name: 'Old Paper', color: '#f4ecd8', border: '#fcd34d' },
+          { key: 'dark', name: 'Dark Mode', color: '#18181b', border: '#38bdf8' },
+          { key: 'soft-sepia', name: 'Soft Sepia', color: '#eee4cd', border: '#d97706' },
+          { key: 'cool-mint', name: 'Cool Mint', color: '#e0f2fe', border: '#7dd3fc' }
+        ];
+
+        const presetsHtml = presets.map(p => `
+          <button type="button" class="besing-preset-card ${curPreset === p.key ? 'active' : ''}" data-preset="${p.key}">
+            <span class="besing-preset-swatch" style="background:${p.color};border-color:${p.border}"></span>
+            <span class="besing-preset-label">${p.name}</span>
+          </button>
+        `).join('');
+
+        let bLabel = '🎯 Normal (Original Site BG)';
+        if (curBrightness < 0) bLabel = `☀️ Lighter (+${Math.abs(curBrightness)}%)`;
+        else if (curBrightness > 0) bLabel = `🌙 Deep Dark (+${curBrightness}%)`;
+
+        specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Site BG Brightness Dragger</span>
+              <span class="besing-brightness-badge" id="brightness-badge">${bLabel}</span>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;line-height:1.35;margin-bottom:6px;">
+              Adjusts brightness directly on top of the current website-set background (e.g. blue becomes light blue dragging left, deep navy and dark dragging right).
+            </p>
+            <div class="besing-brightness-labels">
+              <span>☀️ Lighter (Drag Left)</span>
+              <span>🌙 Deep / Dark (Drag Right)</span>
+            </div>
+            <input type="range" class="besing-slider-range brightness-range" id="brightness-range" min="-100" max="100" step="2" value="${curBrightness}">
+            <div class="besing-range-ticks">
+              <span>−100% (Light)</span>
+              <span class="tick-center">0% (Normal)</span>
+              <span>+100% (Dark)</span>
+            </div>
+          </div>
+
+          <div class="besing-config-section" style="margin-top:10px;">
+            <div class="besing-section-title">Background Tone Presets</div>
+            <div class="besing-preset-grid">
+              ${presetsHtml}
+            </div>
+
+            <div class="besing-custom-color-row">
+              <label class="besing-custom-color-label">Custom Tone:</label>
+              <input type="color" id="custom-color-picker" value="${customColor}">
+              <input type="text" id="custom-color-hex" class="besing-input-sm" value="${customColor}">
+              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-color">Apply Custom</button>
+            </div>
+
+            <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+              <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset to Defaults</button>
+            </div>
+          </div>
+        `;
+      } else if (m.id === 'force-copy') {
+        const allowSelect = cfg.allowSelect !== false;
+        const allowCopy = cfg.allowCopy !== false;
+        const allowPaste = cfg.allowPaste !== false;
+        const allowContextMenu = cfg.allowContextMenu !== false;
+
+        specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-unlocked-banner">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+              <div>
+                <div style="font-weight:700;color:#f1f5f9;font-size:12px;">Copy & Selection Shield Active</div>
+                <div style="font-size:10px;color:#94a3b8;">CSS <code>user-select: none</code> restrictions and copy blocking event scripts are bypassed in capture phase.</div>
+              </div>
+            </div>
+
+            <div class="besing-toggle-row-list" style="margin-top:12px;">
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Force Allow Text Selection</div>
+                  <div class="besing-toggle-desc">Overrides CSS <code>user-select: none</code> on all elements</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-allow-select" ${allowSelect ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Force Allow Copy & Cut</div>
+                  <div class="besing-toggle-desc">Bypasses Ctrl+C, Ctrl+X, and clipboard prevention listeners</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-allow-copy" ${allowCopy ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Force Allow Paste</div>
+                  <div class="besing-toggle-desc">Permits pasting into protected password & text inputs</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-allow-paste" ${allowPaste ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Allow Right-Click Context Menu</div>
+                  <div class="besing-toggle-desc">Bypasses right-click blocking event listeners</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-allow-context" ${allowContextMenu ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="besing-copy-test-box">
+              <div style="font-size:11px;font-weight:600;color:#cbd5e1;margin-bottom:4px;">Selection & Copy Sandbox:</div>
+              <div class="besing-test-text" id="besing-test-selection" style="user-select:text;-webkit-user-select:text;">
+                ✨ Try selecting and copying this text (Ctrl+C), then paste below to verify!
+              </div>
+              <input type="text" class="besing-test-input" placeholder="Paste (Ctrl+V) copied text here to test...">
+            </div>
+          </div>
+        `;
+      } else {
+        specificControls = `
+          <div class="besing-config-section">
+            <p style="font-size:11px;color:#94a3b8;line-height:1.4;">${m.description || 'No additional custom options for this script.'}</p>
+            <div style="margin-top:12px;font-size:10px;color:#64748b;">
+              Author: ${m.author || 'BESing Team'} | Category: ${m.category || 'General'}
+            </div>
+          </div>
+        `;
+      }
+
+      body.innerHTML = `
+        <div class="besing-secondary-header">
+          <button type="button" class="besing-btn-back" id="besing-btn-back">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+            <span>All Scripts</span>
+          </button>
+          <div class="besing-secondary-title-group">
+            <div class="besing-ext-icon sm">${m.icon || ''}</div>
+            <div class="besing-secondary-meta">
+              <span class="besing-secondary-title">${m.name}</span>
+              <span class="besing-ext-ver">v${m.version || '1.0.0'}</span>
+            </div>
+          </div>
+          <div class="besing-tri-toggle" title="Toggle: OFF, SITE (${currentHost}), or ON (Global)">
+            <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off">OFF</button>
+            <button type="button" class="besing-tri-btn ${currentMode === 'site' ? 'active active-site' : ''}" data-mode="site">SITE</button>
+            <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on">ON</button>
+          </div>
+        </div>
+
+        ${scopeNotice}
+
+        <div class="besing-secondary-content" style="display:flex;flex-direction:column;gap:10px;">
+          ${specificControls}
+        </div>
+      `;
+
+      // Bind Back Button
+      const btnBack = body.querySelector('#besing-btn-back');
+      if (btnBack) {
+        btnBack.onclick = () => {
+          this.currentView = 'extensions';
+          this.renderBody();
+        };
+      }
+
+      // Bind Tri-Toggle in Secondary Menu
+      const btnOff = body.querySelector('[data-mode="off"]');
+      const btnSite = body.querySelector('[data-mode="site"]');
+      const btnOn = body.querySelector('[data-mode="on"]');
+
+      const handleModeChange = async (newMode) => {
+        await this.storage.setScriptMode(m.id, newMode, currentHost);
+        this.refreshCurrentSiteModules();
+        this.renderBody();
+      };
+
+      if (btnOff) btnOff.onclick = (e) => { e.stopPropagation(); handleModeChange('off'); };
+      if (btnSite) btnSite.onclick = (e) => { e.stopPropagation(); handleModeChange('site'); };
+      if (btnOn) btnOn.onclick = (e) => { e.stopPropagation(); handleModeChange('on'); };
+
+      // Bind Handlers
+      if (m.id === 'text-size-control') {
+        const zoomVal = body.querySelector('#besing-zoom-val');
+        const zoomRange = body.querySelector('#zoom-range');
+        const btnMinus = body.querySelector('#btn-zoom-minus');
+        const btnPlus = body.querySelector('#btn-zoom-plus');
+        const btnReset = body.querySelector('#btn-reset-zoom');
+
+        const updateZoom = async (val) => {
+          const clamped = Math.max(80, Math.min(350, Math.round(val)));
+          if (zoomVal) zoomVal.textContent = `${clamped}%`;
+          if (zoomRange) zoomRange.value = clamped;
+          body.querySelectorAll('.besing-zoom-pill').forEach(btn => {
+            btn.classList.toggle('active', Number(btn.getAttribute('data-zoom')) === clamped);
+          });
+          await this.applyScriptConfig(m.id, { fontSizePercent: clamped });
+        };
+
+        if (zoomRange) {
+          zoomRange.oninput = (e) => updateZoom(e.target.value);
+        }
+        if (btnMinus) {
+          btnMinus.onclick = () => updateZoom(Number(zoomRange.value) - 10);
+        }
+        if (btnPlus) {
+          btnPlus.onclick = () => updateZoom(Number(zoomRange.value) + 10);
+        }
+        if (btnReset) {
+          btnReset.onclick = () => updateZoom(100);
+        }
+        body.querySelectorAll('.besing-zoom-pill').forEach(btn => {
+          btn.onclick = () => updateZoom(Number(btn.getAttribute('data-zoom')));
+        });
+      } else if (m.id === 'color-change') {
+        const bRange = body.querySelector('#brightness-range');
+        const bBadge = body.querySelector('#brightness-badge');
+        const customPicker = body.querySelector('#custom-color-picker');
+        const customHex = body.querySelector('#custom-color-hex');
+        const btnApplyCustom = body.querySelector('#btn-apply-custom-color');
+        const btnResetBg = body.querySelector('#btn-reset-bg');
+
+        const updateBrightness = async (val) => {
+          const b = Number(val);
+          if (bBadge) {
+            if (b < 0) bBadge.textContent = `☀️ Lighter (+${Math.abs(b)}%)`;
+            else if (b > 0) bBadge.textContent = `🌙 Deep Dark (+${b}%)`;
+            else bBadge.textContent = '🎯 Normal (Original BG)';
+          }
+          await this.applyScriptConfig(m.id, { brightness: b });
+        };
+
+        if (bRange) {
+          bRange.oninput = (e) => updateBrightness(e.target.value);
+        }
+
+        body.querySelectorAll('.besing-preset-card').forEach(card => {
+          card.onclick = async () => {
+            const pKey = card.getAttribute('data-preset');
+            body.querySelectorAll('.besing-preset-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            await this.applyScriptConfig(m.id, { preset: pKey });
+          };
+        });
+
+        if (customPicker && customHex) {
+          customPicker.oninput = (e) => {
+            customHex.value = e.target.value;
+          };
+          if (btnApplyCustom) {
+            btnApplyCustom.onclick = async () => {
+              const col = customHex.value.trim() || '#cce8cf';
+              body.querySelectorAll('.besing-preset-card').forEach(c => c.classList.remove('active'));
+              await this.applyScriptConfig(m.id, { preset: 'custom', customColor: col });
+            };
+          }
+        }
+
+        if (btnResetBg) {
+          btnResetBg.onclick = async () => {
+            if (bRange) bRange.value = 0;
+            updateBrightness(0);
+            body.querySelectorAll('.besing-preset-card').forEach(c => {
+              c.classList.toggle('active', c.getAttribute('data-preset') === 'none');
+            });
+            await this.applyScriptConfig(m.id, { brightness: 0, preset: 'none' });
+          };
+        }
+      } else if (m.id === 'force-copy') {
+        const chkSelect = body.querySelector('#chk-allow-select');
+        const chkCopy = body.querySelector('#chk-allow-copy');
+        const chkPaste = body.querySelector('#chk-allow-paste');
+        const chkContext = body.querySelector('#chk-allow-context');
+
+        const saveForceCopy = async () => {
+          await this.applyScriptConfig(m.id, {
+            allowSelect: !!(chkSelect && chkSelect.checked),
+            allowCopy: !!(chkCopy && chkCopy.checked),
+            allowPaste: !!(chkPaste && chkPaste.checked),
+            allowContextMenu: !!(chkContext && chkContext.checked)
+          });
+        };
+
+        if (chkSelect) chkSelect.onchange = saveForceCopy;
+        if (chkCopy) chkCopy.onchange = saveForceCopy;
+        if (chkPaste) chkPaste.onchange = saveForceCopy;
+        if (chkContext) chkContext.onchange = saveForceCopy;
       }
     }
 
     closeModal() {
+      if (this.outsideClickHandler) {
+        document.removeEventListener('click', this.outsideClickHandler, true);
+        document.removeEventListener('click', this.outsideClickHandler, false);
+        this.outsideClickHandler = null;
+      }
       if (this.menuWrapperEl) {
         this.menuWrapperEl.remove();
         this.menuWrapperEl = null;
@@ -1657,6 +2728,11 @@
         .besing-trigger.folded-left::after { content: ""; position: absolute; right: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
         .besing-trigger.folded-top:not(.folded-right)::before, .besing-trigger.folded-top.folded-right::after { content: ""; position: absolute; bottom: 2px; left: 14px; right: 14px; height: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
         .besing-trigger.folded-bottom:not(.folded-left)::after, .besing-trigger.folded-bottom.folded-left::before { content: ""; position: absolute; top: 2px; left: 14px; right: 14px; height: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
+        .besing-trigger.redirect-alert { border-color: #ef4444 !important; box-shadow: 0 0 20px rgba(239, 68, 68, 0.9), 0 0 35px rgba(239, 68, 68, 0.6) !important; }
+        .besing-trigger.redirect-alert::before, .besing-trigger.redirect-alert::after { background: #ef4444 !important; box-shadow: 0 0 16px #ef4444, 0 0 26px #ef4444 !important; animation: besingBarBlink 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite !important; }
+        @keyframes besingBarBlink { 0%, 100% { opacity: 1; transform: scale(1.15); } 50% { opacity: 0.15; transform: scale(0.85); } }
+        .besing-trigger.besing-pulse-alert { border-color: #38bdf8 !important; box-shadow: 0 0 25px rgba(56, 189, 248, 1), 0 0 50px rgba(99, 102, 241, 0.8) !important; animation: besingPulsePop 0.6s cubic-bezier(0.16, 1, 0.3, 1) 3 !important; }
+        @keyframes besingPulsePop { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.35); } }
         .besing-badge-count { position: absolute; top: -2px; right: -2px; background: linear-gradient(135deg, #06b6d4, #3b82f6); color: #fff; font-size: 10px; font-weight: 700; height: 18px; min-width: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #0f172a; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
         .besing-pet-eye { transform-origin: center; animation: petBlink 4.5s infinite; }
         .besing-pet-face:hover .besing-pet-eye { animation: none; transform: scaleY(0.2) translateY(1px); }
@@ -1705,79 +2781,116 @@
         .besing-theme-btn { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 8px 4px; display: flex; flex-direction: column; align-items: center; gap: 4px; color: #cbd5e1; font-size: 11px; cursor: pointer; transition: all 0.15s ease; }
         .besing-theme-btn:hover { background: rgba(255, 255, 255, 0.08); border-color: rgba(99, 102, 241, 0.4); }
         .besing-theme-btn.active { background: rgba(99, 102, 241, 0.2); border-color: #818cf8; color: #f8fafc; box-shadow: 0 0 10px rgba(99, 102, 241, 0.25); }
-        .besing-agent-card { background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-        .besing-agent-status-row { display: flex; align-items: center; justify-content: space-between; }
-        .besing-status-pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 12px; display: flex; align-items: center; gap: 5px; }
-        .besing-status-pill.connected { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-        .besing-status-pill.error { background: rgba(239, 68, 68, 0.15); color: #f87171; }
-        .besing-status-pill.idle { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
-        .besing-sync-btn-group { display: flex; gap: 8px; }
-        .besing-btn-sync { flex: 1; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 6px; padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; transition: all 0.15s ease; }
-        .besing-btn-sync:hover { background: rgba(56, 189, 248, 0.25); color: #e0f2fe; }
-        .besing-site-card { background: rgba(239, 68, 68, 0.06); border: 1px solid rgba(239, 68, 68, 0.2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+        .besing-rotator-toggle { position: relative; width: 62px; height: 24px; border-radius: 12px; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; outline: none; transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1); flex-shrink: 0; box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4); }
+        .besing-rotator-toggle:hover { filter: brightness(1.1); transform: scale(1.02); }
+        .besing-rotator-toggle.mode-off { background-color: #334155; }
+        .besing-rotator-toggle.mode-off .besing-rotator-knob { position: absolute; left: 3px; width: 18px; height: 18px; border-radius: 50%; background-color: #ffffff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35); transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+        .besing-rotator-toggle.mode-off .besing-rotator-text { display: none; }
+        .besing-rotator-toggle.mode-on { background-color: #10b981; box-shadow: 0 0 10px rgba(16, 185, 129, 0.35), inset 0 1px 2px rgba(0, 0, 0, 0.2); }
+        .besing-rotator-toggle.mode-on .besing-rotator-knob { position: absolute; left: 3px; transform: translateX(38px); width: 18px; height: 18px; border-radius: 50%; background-color: #ffffff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35); transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+        .besing-rotator-toggle.mode-on .besing-rotator-text { display: none; }
+        .besing-rotator-toggle.mode-site { background: linear-gradient(135deg, #0284c7, #2563eb); box-shadow: 0 0 10px rgba(56, 189, 248, 0.35), inset 0 1px 2px rgba(0, 0, 0, 0.2); }
+        .besing-rotator-toggle.mode-site .besing-rotator-knob { display: none; }
+        .besing-rotator-toggle.mode-site .besing-rotator-text { display: block; color: #ffffff; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; user-select: none; pointer-events: none; }
+        .besing-site-card { background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
         .besing-site-card-header { display: flex; align-items: center; justify-content: space-between; }
-        .besing-current-domain { font-size: 12px; font-weight: 600; color: #fca5a5; font-family: monospace; }
-        .besing-site-warn { font-size: 11px; color: #94a3b8; line-height: 1.35; }
-        .besing-btn-danger { background: linear-gradient(135deg, #ef4444, #dc2626); color: #ffffff; border: none; border-radius: 8px; padding: 7px 12px; font-size: 11px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; transition: all 0.15s ease; }
-        .besing-btn-danger:hover { background: linear-gradient(135deg, #f87171, #ef4444); transform: translateY(-1px); }
+        .besing-current-domain { font-size: 12px; font-weight: 600; color: #38bdf8; font-family: monospace; }
+        .besing-site-rules-wrap { display: flex; flex-direction: column; gap: 8px; }
+        .besing-site-rules-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }
+        .besing-site-group { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; overflow: hidden; }
+        .besing-site-group-header { padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: space-between; }
+        .besing-site-group-title { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: #f1f5f9; font-family: monospace; }
+        .besing-btn-del-site { background: transparent; border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px; cursor: pointer; transition: all 0.15s ease; }
+        .besing-btn-del-site:hover { background: rgba(239, 68, 68, 0.2); border-color: #ef4444; }
+        .besing-site-subrules { display: flex; flex-direction: column; padding: 4px 10px; }
+        .besing-site-rule-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
+        .besing-site-rule-row:last-child { border-bottom: none; }
+        .besing-site-rule-info { display: flex; align-items: center; gap: 6px; }
+        .besing-site-rule-name { font-size: 11px; font-weight: 500; color: #e2e8f0; }
+        .besing-site-rule-tag { font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 4px; }
+        .besing-site-rule-actions { display: flex; align-items: center; gap: 6px; }
+        .besing-switch-sm { width: 32px; height: 18px; }
+        .besing-switch-sm .besing-slider::before { height: 12px; width: 12px; left: 3px; bottom: 3px; }
+        .besing-switch-sm input:checked + .besing-slider::before { transform: translateX(14px); }
+        .besing-rule-remove { background: transparent; border: none; color: #94a3b8; font-size: 12px; cursor: pointer; padding: 2px 5px; border-radius: 4px; transition: all 0.15s ease; }
+        .besing-rule-remove:hover { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
         .besing-blocklist-header { display: flex; align-items: center; justify-content: space-between; }
         .besing-blocklist-title { font-size: 11px; font-weight: 700; color: #cbd5e1; text-transform: uppercase; letter-spacing: 0.5px; }
         .besing-blocklist-count { font-size: 10px; color: #64748b; background: rgba(255, 255, 255, 0.05); padding: 2px 6px; border-radius: 10px; }
-        .besing-blocked-list { display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; }
-        .besing-blocked-item { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 6px; padding: 7px 10px; display: flex; align-items: center; justify-content: space-between; }
-        .besing-blocked-domain { font-family: monospace; font-size: 11px; color: #e2e8f0; }
-        .besing-blocked-date { font-size: 10px; color: #64748b; margin-left: 6px; }
-        .besing-btn-unblock { background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 3px 8px; font-size: 10px; font-weight: 600; cursor: pointer; }
-        .besing-btn-unblock:hover { background: rgba(56, 189, 248, 0.25); color: #7dd3fc; }
         .besing-empty-state { text-align: center; padding: 18px 10px; color: #64748b; font-size: 12px; background: rgba(255, 255, 255, 0.02); border-radius: 8px; border: 1px dashed rgba(255, 255, 255, 0.08); }
         .besing-update-card { background: rgba(167, 139, 250, 0.06); border: 1px solid rgba(167, 139, 250, 0.25); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
         .besing-update-header { display: flex; align-items: center; justify-content: space-between; }
-        .besing-version-row { display: grid; grid-template-columns: 1fr 1.6fr; gap: 8px; align-items: center; }
-        .besing-version-col { display: flex; flex-direction: column; gap: 3px; }
-        .besing-version-label { font-size: 10px; color: #94a3b8; text-transform: uppercase; font-weight: 600; letter-spacing: 0.4px; }
-        .besing-version-val { font-size: 13px; font-weight: 700; color: #e2e8f0; font-family: monospace; }
-        .besing-channel-select { background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(167, 139, 250, 0.3); border-radius: 6px; color: #f8fafc; font-size: 11px; padding: 5px 8px; outline: none; cursor: pointer; }
-        .besing-channel-select:focus { border-color: #a78bfa; }
         .besing-update-actions { display: flex; gap: 8px; }
-        .besing-btn-update { flex: 1; background: linear-gradient(135deg, #8b5cf6, #ec4899); color: #ffffff; border: none; border-radius: 6px; padding: 6px 10px; font-size: 11px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; box-shadow: 0 0 12px rgba(236, 72, 153, 0.35); transition: all 0.15s ease; }
-        .besing-btn-update:hover { transform: translateY(-1px); box-shadow: 0 0 16px rgba(236, 72, 153, 0.55); }
-        .besing-btn-update.hidden { display: none !important; }
+        .besing-btn-sync { background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 6px; padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; transition: all 0.15s ease; }
+        .besing-btn-sync:hover { background: rgba(56, 189, 248, 0.25); color: #e0f2fe; }
         .besing-update-msg { font-size: 10px; color: #cbd5e1; min-height: 14px; line-height: 1.35; }
-        .besing-status-pill.update-ready { background: rgba(236, 72, 153, 0.2); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.4); animation: besingGlow 1.5s infinite alternate; }
-        @keyframes besingGlow { 0% { box-shadow: 0 0 4px rgba(236, 72, 153, 0.3); } 100% { box-shadow: 0 0 10px rgba(236, 72, 153, 0.8); } }
         @keyframes besingBubblePop { 0% { opacity: 0; transform: scale(0.92) translateY(6px); } 100% { opacity: 1; transform: scale(1) translateY(0); } }
-        @media (max-width: 520px) {
-          .besing-bubble-panel { width: calc(100vw - 20px) !important; max-width: calc(100vw - 20px) !important; max-height: 75vh !important; border-radius: 16px; }
-          .besing-trigger { width: 48px; height: 48px; }
-          .besing-trigger.folded-right { transform: translateX(55%); }
-          .besing-trigger.folded-left { transform: translateX(-55%); }
-          .besing-body { padding: 12px 14px; gap: 10px; }
-          .besing-theme-grid { grid-template-columns: repeat(2, 1fr); }
-          .besing-btn-danger, .besing-btn-sync, .besing-theme-btn { min-height: 40px; }
-          .besing-switch { width: 44px; height: 24px; }
-          .besing-slider::before { height: 18px; width: 18px; }
-          .besing-switch input:checked + .besing-slider::before { transform: translateX(20px); }
-        }
         .besing-section-heading { display: flex; align-items: center; justify-content: space-between; font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.6px; margin: 4px 0 2px 0; }
-        .besing-section-heading.store-heading { color: #34d399; margin-top: 14px; border-top: 1px dashed rgba(255, 255, 255, 0.08); padding-top: 12px; }
         .besing-pill-count { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
         .besing-cat-badge { font-size: 9px; font-weight: 600; padding: 1px 6px; border-radius: 6px; background: rgba(99, 102, 241, 0.15); color: #a5b4fc; margin-left: 4px; }
-        .besing-cat-badge.store { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-        .besing-btn-install { background: linear-gradient(135deg, #10b981, #06b6d4); color: #ffffff; border: none; border-radius: 6px; padding: 5px 10px; font-size: 11px; font-weight: 700; cursor: pointer; display: flex; align-items: center; gap: 4px; transition: all 0.15s ease; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3); }
-        .besing-btn-install:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(16, 185, 129, 0.5); }
-        .besing-btn-uninstall { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: #f87171; border-radius: 6px; padding: 5px 7px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease; }
-        .besing-btn-uninstall:hover { background: rgba(239, 68, 68, 0.25); color: #fca5a5; }
-        .besing-store-meta-line { display: flex; align-items: center; gap: 8px; font-size: 10px; color: #64748b; margin-top: 4px; }
-        .besing-source-tag { background: rgba(56, 189, 248, 0.1); color: #38bdf8; padding: 1px 5px; border-radius: 4px; font-weight: 600; }
         .besing-ext-actions { display: flex; align-items: center; gap: 8px; }
-        .besing-spinner { width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #ffffff; border-radius: 50%; display: inline-block; animation: besingSpin 0.7s linear infinite; }
-        @keyframes besingSpin { to { transform: rotate(360deg); } }
+        .besing-btn-script-gear { background: transparent; border: none; color: #64748b; width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; }
+        .besing-btn-script-gear:hover { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; transform: rotate(30deg); }
+        .besing-secondary-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+        .besing-btn-back { display: inline-flex; align-items: center; gap: 4px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #cbd5e1; padding: 5px 9px; border-radius: 7px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.15s ease; }
+        .besing-btn-back:hover { background: rgba(99, 102, 241, 0.2); border-color: #818cf8; color: #fff; }
+        .besing-secondary-title-group { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+        .besing-ext-icon.sm { width: 26px; height: 26px; border-radius: 6px; font-size: 11px; }
+        .besing-secondary-meta { display: flex; flex-direction: column; overflow: hidden; }
+        .besing-secondary-title { font-size: 12px; font-weight: 700; color: #f8fafc; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+        .besing-config-scope { font-size: 11px; line-height: 1.4; padding: 8px 10px; border-radius: 8px; display: flex; align-items: flex-start; gap: 8px; }
+        .besing-config-scope.site { background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.25); color: #7dd3fc; }
+        .besing-config-scope.global { background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); color: #6ee7b7; }
+        .besing-config-scope.off { background: rgba(255, 255, 255, 0.03); border: 1px dashed rgba(255, 255, 255, 0.1); color: #94a3b8; }
+        .besing-config-section { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+        .besing-section-header-row { display: flex; align-items: center; justify-content: space-between; }
+        .besing-brightness-badge { font-size: 10px; font-weight: 700; background: rgba(99, 102, 241, 0.2); color: #a5b4fc; padding: 2px 7px; border-radius: 10px; border: 1px solid rgba(99, 102, 241, 0.3); }
+        .besing-zoom-hero { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 14px 10px; background: rgba(15, 23, 42, 0.55); border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.06); }
+        .besing-zoom-val { font-size: 32px; font-weight: 800; color: #38bdf8; letter-spacing: -0.5px; text-shadow: 0 0 16px rgba(56, 189, 248, 0.4); }
+        .besing-zoom-desc { font-size: 10px; color: #64748b; }
+        .besing-zoom-slider-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+        .besing-stepper-btn { width: 28px; height: 28px; border-radius: 8px; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); color: #f1f5f9; font-size: 16px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease; }
+        .besing-stepper-btn:hover { background: rgba(99, 102, 241, 0.3); border-color: #818cf8; }
+        .besing-slider-range { flex: 1; accent-color: #38bdf8; cursor: pointer; height: 6px; border-radius: 3px; }
+        .besing-slider-range.brightness-range { accent-color: #a78bfa; }
+        .besing-preset-row { display: flex; flex-wrap: wrap; gap: 6px; }
+        .besing-zoom-pill { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); color: #cbd5e1; font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease; }
+        .besing-zoom-pill:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+        .besing-zoom-pill.active { background: rgba(56, 189, 248, 0.2); border-color: #38bdf8; color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.3); }
+        .besing-brightness-labels { display: flex; justify-content: space-between; font-size: 10px; color: #94a3b8; }
+        .besing-range-ticks { display: flex; justify-content: space-between; font-size: 9px; color: #64748b; margin-top: -2px; }
+        .besing-preset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        .besing-preset-card { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 6px; display: flex; align-items: center; gap: 6px; cursor: pointer; transition: all 0.15s ease; color: #cbd5e1; }
+        .besing-preset-card:hover { background: rgba(255, 255, 255, 0.07); }
+        .besing-preset-card.active { background: rgba(99, 102, 241, 0.18); border-color: #818cf8; color: #fff; }
+        .besing-preset-swatch { width: 14px; height: 14px; border-radius: 4px; border: 1.5px solid rgba(255, 255, 255, 0.2); flex-shrink: 0; }
+        .besing-preset-label { font-size: 10px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .besing-custom-color-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+        .besing-custom-color-label { font-size: 10px; color: #94a3b8; }
+        .besing-input-sm { background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.1); color: #fff; border-radius: 6px; padding: 3px 6px; font-size: 11px; font-family: monospace; width: 65px; }
+        .besing-btn-sub-action { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); color: #94a3b8; font-size: 10px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease; }
+        .besing-btn-sub-action:hover { background: rgba(255, 255, 255, 0.09); color: #f1f5f9; }
+        .besing-unlocked-banner { display: flex; align-items: center; gap: 10px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 10px; padding: 10px; }
+        .besing-toggle-row-list { display: flex; flex-direction: column; gap: 8px; }
+        .besing-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
+        .besing-toggle-row:last-child { border-bottom: none; }
+        .besing-toggle-title { font-size: 11px; font-weight: 600; color: #f1f5f9; }
+        .besing-toggle-desc { font-size: 10px; color: #64748b; }
+        .besing-copy-test-box { margin-top: 10px; background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 8px; }
+        .besing-test-text { background: rgba(255, 255, 255, 0.04); border-radius: 6px; padding: 6px 8px; font-size: 11px; color: #38bdf8; margin-bottom: 6px; }
+        .besing-test-input { width: 100%; background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; padding: 6px 8px; font-size: 11px; color: #f1f5f9; outline: none; }
+        .besing-test-input:focus { border-color: #10b981; }
       `;
       shadow.appendChild(style);
     }
   }
 
   const app = new BESManagerApp();
+  try {
+    window.__BESING_INSTANCE__ = app;
+    if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_INSTANCE__ = app;
+  } catch (e) {}
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => app.init());
   } else {

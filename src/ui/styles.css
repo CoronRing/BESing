@@ -819,3 +819,354 @@
   }
 }
 
+/* Secondary Menu & Script Configuration Styles */
+.besing-btn-script-gear {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.besing-btn-script-gear:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  transform: rotate(30deg);
+}
+.besing-secondary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.besing-btn-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #cbd5e1;
+  padding: 5px 9px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.besing-btn-back:hover {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: #818cf8;
+  color: #fff;
+}
+.besing-secondary-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.besing-ext-icon.sm {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+.besing-secondary-meta {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.besing-secondary-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #f8fafc;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.besing-config-scope {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border-radius: 8px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.besing-config-scope.site {
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  color: #7dd3fc;
+}
+.besing-config-scope.global {
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  color: #6ee7b7;
+}
+.besing-config-scope.off {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+}
+.besing-config-section {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.besing-section-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.besing-brightness-badge {
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(99, 102, 241, 0.2);
+  color: #a5b4fc;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+}
+.besing-zoom-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 14px 10px;
+  background: rgba(15, 23, 42, 0.55);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.besing-zoom-val {
+  font-size: 32px;
+  font-weight: 800;
+  color: #38bdf8;
+  letter-spacing: -0.5px;
+  text-shadow: 0 0 16px rgba(56, 189, 248, 0.4);
+}
+.besing-zoom-desc {
+  font-size: 10px;
+  color: #64748b;
+}
+.besing-zoom-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.besing-stepper-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f1f5f9;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+.besing-stepper-btn:hover {
+  background: rgba(99, 102, 241, 0.3);
+  border-color: #818cf8;
+}
+.besing-slider-range {
+  flex: 1;
+  accent-color: #38bdf8;
+  cursor: pointer;
+  height: 6px;
+  border-radius: 3px;
+}
+.besing-slider-range.brightness-range {
+  accent-color: #a78bfa;
+}
+.besing-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.besing-zoom-pill {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.besing-zoom-pill:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+.besing-zoom-pill.active {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: #38bdf8;
+  color: #38bdf8;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
+}
+.besing-brightness-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #94a3b8;
+}
+.besing-range-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: #64748b;
+  margin-top: -2px;
+}
+.besing-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.besing-preset-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  color: #cbd5e1;
+}
+.besing-preset-card:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.besing-preset-card.active {
+  background: rgba(99, 102, 241, 0.18);
+  border-color: #818cf8;
+  color: #fff;
+}
+.besing-preset-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
+  flex-shrink: 0;
+}
+.besing-preset-label {
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.besing-custom-color-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.besing-custom-color-label {
+  font-size: 10px;
+  color: #94a3b8;
+}
+.besing-input-sm {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-family: monospace;
+  width: 65px;
+}
+.besing-btn-sub-action {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.besing-btn-sub-action:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: #f1f5f9;
+}
+.besing-unlocked-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 10px;
+  padding: 10px;
+}
+.besing-toggle-row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.besing-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.besing-toggle-row:last-child {
+  border-bottom: none;
+}
+.besing-toggle-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+.besing-toggle-desc {
+  font-size: 10px;
+  color: #64748b;
+}
+.besing-copy-test-box {
+  margin-top: 10px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 8px;
+}
+.besing-test-text {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: #38bdf8;
+  margin-bottom: 6px;
+}
+.besing-test-input {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: #f1f5f9;
+  outline: none;
+}
+.besing-test-input:focus {
+  border-color: #10b981;
+}
+
