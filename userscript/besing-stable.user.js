@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BESing Stable Loader
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.1
-// @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub.
+// @version      1.0.2
+// @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub with silent auto-updates.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -21,14 +21,40 @@
 (function () {
   'use strict';
 
-  // Release URL endpoint (GitHub Raw primary, local fallback)
+  // Mark environment so inner script knows it is running under the stable bootstrapper
+  try {
+    if (typeof window !== 'undefined') window.__BESING_ENVIRONMENT__ = 'stable-loader';
+    if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_ENVIRONMENT__ = 'stable-loader';
+  } catch (e) {}
+
   const REMOTE_SCRIPT_URL = 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js';
+  const REMOTE_META_URL = 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.meta.js';
   const LOCAL_DEV_URL = 'http://127.0.0.1:8765/userscript/besing-manager.user.js';
-  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  const CHECK_INTERVAL_MS = 15 * 60 * 1000; // Check meta.js every 15 minutes in background
+
+  function parseVersion(text) {
+    if (!text || typeof text !== 'string') return null;
+    const match = text.match(/@version\s+([0-9\.]+)/i);
+    return match ? match[1].trim() : null;
+  }
+
+  function compareVersions(vA, vB) {
+    const a = (vA || '0').split('.').map(n => parseInt(n, 10) || 0);
+    const b = (vB || '0').split('.').map(n => parseInt(n, 10) || 0);
+    const len = Math.max(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      const numA = a[i] || 0;
+      const numB = b[i] || 0;
+      if (numA > numB) return 1;
+      if (numA < numB) return -1;
+    }
+    return 0;
+  }
 
   function runCode(code) {
     if (!code || typeof code !== 'string') return;
     try {
+      if (typeof window !== 'undefined') window.__BESING_ENVIRONMENT__ = 'stable-loader';
       // Pass GM APIs explicitly so the dynamically evaluated script has full userscript powers
       const exec = new Function(
         'GM_getValue',
@@ -100,57 +126,90 @@
     });
   }
 
-  async function checkAndRefresh(force = false) {
-    const lastCheck = (typeof GM_getValue === 'function') ? GM_getValue('besing_last_check', 0) : 0;
-    const now = Date.now();
-    if (!force && (now - lastCheck < ONE_DAY_MS)) return null;
-
+  async function downloadAndCacheFull() {
+    let code = null;
     try {
-      let code = null;
-      try {
-        code = await fetchRemote(REMOTE_SCRIPT_URL);
-      } catch (e) {
-        console.warn('[BESing Stable Loader] Remote fetch failed, trying local server:', e.message);
-        code = await fetchRemote(LOCAL_DEV_URL);
-      }
-
-      if (code && code.length > 500) {
-        if (typeof GM_setValue === 'function') {
-          GM_setValue('besing_cached_code', code);
-          GM_setValue('besing_last_check', now);
-        }
-        console.log('[BESing Stable Loader] Successfully fetched and cached latest BESing release.');
-        return code;
-      }
+      code = await fetchRemote(REMOTE_SCRIPT_URL);
     } catch (e) {
-      console.warn('[BESing Stable Loader] Update skipped/failed:', e.message);
+      console.warn('[BESing Stable Loader] Remote fetch failed, trying local server:', e.message);
+      code = await fetchRemote(LOCAL_DEV_URL);
+    }
+
+    if (code && code.length > 500) {
+      const ver = parseVersion(code) || '1.0.0';
+      if (typeof GM_setValue === 'function') {
+        GM_setValue('besing_cached_code', code);
+        GM_setValue('besing_cached_version', ver);
+        GM_setValue('besing_last_check', Date.now());
+      }
+      console.log(`[BESing Stable Loader] Successfully fetched and cached latest BESing release (v${ver}).`);
+      return { code, version: ver };
     }
     return null;
   }
 
-  // 1. Instant execution of cached version
+  async function checkAndAutoUpdate(force = false) {
+    const now = Date.now();
+    const lastCheck = (typeof GM_getValue === 'function') ? GM_getValue('besing_last_check', 0) : 0;
+    const currentVer = (typeof GM_getValue === 'function') ? GM_getValue('besing_cached_version', '0.0.0') : '0.0.0';
+
+    if (!force && (now - lastCheck < CHECK_INTERVAL_MS)) return null;
+
+    try {
+      if (force) {
+        return await downloadAndCacheFull();
+      }
+
+      // Check lightweight meta.js first (~300 bytes)
+      const meta = await fetchRemote(REMOTE_META_URL);
+      const remoteVer = parseVersion(meta);
+      if (typeof GM_setValue === 'function') {
+        GM_setValue('besing_last_check', now);
+      }
+
+      if (remoteVer && compareVersions(remoteVer, currentVer) > 0) {
+        console.log(`[BESing Stable Loader] Newer version v${remoteVer} found (cached is v${currentVer}). Silently auto-updating...`);
+        const res = await downloadAndCacheFull();
+        try {
+          window.dispatchEvent(new CustomEvent('besing:auto-updated', { detail: { version: remoteVer } }));
+        } catch (e) {}
+        return res;
+      }
+    } catch (e) {
+      console.warn('[BESing Stable Loader] Auto-update check skipped/failed:', e.message);
+    }
+    return null;
+  }
+
+  // Expose global hooks for inner application
+  if (typeof window !== 'undefined') {
+    window.__BESING_ENVIRONMENT__ = 'stable-loader';
+    window.__BESING_AUTO_UPDATE__ = async (force = true) => {
+      const res = await downloadAndCacheFull();
+      return res ? { ok: true, version: res.version } : { ok: false };
+    };
+    window.__BESING_RELOAD_LATEST__ = async () => {
+      const res = await downloadAndCacheFull();
+      if (res && res.code) runCode(res.code);
+    };
+  }
+
+  // 1. Instant execution of cached version (zero latency on page load)
   const cached = (typeof GM_getValue === 'function') ? GM_getValue('besing_cached_code', null) : null;
   if (cached) {
     runCode(cached);
   }
 
-  // 2. Refresh check (immediately on first install, or daily in background)
+  // 2. Refresh check (immediately on first install, or throttled background check)
   if (!cached) {
     console.log('[BESing Stable Loader] First install detected. Fetching latest release...');
-    checkAndRefresh(true).then((fresh) => {
-      if (fresh) {
-        runCode(fresh);
-      } else {
-        const c = (typeof GM_getValue === 'function') ? GM_getValue('besing_cached_code', null) : null;
-        if (c) runCode(c);
-      }
+    downloadAndCacheFull().then((res) => {
+      if (res && res.code) runCode(res.code);
     }).catch(err => {
       console.error('[BESing Stable Loader] Initial setup failed:', err);
     });
   } else {
-    setTimeout(() => checkAndRefresh(false), 3000);
+    // Throttled background check for new release
+    setTimeout(() => checkAndAutoUpdate(false), 3000);
   }
-
-  // 3. Global hook for manual reload
-  window.__BESING_RELOAD_LATEST__ = () => checkAndRefresh(true).then(c => { if (c) runCode(c); });
 })();

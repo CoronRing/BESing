@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Script Manager
@@ -181,7 +181,7 @@ def build():
   // 2. Storage Manager
   class BESStorage {{
     constructor() {{
-      this.blockedSites = [];
+      this.siteRules = {{}};
       this.enabledScripts = {{}};
       this.widgetPos = null;
       this.settings = {{
@@ -194,48 +194,145 @@ def build():
     }}
 
     async init() {{
-      this.blockedSites = await BESAdapter.get('blocked_sites', []);
+      this.siteRules = await BESAdapter.get('site_rules', {{}});
+      if (!this.siteRules || typeof this.siteRules !== 'object') this.siteRules = {{}};
+
+      // Migrate legacy blocked_sites array if present
+      const legacyBlocked = await BESAdapter.get('blocked_sites', []);
+      if (Array.isArray(legacyBlocked)) {{
+        for (const item of legacyBlocked) {{
+          const host = (item.host || '').toLowerCase().trim();
+          if (host) {{
+            if (!this.siteRules[host]) this.siteRules[host] = {{ disableAll: true, scripts: {{}} }};
+            else this.siteRules[host].disableAll = true;
+          }}
+        }}
+      }}
+
       this.enabledScripts = await BESAdapter.get('enabled_scripts', {{}});
+      if (!this.enabledScripts || typeof this.enabledScripts !== 'object') this.enabledScripts = {{}};
+
       this.widgetPos = await BESAdapter.get('widget_position', null);
       const s = await BESAdapter.get('global_settings', {{}});
       this.settings = {{ ...this.settings, ...s }};
-      if (!Array.isArray(this.blockedSites)) this.blockedSites = [];
+    }}
+
+    getCurrentHost() {{
+      return (window.location.hostname || 'localhost').toLowerCase().trim();
     }}
 
     isCurrentBlocked() {{
-      const cur = (window.location.hostname || '').toLowerCase().trim();
-      return this.blockedSites.some(b => b.host.toLowerCase() === cur);
+      return this.isSiteDisabledAll(this.getCurrentHost());
     }}
 
-    async blockSite(host = window.location.hostname) {{
-      const clean = (host || '').toLowerCase().trim();
-      if (!clean) return;
-      this.blockedSites = this.blockedSites.filter(b => b.host.toLowerCase() !== clean);
-      this.blockedSites.unshift({{ host: clean, addedAt: Date.now() }});
-      await BESAdapter.set('blocked_sites', this.blockedSites);
+    isSiteDisabledAll(host = this.getCurrentHost()) {{
+      const h = (host || '').toLowerCase().trim();
+      return !!(this.siteRules[h] && this.siteRules[h].disableAll);
     }}
 
-    async unblockSite(host) {{
-      const clean = (host || '').toLowerCase().trim();
-      this.blockedSites = this.blockedSites.filter(b => b.host.toLowerCase() !== clean);
-      await BESAdapter.set('blocked_sites', this.blockedSites);
+    async setSiteDisabledAll(host, disabled) {{
+      const h = (host || this.getCurrentHost()).toLowerCase().trim();
+      if (!h) return;
+      if (!this.siteRules[h]) this.siteRules[h] = {{ disableAll: false, scripts: {{}} }};
+      this.siteRules[h].disableAll = !!disabled;
+      this.cleanupSiteRule(h);
+      await BESAdapter.set('site_rules', this.siteRules);
+    }}
+
+    // Mode: 'off' | 'site' | 'on'
+    getScriptMode(scriptId, host = this.getCurrentHost()) {{
+      const h = (host || '').toLowerCase().trim();
+      const siteConfig = this.siteRules[h];
+
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {{
+        return siteConfig.scripts[scriptId] ? 'site' : 'off';
+      }}
+
+      return this.enabledScripts[scriptId] ? 'on' : 'off';
+    }}
+
+    isScriptActiveOnSite(scriptId, host = this.getCurrentHost()) {{
+      const h = (host || '').toLowerCase().trim();
+      if (this.isSiteDisabledAll(h)) return false;
+
+      const siteConfig = this.siteRules[h];
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {{
+        return !!siteConfig.scripts[scriptId];
+      }}
+
+      return !!this.enabledScripts[scriptId];
+    }}
+
+    async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {{
+      const h = (host || '').toLowerCase().trim();
+      if (!this.siteRules[h]) this.siteRules[h] = {{ disableAll: false, scripts: {{}} }};
+      if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {{}};
+
+      if (mode === 'on') {{
+        this.enabledScripts[scriptId] = true;
+        delete this.siteRules[h].scripts[scriptId];
+      }} else if (mode === 'site') {{
+        this.enabledScripts[scriptId] = false;
+        this.siteRules[h].scripts[scriptId] = true;
+      }} else {{
+        this.enabledScripts[scriptId] = false;
+        delete this.siteRules[h].scripts[scriptId];
+      }}
+
+      this.cleanupSiteRule(h);
+      await BESAdapter.set('enabled_scripts', this.enabledScripts);
+      await BESAdapter.set('site_rules', this.siteRules);
+    }}
+
+    async toggleSiteRule(host, ruleKey, val) {{
+      const h = (host || '').toLowerCase().trim();
+      if (!this.siteRules[h]) this.siteRules[h] = {{ disableAll: false, scripts: {{}} }};
+      if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {{}};
+
+      if (ruleKey === 'disableAll') {{
+        this.siteRules[h].disableAll = !!val;
+      }} else {{
+        this.siteRules[h].scripts[ruleKey] = !!val;
+      }}
+
+      this.cleanupSiteRule(h);
+      await BESAdapter.set('site_rules', this.siteRules);
+    }}
+
+    cleanupSiteRule(host) {{
+      const rule = this.siteRules[host];
+      if (!rule) return;
+      const hasScripts = rule.scripts && Object.keys(rule.scripts).length > 0;
+      if (!rule.disableAll && !hasScripts) {{
+        delete this.siteRules[host];
+      }}
+    }}
+
+    async removeSiteRule(host, ruleKey = null) {{
+      const h = (host || '').toLowerCase().trim();
+      if (!this.siteRules[h]) return;
+
+      if (!ruleKey || ruleKey === 'all') {{
+        delete this.siteRules[h];
+      }} else if (ruleKey === 'disableAll') {{
+        this.siteRules[h].disableAll = false;
+        this.cleanupSiteRule(h);
+      }} else if (this.siteRules[h].scripts) {{
+        delete this.siteRules[h].scripts[ruleKey];
+        this.cleanupSiteRule(h);
+      }}
+
+      await BESAdapter.set('site_rules', this.siteRules);
+    }}
+
+    getAllSiteRules() {{
+      return this.siteRules || {{}};
     }}
 
     getBlockedSites() {{
-      return this.blockedSites || [];
-    }}
-
-    // Default to FALSE: all modules are OFF by default!
-    isScriptEnabled(id, defaultVal = false) {{
-      if (this.enabledScripts[id] !== undefined) {{
-        return !!this.enabledScripts[id];
-      }}
-      return defaultVal;
-    }}
-
-    async setScriptEnabled(id, enabled) {{
-      this.enabledScripts[id] = !!enabled;
-      await BESAdapter.set('enabled_scripts', this.enabledScripts);
+      return Object.keys(this.siteRules)
+        .filter(h => this.siteRules[h] && this.siteRules[h].disableAll)
+        .map(h => ({{ host: h, addedAt: Date.now() }}));
     }}
 
     getWidgetPosition() {{
@@ -267,20 +364,28 @@ def build():
 {modules_joined}
   ];
 
-  // 4. Update Engine (Checks version, prompts native update, no eval)
+  // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {{
     static CURRENT_VERSION = '{VERSION}';
 
+    static isStableLoader() {{
+      return typeof window !== 'undefined' && (
+        window.__BESING_ENVIRONMENT__ === 'stable-loader' ||
+        typeof window.__BESING_AUTO_UPDATE__ === 'function' ||
+        typeof window.__BESING_RELOAD_LATEST__ === 'function'
+      );
+    }}
+
     static CHANNELS = {{
       github: {{
-        name: 'GitHub Releases (Stable)',
+        name: 'GitHub Releases',
         metaUrl: 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.meta.js',
         userUrl: 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js'
       }},
       greasyfork: {{
         name: 'Greasy Fork (Public)',
-        metaUrl: 'https://update.greasyfork.org/scripts/520000/besing-script-manager.meta.js',
-        userUrl: 'https://update.greasyfork.org/scripts/520000/besing-script-manager.user.js'
+        metaUrl: 'https://update.greasyfork.org/scripts/597772/BESing%20Script%20Manager.meta.js',
+        userUrl: 'https://update.greasyfork.org/scripts/597772/BESing%20Script%20Manager.user.js'
       }}
     }};
 
@@ -325,22 +430,42 @@ def build():
     async checkForUpdates(manual = false) {{
       const channelKey = 'github';
       const channel = BESUpdater.CHANNELS[channelKey];
+      const isStable = BESUpdater.isStableLoader();
       try {{
         const text = await BESUpdater.fetchText(channel.metaUrl);
         const remoteVer = BESUpdater.parseVersion(text);
         if (!remoteVer) throw new Error('Could not parse remote version header');
         const hasUpdate = BESUpdater.compareVersions(remoteVer, BESUpdater.CURRENT_VERSION) > 0;
+
+        let autoUpdated = false;
+        if (hasUpdate && isStable) {{
+          if (typeof window.__BESING_AUTO_UPDATE__ === 'function') {{
+            await window.__BESING_AUTO_UPDATE__(true);
+            autoUpdated = true;
+          }} else if (typeof GM_setValue === 'function') {{
+            const newCode = await BESUpdater.fetchText(channel.userUrl);
+            if (newCode && newCode.length > 500) {{
+              GM_setValue('besing_cached_code', newCode);
+              GM_setValue('besing_cached_version', remoteVer);
+              autoUpdated = true;
+            }}
+          }}
+        }}
+
         return {{
           ok: true,
+          isStableLoader: isStable,
           channelName: channel.name,
           currentVersion: BESUpdater.CURRENT_VERSION,
           remoteVersion: remoteVer,
           hasUpdate,
+          autoUpdated,
           downloadUrl: channel.userUrl
         }};
       }} catch (err) {{
         return {{
           ok: false,
+          isStableLoader: isStable,
           channelName: channel.name,
           currentVersion: BESUpdater.CURRENT_VERSION,
           error: err.message
@@ -379,30 +504,42 @@ def build():
 
     async init() {{
       await this.storage.init();
+      const currentHost = this.storage.getCurrentHost();
 
-      // Initialize pre-bundled modules (All default to OFF)
+      // Initialize pre-bundled modules
       this.modules = BUILTIN_MODULES.map(m => ({{
         ...m,
-        enabled: this.storage.isScriptEnabled(m.id, false)
+        running: false
       }}));
 
-      // Run any modules that were previously enabled by user
+      // Run any modules that are active on current site
       this.modules.forEach(m => {{
-        if (m.enabled) {{
-          try {{ m.init(); }} catch (err) {{
+        if (this.storage.isScriptActiveOnSite(m.id, currentHost)) {{
+          try {{
+            m.init();
+            m.running = true;
+          }} catch (err) {{
             console.error(`[BESing] Error initializing ${{m.id}}:`, err);
           }}
         }}
       }});
 
-      // Throttled Daily Update Check
-      const lastCheck = await BESAdapter.get('last_update_check_time', 0);
-      const ONE_DAY = 24 * 60 * 60 * 1000;
-      if (Date.now() - (lastCheck || 0) > ONE_DAY) {{
+      // Throttled Update Check:
+      // If running inside stable loader: auto-check in background and silently auto-update!
+      // If running full script: check once every 24 hours
+      if (BESUpdater.isStableLoader()) {{
         setTimeout(async () => {{
           await this.updater.checkForUpdates(false).catch(() => {{}});
-          await BESAdapter.set('last_update_check_time', Date.now());
-        }}, 4000);
+        }}, 3000);
+      }} else {{
+        const lastCheck = await BESAdapter.get('last_update_check_time', 0);
+        const ONE_DAY = 24 * 60 * 60 * 1000;
+        if (Date.now() - (lastCheck || 0) > ONE_DAY) {{
+          setTimeout(async () => {{
+            await this.updater.checkForUpdates(false).catch(() => {{}});
+            await BESAdapter.set('last_update_check_time', Date.now());
+          }}, 4000);
+        }}
       }}
 
       // Hotkey: Alt + Shift + B
@@ -423,6 +560,29 @@ def build():
       }}
 
       this.mount();
+    }}
+
+    refreshCurrentSiteModules() {{
+      const currentHost = this.storage.getCurrentHost();
+      this.modules.forEach(m => {{
+        const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
+        if (shouldBeActive && !m.running) {{
+          try {{
+            m.init();
+            m.running = true;
+          }} catch (err) {{
+            console.error(`[BESing] Error initializing ${{m.id}}:`, err);
+          }}
+        }} else if (!shouldBeActive && m.running) {{
+          try {{
+            m.destroy();
+            m.running = false;
+          }} catch (err) {{
+            console.error(`[BESing] Error destroying ${{m.id}}:`, err);
+          }}
+        }}
+      }});
+      this.updateBadge();
     }}
 
     mount() {{
@@ -494,7 +654,8 @@ def build():
     updateBadge() {{
       if (!this.widgetEl) return;
       let badge = this.widgetEl.querySelector('.besing-badge-count');
-      const activeCount = this.modules.filter(m => this.storage.isScriptEnabled(m.id, false)).length;
+      const currentHost = this.storage.getCurrentHost();
+      const activeCount = this.modules.filter(m => this.storage.isScriptActiveOnSite(m.id, currentHost)).length;
       if (!badge) {{
         badge = document.createElement('span');
         badge.className = 'besing-badge-count';
@@ -791,7 +952,6 @@ def build():
 
       if (this.currentView === 'settings') {{
         const currentHost = window.location.hostname || 'localhost';
-        const blocked = this.storage.getBlockedSites();
         const curTheme = this.storage.getTheme();
 
         body.innerHTML = `
@@ -825,28 +985,41 @@ def build():
                   <span id="besing-update-pill-text">v${{BESUpdater.CURRENT_VERSION}}</span>
                 </span>
               </div>
-              <div class="besing-update-actions">
-                <button class="besing-btn-sync" id="besing-btn-check-update" style="flex:1;">Check Updates Now (Force)</button>
+              <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;">
+                ${{BESUpdater.isStableLoader() ? 'Mode: <strong style="color:#38bdf8;">GitHub Stable Bootstrapper</strong> (Automatic silent updates)' : 'Mode: <strong style="color:#a78bfa;">Standalone Userscript</strong> (Updates via Userscript Manager)'}}
               </div>
-              <div class="besing-update-msg" id="besing-update-msg">Updates check automatically at launch and once every 24 hours.</div>
+              <div class="besing-update-actions">
+                <button class="besing-btn-sync" id="besing-btn-check-update" style="flex:1;">
+                  ${{BESUpdater.isStableLoader() ? 'Check & Auto-Update Now' : 'Check Updates Now'}}
+                </button>
+              </div>
+              <div class="besing-update-msg" id="besing-update-msg">
+                ${{BESUpdater.isStableLoader() ? 'Updates download and apply automatically in background.' : 'Checks against Greasy Fork / GitHub releases.'}}
+              </div>
             </div>
 
             <div class="besing-site-card">
               <div class="besing-site-card-header">
                 <div>
-                  <div class="besing-section-title" style="color:#f87171;">Disable on Current Site</div>
+                  <div class="besing-section-title" style="color:#38bdf8;">Current Website</div>
                   <div class="besing-current-domain">${{currentHost}}</div>
                 </div>
-                <button class="besing-btn-danger" id="besing-btn-turn-off-site">Disable</button>
+                <div style="display:flex;align-items:center;gap:10px;">
+                  <span style="font-size:11px;color:${{this.storage.isCurrentBlocked() ? '#f87171' : '#94a3b8'}};">${{this.storage.isCurrentBlocked() ? 'Site Disabled' : 'Disable on this site'}}</span>
+                  <label class="besing-switch" title="Disable all scripts on ${{currentHost}}">
+                    <input type="checkbox" id="besing-btn-turn-off-site" ${{this.storage.isCurrentBlocked() ? 'checked' : ''}}>
+                    <span class="besing-slider"></span>
+                  </label>
+                </div>
               </div>
             </div>
 
-            <div class="besing-blocked-list-wrap">
+            <div class="besing-site-rules-wrap">
               <div class="besing-blocklist-header">
-                <span class="besing-blocklist-title">Disabled Sites</span>
-                <span class="besing-blocklist-count">${{blocked.length}}</span>
+                <span class="besing-blocklist-title">Site Specific Rules</span>
+                <span class="besing-blocklist-count" id="besing-rules-count">0</span>
               </div>
-              <div class="besing-blocked-list" id="besing-blocked-container"></div>
+              <div class="besing-site-rules-list" id="besing-site-rules-container"></div>
             </div>
           </div>
         `;
@@ -870,7 +1043,13 @@ def build():
             const res = await this.updater.checkForUpdates(true);
             if (res.ok) {{
               if (res.hasUpdate) {{
-                updateMsg.innerHTML = `<span style="color:#a78bfa;font-weight:700;">Update found!</span> v${{res.remoteVersion}} available. <a href="${{res.downloadUrl}}" target="_blank" style="color:#38bdf8;text-decoration:underline;">Click here to install update</a>.`;
+                if (res.isStableLoader && res.autoUpdated) {{
+                  updateMsg.innerHTML = `<span style="color:#10b981;font-weight:700;">✅ Auto-Updated to v${{res.remoteVersion}}!</span> The latest code is installed. <button id="besing-btn-reload-now" style="margin-left:8px;padding:3px 8px;font-size:11px;background:#10b981;color:#fff;border:none;border-radius:4px;cursor:pointer;">Reload Page</button> to activate.`;
+                  const rBtn = body.querySelector('#besing-btn-reload-now');
+                  if (rBtn) rBtn.onclick = () => window.location.reload();
+                }} else {{
+                  updateMsg.innerHTML = `<span style="color:#a78bfa;font-weight:700;">Update found!</span> v${{res.remoteVersion}} available. <a href="${{res.downloadUrl}}" target="_blank" style="color:#38bdf8;text-decoration:underline;">Click here to install update via Userscript Manager</a>.`;
+                }}
               }} else {{
                 updateMsg.textContent = `✅ BESing is up to date (v${{res.currentVersion}}).`;
               }}
@@ -884,45 +1063,121 @@ def build():
           }}
         }};
 
-        body.querySelector('#besing-btn-turn-off-site').onclick = async () => {{
-          if (confirm(`Disable BESing on ${{currentHost}}?`)) {{
-            await this.storage.blockSite(currentHost);
-            this.teardown();
-          }}
+        body.querySelector('#besing-btn-turn-off-site').onchange = async (e) => {{
+          const val = e.target.checked;
+          await this.storage.setSiteDisabledAll(currentHost, val);
+          this.refreshCurrentSiteModules();
+          renderSiteRulesList();
         }};
 
-        const renderBlockedRows = () => {{
-          const container = body.querySelector('#besing-blocked-container');
+        const renderSiteRulesList = () => {{
+          const container = body.querySelector('#besing-site-rules-container');
+          const countEl = body.querySelector('#besing-rules-count');
           if (!container) return;
-          const list = this.storage.getBlockedSites();
           container.innerHTML = '';
-          if (!list.length) {{
-            container.innerHTML = '<div class="besing-empty-state">No sites disabled.</div>';
+          const allRules = this.storage.getAllSiteRules();
+          const hosts = Object.keys(allRules).sort();
+          if (countEl) countEl.textContent = hosts.length;
+
+          if (!hosts.length) {{
+            container.innerHTML = '<div class="besing-empty-state">No site-specific rules configured.<br><span style="font-size:10px;color:#64748b;">Set a script to "SITE" in the main list to enable it for a single site.</span></div>';
             return;
           }}
-          list.forEach(item => {{
-            const row = document.createElement('div');
-            row.className = 'besing-blocked-item';
-            row.innerHTML = `
-              <div>
-                <span class="besing-blocked-domain">${{item.host}}</span>
-                <span class="besing-blocked-date">${{new Date(item.addedAt).toLocaleDateString()}}</span>
+
+          hosts.forEach(host => {{
+            const rule = allRules[host];
+            const group = document.createElement('div');
+            group.className = 'besing-site-group';
+
+            const groupHeader = document.createElement('div');
+            groupHeader.className = 'besing-site-group-header';
+            groupHeader.innerHTML = `
+              <div class="besing-site-group-title">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                <span>${{host}}</span>
               </div>
-              <button class="besing-btn-unblock">Re-enable</button>
+              <button class="besing-btn-del-site" title="Remove all rules for ${{host}}">Remove Site</button>
             `;
-            row.querySelector('.besing-btn-unblock').onclick = async () => {{
-              await this.storage.unblockSite(item.host);
-              renderBlockedRows();
-              const cnt = body.querySelector('.besing-blocklist-count');
-              if (cnt) cnt.textContent = this.storage.getBlockedSites().length;
+            groupHeader.querySelector('.besing-btn-del-site').onclick = async () => {{
+              await this.storage.removeSiteRule(host, 'all');
+              renderSiteRulesList();
+              this.refreshCurrentSiteModules();
             }};
-            container.appendChild(row);
+            group.appendChild(groupHeader);
+
+            const rulesList = document.createElement('div');
+            rulesList.className = 'besing-site-subrules';
+
+            if (rule.disableAll) {{
+              const row = document.createElement('div');
+              row.className = 'besing-site-rule-row';
+              row.innerHTML = `
+                <div class="besing-site-rule-info">
+                  <span class="besing-site-rule-name" style="color:#f87171;font-weight:600;">Disable all</span>
+                  <span class="besing-site-rule-tag" style="background:rgba(239,68,68,0.15);color:#fca5a5;">Site Disabled</span>
+                </div>
+                <div class="besing-site-rule-actions">
+                  <label class="besing-switch besing-switch-sm">
+                    <input type="checkbox" checked>
+                    <span class="besing-slider"></span>
+                  </label>
+                  <button class="besing-rule-remove" title="Remove rule">✕</button>
+                </div>
+              `;
+              row.querySelector('input').onchange = async (e) => {{
+                await this.storage.toggleSiteRule(host, 'disableAll', e.target.checked);
+                renderSiteRulesList();
+                this.refreshCurrentSiteModules();
+              }};
+              row.querySelector('.besing-rule-remove').onclick = async () => {{
+                await this.storage.removeSiteRule(host, 'disableAll');
+                renderSiteRulesList();
+                this.refreshCurrentSiteModules();
+              }};
+              rulesList.appendChild(row);
+            }}
+
+            if (rule.scripts) {{
+              Object.keys(rule.scripts).forEach(scriptId => {{
+                const isEnabled = !!rule.scripts[scriptId];
+                const m = this.modules.find(mod => mod.id === scriptId) || {{ name: scriptId }};
+                const row = document.createElement('div');
+                row.className = 'besing-site-rule-row';
+                row.innerHTML = `
+                  <div class="besing-site-rule-info">
+                    <span class="besing-site-rule-name">${{m.name}}</span>
+                    <span class="besing-site-rule-tag" style="background:rgba(56,189,248,0.15);color:#38bdf8;">${{isEnabled ? 'Site ON' : 'Site OFF'}}</span>
+                  </div>
+                  <div class="besing-site-rule-actions">
+                    <label class="besing-switch besing-switch-sm">
+                      <input type="checkbox" ${{isEnabled ? 'checked' : ''}}>
+                      <span class="besing-slider"></span>
+                    </label>
+                    <button class="besing-rule-remove" title="Remove rule">✕</button>
+                  </div>
+                `;
+                row.querySelector('input').onchange = async (e) => {{
+                  await this.storage.toggleSiteRule(host, scriptId, e.target.checked);
+                  renderSiteRulesList();
+                  this.refreshCurrentSiteModules();
+                }};
+                row.querySelector('.besing-rule-remove').onclick = async () => {{
+                  await this.storage.removeSiteRule(host, scriptId);
+                  renderSiteRulesList();
+                  this.refreshCurrentSiteModules();
+                }};
+                rulesList.appendChild(row);
+              }});
+            }}
+
+            group.appendChild(rulesList);
+            container.appendChild(group);
           }});
         }};
-        renderBlockedRows();
+        renderSiteRulesList();
 
       }} else {{
-        // Extensions View: All scripts pre-installed, off by default, toggleable!
+        // Extensions View: 3-stage toggles (OFF / SITE / ON)
         body.innerHTML = `
           <div class="besing-search-wrap">
             <svg class="besing-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
@@ -937,6 +1192,7 @@ def build():
         const renderCards = () => {{
           extContainer.innerHTML = '';
           const q = this.searchQuery;
+          const currentHost = this.storage.getCurrentHost();
           const filtered = this.modules.filter(m => {{
             if (!q) return true;
             return (m.name || '').toLowerCase().includes(q) || (m.description || '').toLowerCase().includes(q);
@@ -961,7 +1217,14 @@ def build():
           filtered.forEach(m => {{
             const card = document.createElement('div');
             card.className = 'besing-ext-card';
-            const isEnabled = this.storage.isScriptEnabled(m.id, false);
+            const currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'on'
+
+            let modeBadge = '';
+            if (currentMode === 'site') {{
+              modeBadge = `<span class="besing-site-badge">📍 ${{currentHost}}</span>`;
+            }} else if (currentMode === 'on') {{
+              modeBadge = `<span class="besing-global-badge">🌐 Global ON</span>`;
+            }}
 
             card.innerHTML = `
               <div class="besing-ext-info-group">
@@ -971,33 +1234,33 @@ def build():
                     <span class="besing-ext-name">${{m.name}}</span>
                     <span class="besing-ext-ver">v${{m.version || '1.0.0'}}</span>
                     ${{m.category ? `<span class="besing-cat-badge">${{m.category}}</span>` : ''}}
+                    ${{modeBadge}}
                   </div>
                   <p class="besing-ext-desc">${{m.description || ''}}</p>
                 </div>
               </div>
               <div class="besing-ext-actions">
-                <label class="besing-switch" title="Toggle ${{m.name}}">
-                  <input type="checkbox" ${{isEnabled ? 'checked' : ''}}>
-                  <span class="besing-slider"></span>
-                </label>
+                <div class="besing-tri-toggle" title="Toggle: OFF, SITE (${{currentHost}}), or ON (Global)">
+                  <button type="button" class="besing-tri-btn ${{currentMode === 'off' ? 'active active-off' : ''}}" data-mode="off">OFF</button>
+                  <button type="button" class="besing-tri-btn ${{currentMode === 'site' ? 'active active-site' : ''}}" data-mode="site">SITE</button>
+                  <button type="button" class="besing-tri-btn ${{currentMode === 'on' ? 'active active-on' : ''}}" data-mode="on">ON</button>
+                </div>
               </div>
             `;
 
-            card.querySelector('input').onchange = async (e) => {{
-              const val = e.target.checked;
-              await this.storage.setScriptEnabled(m.id, val);
-              m.enabled = val;
-              if (val) {{
-                try {{ m.init(); }} catch (err) {{
-                  console.error(`[BESing] Failed to start ${{m.id}}:`, err);
-                }}
-              }} else {{
-                try {{ m.destroy(); }} catch (err) {{
-                  console.error(`[BESing] Failed to stop ${{m.id}}:`, err);
-                }}
-              }}
-              this.updateBadge();
+            const btnOff = card.querySelector('[data-mode="off"]');
+            const btnSite = card.querySelector('[data-mode="site"]');
+            const btnOn = card.querySelector('[data-mode="on"]');
+
+            const handleModeChange = async (newMode) => {{
+              await this.storage.setScriptMode(m.id, newMode, currentHost);
+              renderCards();
+              this.refreshCurrentSiteModules();
             }};
+
+            btnOff.onclick = (e) => {{ e.stopPropagation(); handleModeChange('off'); }};
+            btnSite.onclick = (e) => {{ e.stopPropagation(); handleModeChange('site'); }};
+            btnOn.onclick = (e) => {{ e.stopPropagation(); handleModeChange('on'); }};
 
             extContainer.appendChild(card);
           }});
@@ -1094,20 +1357,39 @@ def build():
         .besing-theme-btn {{ background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 8px 4px; display: flex; flex-direction: column; align-items: center; gap: 4px; color: #cbd5e1; font-size: 11px; cursor: pointer; transition: all 0.15s ease; }}
         .besing-theme-btn:hover {{ background: rgba(255, 255, 255, 0.08); border-color: rgba(99, 102, 241, 0.4); }}
         .besing-theme-btn.active {{ background: rgba(99, 102, 241, 0.2); border-color: #818cf8; color: #f8fafc; box-shadow: 0 0 10px rgba(99, 102, 241, 0.25); }}
-        .besing-site-card {{ background: rgba(239, 68, 68, 0.06); border: 1px solid rgba(239, 68, 68, 0.2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }}
+        .besing-tri-toggle {{ display: inline-flex; align-items: center; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px; padding: 2px; gap: 2px; box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4); }}
+        .besing-tri-btn {{ font-family: inherit; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; padding: 3px 8px; border-radius: 14px; border: none; background: transparent; color: #64748b; cursor: pointer; transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); }}
+        .besing-tri-btn:hover {{ color: #cbd5e1; }}
+        .besing-tri-btn.active.active-off {{ background: #334155; color: #f1f5f9; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3); }}
+        .besing-tri-btn.active.active-site {{ background: linear-gradient(135deg, #0284c7, #0369a1); color: #ffffff; box-shadow: 0 0 10px rgba(56, 189, 248, 0.45); }}
+        .besing-tri-btn.active.active-on {{ background: linear-gradient(135deg, #10b981, #059669); color: #ffffff; box-shadow: 0 0 10px rgba(16, 185, 129, 0.45); }}
+        .besing-site-badge {{ font-size: 9px; font-weight: 600; background: rgba(56, 189, 248, 0.15); color: #38bdf8; padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); }}
+        .besing-global-badge {{ font-size: 9px; font-weight: 600; background: rgba(16, 185, 129, 0.15); color: #34d399; padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.3); }}
+        .besing-site-card {{ background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }}
         .besing-site-card-header {{ display: flex; align-items: center; justify-content: space-between; }}
-        .besing-current-domain {{ font-size: 12px; font-weight: 600; color: #fca5a5; font-family: monospace; }}
-        .besing-btn-danger {{ background: linear-gradient(135deg, #ef4444, #dc2626); color: #ffffff; border: none; border-radius: 8px; padding: 7px 12px; font-size: 11px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; transition: all 0.15s ease; }}
-        .besing-btn-danger:hover {{ background: linear-gradient(135deg, #f87171, #ef4444); transform: translateY(-1px); }}
+        .besing-current-domain {{ font-size: 12px; font-weight: 600; color: #38bdf8; font-family: monospace; }}
+        .besing-site-rules-wrap {{ display: flex; flex-direction: column; gap: 8px; }}
+        .besing-site-rules-list {{ display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }}
+        .besing-site-group {{ background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; overflow: hidden; }}
+        .besing-site-group-header {{ padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: space-between; }}
+        .besing-site-group-title {{ display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: #f1f5f9; font-family: monospace; }}
+        .besing-btn-del-site {{ background: transparent; border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px; cursor: pointer; transition: all 0.15s ease; }}
+        .besing-btn-del-site:hover {{ background: rgba(239, 68, 68, 0.2); border-color: #ef4444; }}
+        .besing-site-subrules {{ display: flex; flex-direction: column; padding: 4px 10px; }}
+        .besing-site-rule-row {{ display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }}
+        .besing-site-rule-row:last-child {{ border-bottom: none; }}
+        .besing-site-rule-info {{ display: flex; align-items: center; gap: 6px; }}
+        .besing-site-rule-name {{ font-size: 11px; font-weight: 500; color: #e2e8f0; }}
+        .besing-site-rule-tag {{ font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 4px; }}
+        .besing-site-rule-actions {{ display: flex; align-items: center; gap: 6px; }}
+        .besing-switch-sm {{ width: 32px; height: 18px; }}
+        .besing-switch-sm .besing-slider::before {{ height: 12px; width: 12px; left: 3px; bottom: 3px; }}
+        .besing-switch-sm input:checked + .besing-slider::before {{ transform: translateX(14px); }}
+        .besing-rule-remove {{ background: transparent; border: none; color: #94a3b8; font-size: 12px; cursor: pointer; padding: 2px 5px; border-radius: 4px; transition: all 0.15s ease; }}
+        .besing-rule-remove:hover {{ background: rgba(239, 68, 68, 0.2); color: #ef4444; }}
         .besing-blocklist-header {{ display: flex; align-items: center; justify-content: space-between; }}
         .besing-blocklist-title {{ font-size: 11px; font-weight: 700; color: #cbd5e1; text-transform: uppercase; letter-spacing: 0.5px; }}
         .besing-blocklist-count {{ font-size: 10px; color: #64748b; background: rgba(255, 255, 255, 0.05); padding: 2px 6px; border-radius: 10px; }}
-        .besing-blocked-list {{ display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; }}
-        .besing-blocked-item {{ background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 6px; padding: 7px 10px; display: flex; align-items: center; justify-content: space-between; }}
-        .besing-blocked-domain {{ font-family: monospace; font-size: 11px; color: #e2e8f0; }}
-        .besing-blocked-date {{ font-size: 10px; color: #64748b; margin-left: 6px; }}
-        .besing-btn-unblock {{ background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 3px 8px; font-size: 10px; font-weight: 600; cursor: pointer; }}
-        .besing-btn-unblock:hover {{ background: rgba(56, 189, 248, 0.25); color: #7dd3fc; }}
         .besing-empty-state {{ text-align: center; padding: 18px 10px; color: #64748b; font-size: 12px; background: rgba(255, 255, 255, 0.02); border-radius: 8px; border: 1px dashed rgba(255, 255, 255, 0.08); }}
         .besing-update-card {{ background: rgba(167, 139, 250, 0.06); border: 1px solid rgba(167, 139, 250, 0.25); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }}
         .besing-update-header {{ display: flex; align-items: center; justify-content: space-between; }}
