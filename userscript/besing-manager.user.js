@@ -729,6 +729,7 @@
       this.initialTop = 0;
       this.updateAvailable = null;
       this.lastFoldSide = null;
+      this.outsideClickHandler = null;
     }
 
     async init() {
@@ -843,6 +844,10 @@
     }
 
     teardown() {
+      if (this.outsideClickHandler) {
+        document.removeEventListener('click', this.outsideClickHandler);
+        this.outsideClickHandler = null;
+      }
       this.modules.forEach(m => {
         try { m.destroy(); } catch (e) {}
       });
@@ -1039,6 +1044,11 @@
     }
 
     openModal(view = 'extensions') {
+      if (this.outsideClickHandler) {
+        document.removeEventListener('click', this.outsideClickHandler, true);
+        document.removeEventListener('click', this.outsideClickHandler, false);
+        this.outsideClickHandler = null;
+      }
       if (this.menuWrapperEl) this.closeModal();
       this.currentView = view;
 
@@ -1099,31 +1109,39 @@
 
       this.positionBubble(wrapper, panel, arrow);
 
-      panel.querySelector('#besing-btn-close').onclick = () => this.closeModal();
-      panel.querySelector('#besing-btn-expand').onclick = () => {
+      wrapper.addEventListener('click', (e) => e.stopPropagation());
+      wrapper.addEventListener('mousedown', (e) => e.stopPropagation());
+
+      panel.querySelector('#besing-btn-close').onclick = (e) => {
+        e.stopPropagation();
+        this.closeModal();
+      };
+      panel.querySelector('#besing-btn-expand').onclick = (e) => {
+        e.stopPropagation();
         this.isExpanded = !this.isExpanded;
         panel.classList.toggle('is-expanded', this.isExpanded);
         this.positionBubble(wrapper, panel, arrow);
       };
 
       const settingsBtn = panel.querySelector('#besing-btn-settings');
-      settingsBtn.onclick = () => {
+      settingsBtn.onclick = (e) => {
+        e.stopPropagation();
         this.currentView = this.currentView === 'settings' ? 'extensions' : 'settings';
         settingsBtn.classList.toggle('active', this.currentView === 'settings');
         this.renderBody();
       };
 
       setTimeout(() => {
-        const outsideHandler = (e) => {
+        if (!this.menuWrapperEl || this.menuWrapperEl !== wrapper) return;
+        this.outsideClickHandler = (e) => {
           if (!this.menuWrapperEl) return;
           const path = e.composedPath ? e.composedPath() : [];
           if (!path.includes(wrapper) && (!this.widgetEl || !path.includes(this.widgetEl))) {
             this.closeModal();
-            document.removeEventListener('click', outsideHandler);
           }
         };
-        document.addEventListener('click', outsideHandler);
-      }, 50);
+        document.addEventListener('click', this.outsideClickHandler);
+      }, 80);
 
       this.renderBody();
     }
@@ -1505,6 +1523,11 @@
     }
 
     closeModal() {
+      if (this.outsideClickHandler) {
+        document.removeEventListener('click', this.outsideClickHandler, true);
+        document.removeEventListener('click', this.outsideClickHandler, false);
+        this.outsideClickHandler = null;
+      }
       if (this.menuWrapperEl) {
         this.menuWrapperEl.remove();
         this.menuWrapperEl = null;
