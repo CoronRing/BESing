@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.5.7  
+**Version:** 1.5.8  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -276,5 +276,9 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Pure Native SVG Ingestion via `createSVG`**: All vector icons and desktop pet graphics are parsed via `this.safeParseHTML(svgString)`, guaranteeing proper SVG namespace inheritance (`http://www.w3.org/2000/svg`), non-zero bounding boxes, and 100% rendering fidelity across all host environments.
 - **Zero-Failure Event Binding**: Header actions, settings toggles, search inputs, and launcher controls are wrapped in defensive null-checks and debounced event handlers. Even under adverse DOM conditions or complex single-page application navigation, the menu and launcher remain interactive, resilient, and visually intact.
 
-
-
+### 7.15 Multi-Layered Mobile Ad Network & Sensor Redirect Defense (v1.5.8)
+- **Problem Statement (Evasive Mobile Ad Networks)**: Aggressive advertising networks operating on mobile web portals (particularly reading and novel aggregators like `shudugu.org`) deploy multi-stage circumvention scripts that defeat traditional popup blockers. In browsers, `window.location.href` and `top.location` have `configurable: false` and cannot be redefined via `Object.defineProperty`. When mobile ad scripts detect mobile user agents (`!/^Mac|Win/.test(navigator.platform)`), they open encrypted WebSocket tunnels on non-standard ports (`:20091`, `:20093`) to receive encrypted code executed via `new Function()`, inject dynamic script tags to tracking servers on ports like `:8003`, bind mobile motion sensor traps (`devicemotion` / `deviceorientation`) for "shake-to-redirect" triggers, and blanket the viewport with dozens of invisible `opacity: 0.01` fixed overlay tiles. If `window.open` returns null, the ad script executes a fallback: `top.location != self.location ? top.location = adUrl : window.location.href = adUrl`. If userscripts run at `@run-at document-idle`, the ad script has already executed and navigated the user away before protection can initialize.
+- **Preemptive Execution at `document-start`**: BESing Packed, BESing Meta, and the standalone `PreventRedirect` userscript run with `@run-at document-start`. The application and active security modules initialize immediately on the initial tick, guaranteeing prototype hooks and event interceptors are active before any inline or external page scripts execute.
+- **Dynamic Script & Iframe Neutralization**: Property setters for `HTMLScriptElement.prototype.src` and `HTMLIFrameElement.prototype.src`, alongside `Node.prototype.appendChild` and `Node.prototype.insertBefore`, intercept URLs pointing to evasive ad tracking ports (`:8001`, `:8003`, `:8080`, `:8081`, etc.) or known redirect networks (`lkg6odg.com`, `kt6th8f.com`, `comprelu.cc`, `fumeiti`, etc.). Injected script sources are neutralized to inert data URIs (`data:text/javascript,/*besing-blocked*/`), preventing the ad payload from ever executing.
+- **WebSocket Tunnel & Sensor Trap Shielding**: `window.WebSocket` is proxied to block connections to malicious remote coordination sockets, while `window.addEventListener('devicemotion')` and `'deviceorientation'` are suppressed to completely eliminate shake-to-redirect traps.
+- **Realistic Mock Window & Unprompted Unload Defense**: `window.open` returns a fully functional mock window object with `closed: false` and compliant stub methods, preventing scripts from detecting popup closure and falling back to `location.href`. In addition, `beforeunload` correlates with user-initiated same-origin link clicks, intercepting unprompted background navigation while allowing legitimate chapter and article browsing to proceed seamlessly.

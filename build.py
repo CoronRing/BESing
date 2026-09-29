@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.5.7"
+VERSION = "1.5.8"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -44,7 +44,7 @@ USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @connect      cdn.jsdelivr.net
 // @updateURL    https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.meta.js
 // @downloadURL  https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 """
 
@@ -58,6 +58,7 @@ META_SCRIPT_CONTENT = f"""// ==UserScript==
 // @match        *://*/*
 // @updateURL    https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.meta.js
 // @downloadURL  https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js
+// @run-at       document-start
 // ==/UserScript==
 """
 
@@ -2666,10 +2667,12 @@ def build():
     if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_INSTANCE__ = app;
   }} catch (e) {{}}
 
+  // Initialize immediately at document-start so security shields and active modules start before page scripts execute
+  app.init();
   if (document.readyState === 'loading') {{
-    document.addEventListener('DOMContentLoaded', () => app.init());
-  }} else {{
-    app.init();
+    document.addEventListener('DOMContentLoaded', () => {{
+      app.ensureMounted();
+    }});
   }}
 }})();
 """
