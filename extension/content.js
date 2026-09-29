@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.5.1
+ * Version 1.5.2
  */
 
 (function () {
@@ -1187,7 +1187,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.5.1';
+    static CURRENT_VERSION = '1.5.2';
 
     static isStableLoader() {
       const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || (typeof window !== 'undefined' && window);
@@ -1521,7 +1521,7 @@
     ensureMounted() {
       if (this.storage.isCurrentBlocked()) return;
 
-      const docRoot = document.documentElement || document.body;
+      const docRoot = document.body || document.documentElement;
       if (!docRoot) return;
 
       // 1. Host exists in memory, but got detached from DOM (SPA nav, bfcache, framework wipe)
@@ -1531,7 +1531,12 @@
         return;
       }
 
-      // 2. Host is null or was removed
+      // 2. Seamlessly migrate from documentElement to body once body is ready
+      if (this.host && this.host.isConnected && this.host.parentElement === document.documentElement && document.body) {
+        document.body.appendChild(this.host);
+      }
+
+      // 3. Host is null or was removed
       if (!this.host) {
         const existing = document.getElementById('__besing_root__');
         if (existing) {
@@ -1541,14 +1546,14 @@
         return;
       }
 
-      // 3. Make sure widget element is present in shadow DOM
+      // 4. Make sure widget element is present in shadow DOM
       if (this.shadow && !this.widgetEl) {
         this.renderWidget(this.shadow);
       }
     }
 
     mount() {
-      const docRoot = document.documentElement || document.body;
+      const docRoot = document.body || document.documentElement;
       if (!docRoot) return;
 
       if (this.host && this.host.isConnected) return;
@@ -1561,6 +1566,15 @@
 
       const host = document.createElement('besing-host');
       host.id = '__besing_root__';
+      host.style.position = 'fixed';
+      host.style.top = '0';
+      host.style.left = '0';
+      host.style.width = '0';
+      host.style.height = '0';
+      host.style.zIndex = '2147483647';
+      host.style.overflow = 'visible';
+      host.style.pointerEvents = 'none';
+      host.style.display = 'block';
       docRoot.appendChild(host);
       this.host = host;
 
@@ -2110,6 +2124,17 @@
                 <span class="besing-blocklist-count" id="besing-rules-count">0</span>
               </div>
               <div class="besing-site-rules-list" id="besing-site-rules-container"></div>
+              <div class="besing-add-override-row" style="margin-top:10px;display:flex;gap:6px;align-items:center;">
+                <input type="text" class="besing-input-sm" id="besing-settings-new-host" placeholder="domain (e.g. google.com, rbc.com)" style="flex:1;">
+                <select class="besing-select-sm" id="besing-settings-new-script">
+                  ${this.modules.map(mod => `<option value="${mod.id}">${mod.name}</option>`).join('')}
+                </select>
+                <select class="besing-select-sm" id="besing-settings-new-mode">
+                  <option value="site">Site Only (ON)</option>
+                  <option value="site-off">Excluded (OFF)</option>
+                </select>
+                <button type="button" class="besing-btn-sub-action" id="besing-settings-btn-add-rule" style="color:#38bdf8;border-color:rgba(56,189,248,0.3);font-weight:700;">+ Add</button>
+              </div>
             </div>
           </div>
         `;
@@ -2265,6 +2290,23 @@
           });
         };
         renderSiteRulesList();
+
+        const btnAddSiteRule = body.querySelector('#besing-settings-btn-add-rule');
+        if (btnAddSiteRule) {
+          btnAddSiteRule.onclick = async () => {
+            const inputH = body.querySelector('#besing-settings-new-host');
+            const selectS = body.querySelector('#besing-settings-new-script');
+            const selectM = body.querySelector('#besing-settings-new-mode');
+            const rawH = (inputH ? inputH.value : '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+            if (!rawH) return;
+            const scriptId = selectS ? selectS.value : (this.modules[0] ? this.modules[0].id : '');
+            const modeVal = selectM ? selectM.value : 'site';
+            await this.storage.setSiteOverride(scriptId, rawH, modeVal);
+            inputH.value = '';
+            renderSiteRulesList();
+            this.refreshCurrentSiteModules();
+          };
+        }
 
       } else if (this.currentView === 'script-config') {
         this.renderScriptConfig(body);
@@ -2632,49 +2674,6 @@
         `;
       }
 
-      const overrides = this.storage.getScriptSiteOverrides(m.id);
-      let overridesListHtml = '';
-      if (overrides.length === 0) {
-        overridesListHtml = `<div style="font-size:11px;color:#64748b;padding:4px 0;">No site-specific overrides for this script. Add a domain override below to manage without visiting.</div>`;
-      } else {
-        overridesListHtml = overrides.map(o => `
-          <div class="besing-override-item">
-            <div class="besing-override-host-group">
-              <span class="besing-override-host">${o.host}</span>
-              <span class="besing-override-tag ${o.mode === 'site' ? 'tag-site' : 'tag-site-off'}">
-                ${o.mode === 'site' ? 'Site ON' : 'Excluded (OFF)'}
-              </span>
-            </div>
-            <div class="besing-override-actions">
-              <button type="button" class="besing-btn-sub-action btn-toggle-override" data-host="${o.host}" data-mode="${o.mode}">
-                ${o.mode === 'site' ? 'Make Excluded' : 'Make Site ON'}
-              </button>
-              <button type="button" class="besing-rule-remove btn-del-override" data-host="${o.host}" title="Remove override">✕</button>
-            </div>
-          </div>
-        `).join('');
-      }
-
-      const overridesSectionHtml = `
-        <div class="besing-config-section" style="margin-top:10px;">
-          <div class="besing-section-header-row">
-            <span class="besing-section-title">Site-Specific Overrides (${overrides.length})</span>
-            <span style="font-size:10px;color:#94a3b8;">Manage across all websites</span>
-          </div>
-          <div class="besing-overrides-list" style="margin-top:6px;">
-            ${overridesListHtml}
-          </div>
-          <div class="besing-add-override-row" style="margin-top:10px;display:flex;gap:6px;align-items:center;">
-            <input type="text" class="besing-input-sm" id="besing-new-override-host" placeholder="domain (e.g. rbc.com, google.com)" style="flex:1;">
-            <select class="besing-select-sm" id="besing-new-override-mode">
-              <option value="site">Site Only (Active)</option>
-              <option value="site-off">Excluded (Disabled)</option>
-            </select>
-            <button type="button" class="besing-btn-sub-action" id="besing-btn-add-override" style="color:#38bdf8;border-color:rgba(56,189,248,0.3);font-weight:700;">+ Add</button>
-          </div>
-        </div>
-      `;
-
       let triButtonsHtml = '';
       if (isGloballyOn) {
         triButtonsHtml = `
@@ -2692,10 +2691,15 @@
 
       body.innerHTML = `
         <div class="besing-secondary-header">
-          <button type="button" class="besing-btn-back" id="besing-btn-back">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            <span>All Scripts</span>
-          </button>
+          <div class="besing-secondary-top-bar">
+            <button type="button" class="besing-btn-back" id="besing-btn-back">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+              <span>All Scripts</span>
+            </button>
+            <div class="besing-tri-toggle" title="Status on ${currentHost}">
+              ${triButtonsHtml}
+            </div>
+          </div>
           <div class="besing-secondary-title-group">
             <div class="besing-ext-icon sm">${m.icon || ''}</div>
             <div class="besing-secondary-meta">
@@ -2703,16 +2707,12 @@
               <span class="besing-ext-ver" style="font-size:10px;color:#94a3b8;">v${m.version || '1.0.0'} • ${m.category || 'General'}</span>
             </div>
           </div>
-          <div class="besing-tri-toggle" title="Status on ${currentHost}">
-            ${triButtonsHtml}
-          </div>
         </div>
 
         ${scopeNotice}
 
         <div class="besing-secondary-content" style="display:flex;flex-direction:column;gap:10px;">
           ${specificControls}
-          ${overridesSectionHtml}
         </div>
       `;
 
@@ -2741,44 +2741,6 @@
       if (btnSite) btnSite.onclick = (e) => { e.stopPropagation(); handleModeChange('site'); };
       if (btnSiteOff) btnSiteOff.onclick = (e) => { e.stopPropagation(); handleModeChange('site-off'); };
       if (btnOn) btnOn.onclick = (e) => { e.stopPropagation(); handleModeChange('on'); };
-
-      // Bind Overrides actions
-      body.querySelectorAll('.btn-toggle-override').forEach(btn => {
-        btn.onclick = async (e) => {
-          e.stopPropagation();
-          const h = btn.getAttribute('data-host');
-          const curM = btn.getAttribute('data-mode');
-          const nextM = curM === 'site' ? 'site-off' : 'site';
-          await this.storage.setSiteOverride(m.id, h, nextM);
-          this.refreshCurrentSiteModules();
-          this.renderScriptConfig(body);
-        };
-      });
-
-      body.querySelectorAll('.btn-del-override').forEach(btn => {
-        btn.onclick = async (e) => {
-          e.stopPropagation();
-          const h = btn.getAttribute('data-host');
-          await this.storage.removeSiteOverride(m.id, h);
-          this.refreshCurrentSiteModules();
-          this.renderScriptConfig(body);
-        };
-      });
-
-      const btnAddOverride = body.querySelector('#besing-btn-add-override');
-      if (btnAddOverride) {
-        btnAddOverride.onclick = async (e) => {
-          e.stopPropagation();
-          const inputH = body.querySelector('#besing-new-override-host');
-          const selectM = body.querySelector('#besing-new-override-mode');
-          const rawH = (inputH ? inputH.value : '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-          if (!rawH) return;
-          const modeVal = selectM ? selectM.value : 'site';
-          await this.storage.setSiteOverride(m.id, rawH, modeVal);
-          this.refreshCurrentSiteModules();
-          this.renderScriptConfig(body);
-        };
-      }
 
       // Bind Handlers
       if (m.id === 'text-size-control') {
@@ -2907,19 +2869,19 @@
     injectStyles(shadow) {
       const style = document.createElement('style');
       style.textContent = `
-        :host { all: initial; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }
+        :host { all: initial; position: fixed !important; top: 0 !important; left: 0 !important; width: 0 !important; height: 0 !important; z-index: 2147483647 !important; pointer-events: none !important; overflow: visible !important; display: block !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        .besing-trigger { position: fixed; width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border: 1.5px solid rgba(129, 140, 248, 0.45); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 18px rgba(99, 102, 241, 0.3); display: flex; align-items: center; justify-content: center; color: #c7d2fe; cursor: grab; user-select: none; touch-action: none; z-index: 2147483640; transition: transform 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.2s ease, border-color 0.2s ease, opacity 0.2s ease; }
+        .besing-trigger { position: fixed; width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border: 1.5px solid rgba(129, 140, 248, 0.45); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 18px rgba(99, 102, 241, 0.3); display: flex; align-items: center; justify-content: center; color: #c7d2fe; cursor: grab; user-select: none; touch-action: none; z-index: 2147483647; pointer-events: auto; transition: transform 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.2s ease, border-color 0.2s ease, opacity 0.2s ease; }
         .besing-trigger:hover { transform: scale(1.1); border-color: rgba(165, 180, 252, 0.85); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 26px rgba(99, 102, 241, 0.55); }
         .besing-trigger:active { cursor: grabbing; transform: scale(0.95); }
         .besing-trigger.folded-left { transform: translateX(-65%); opacity: 0.82; }
-        .besing-trigger.folded-right { transform: translateX(32px); clip-path: inset(-12px 32px -12px -12px); opacity: 0.82; }
+        .besing-trigger.folded-right { transform: translateX(26px); clip-path: inset(-12px 26px -12px -12px); opacity: 0.88; }
         .besing-trigger.folded-top { transform: translateY(-65%); opacity: 0.82; }
         .besing-trigger.folded-bottom { transform: translateY(65%); opacity: 0.82; }
         .besing-trigger.folded-top.folded-left { transform: translate(-55%, -55%); }
-        .besing-trigger.folded-top.folded-right { transform: translate(32px, -55%); clip-path: inset(-12px 32px -12px -12px); }
+        .besing-trigger.folded-top.folded-right { transform: translate(26px, -55%); clip-path: inset(-12px 26px -12px -12px); }
         .besing-trigger.folded-bottom.folded-left { transform: translate(-55%, 55%); }
-        .besing-trigger.folded-bottom.folded-right { transform: translate(32px, 55%); clip-path: inset(-12px 32px -12px -12px); }
+        .besing-trigger.folded-bottom.folded-right { transform: translate(26px, 55%); clip-path: inset(-12px 26px -12px -12px); }
         .besing-trigger.folded-right:hover, .besing-trigger.folded-left:hover, .besing-trigger.folded-top:hover, .besing-trigger.folded-bottom:hover { transform: translate(0, 0) scale(1.08); clip-path: none; opacity: 1; }
         .besing-trigger.folded-right::before { content: ""; position: absolute; left: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
         .besing-trigger.folded-left::after { content: ""; position: absolute; right: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
@@ -2934,7 +2896,7 @@
         .besing-pet-eye { transform-origin: center; animation: petBlink 4.5s infinite; }
         .besing-pet-face:hover .besing-pet-eye { animation: none; transform: scaleY(0.2) translateY(1px); }
         @keyframes petBlink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
-        .besing-bubble-wrapper { position: fixed; z-index: 2147483642; pointer-events: auto; animation: besingBubblePop 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+        .besing-bubble-wrapper { position: fixed; z-index: 2147483647; pointer-events: auto; animation: besingBubblePop 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
         .besing-bubble-arrow { position: absolute; width: 14px; height: 14px; background: #0d1322; border: 1px solid rgba(255, 255, 255, 0.14); transform: rotate(45deg); z-index: 2; }
         .besing-bubble-arrow.arrow-bottom { bottom: -7px; border-top: none; border-left: none; }
         .besing-bubble-arrow.arrow-top { top: -7px; border-bottom: none; border-right: none; }
@@ -3028,13 +2990,21 @@
         .besing-ext-actions { display: flex; align-items: center; gap: 8px; }
         .besing-btn-script-gear { background: transparent; border: none; color: #64748b; width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; }
         .besing-btn-script-gear:hover { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; transform: rotate(30deg); }
-        .besing-secondary-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
-        .besing-btn-back { display: inline-flex; align-items: center; gap: 4px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #cbd5e1; padding: 5px 9px; border-radius: 7px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.15s ease; }
+        .besing-secondary-header { display: flex; flex-direction: column; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+        .besing-secondary-top-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
+        .besing-btn-back { display: inline-flex; align-items: center; gap: 6px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #cbd5e1; padding: 5px 10px; border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.15s ease; }
         .besing-btn-back:hover { background: rgba(99, 102, 241, 0.2); border-color: #818cf8; color: #fff; }
-        .besing-secondary-title-group { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
-        .besing-ext-icon.sm { width: 26px; height: 26px; border-radius: 6px; font-size: 11px; }
-        .besing-secondary-meta { display: flex; flex-direction: column; overflow: hidden; }
-        .besing-secondary-title { font-size: 12px; font-weight: 700; color: #f8fafc; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+        .besing-tri-toggle { display: inline-flex; align-items: center; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 2px; gap: 2px; }
+        .besing-tri-btn { background: transparent; border: 1px solid transparent; color: #94a3b8; font-size: 10px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease; white-space: nowrap; line-height: 1.2; }
+        .besing-tri-btn:hover { color: #f1f5f9; background: rgba(255, 255, 255, 0.06); }
+        .besing-tri-btn.active.active-off { background: rgba(100, 116, 139, 0.35); color: #f1f5f9; font-weight: 700; border-color: rgba(148, 163, 184, 0.3); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); }
+        .besing-tri-btn.active.active-site { background: rgba(56, 189, 248, 0.22); color: #38bdf8; border-color: rgba(56, 189, 248, 0.45); font-weight: 700; box-shadow: 0 0 10px rgba(56, 189, 248, 0.25); }
+        .besing-tri-btn.active.active-site-off { background: rgba(245, 158, 11, 0.22); color: #fbbf24; border-color: rgba(245, 158, 11, 0.45); font-weight: 700; box-shadow: 0 0 10px rgba(245, 158, 11, 0.25); }
+        .besing-tri-btn.active.active-on { background: rgba(16, 185, 129, 0.22); color: #34d399; border-color: rgba(16, 185, 129, 0.45); font-weight: 700; box-shadow: 0 0 10px rgba(16, 185, 129, 0.25); }
+        .besing-secondary-title-group { display: flex; align-items: center; gap: 10px; width: 100%; }
+        .besing-ext-icon.sm { width: 28px; height: 28px; border-radius: 8px; font-size: 12px; }
+        .besing-secondary-meta { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+        .besing-secondary-title { font-size: 13px; font-weight: 700; color: #f8fafc; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
         .besing-config-scope { font-size: 11px; line-height: 1.4; padding: 8px 10px; border-radius: 8px; display: flex; align-items: flex-start; gap: 8px; }
         .besing-config-scope.site { background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.25); color: #7dd3fc; }
         .besing-config-scope.global { background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); color: #6ee7b7; }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Script Manager
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.5.1
+// @version      1.5.2
 // @description  Universal Browser Extension & Greasy Fork Script Manager with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT

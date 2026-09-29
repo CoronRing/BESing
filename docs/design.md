@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.5.1  
+**Version:** 1.5.2  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -240,6 +240,16 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 ### 7.8 Dual-Context Stable Bootstrapper Auto-Update Hook
 - **Cross-Sandbox Bridge**: When running under the GitHub Stable Bootstrapper (`besing-stable.user.js`), userscript execution environments isolate Tampermonkey sandbox `window` from page `unsafeWindow`. BESing ensures that bootstrapper environment flags (`__BESING_ENVIRONMENT__`), auto-update hooks (`__BESING_AUTO_UPDATE__`), and reload triggers (`__BESING_RELOAD_LATEST__`) are exported across both `window` and `unsafeWindow`.
 - **Self-Healing Fallback Caching**: If the environment hook is not callable, `BESUpdater` performs a direct fetch of the latest mega-script from GitHub and caches it immediately into userscript storage (`besing_cached_code` and `besing_cached_version`), providing seamless silent updates and a 1-click "Reload Page" prompt.
+
+### 7.9 Host Stacking, Viewport Hardening & Strict CSP Architecture (v1.5.2)
+- **Host Element Hardening**: To prevent complex Single Page Applications (SPAs) such as LinkedIn from trapping or layering modal scrims or fixed chat drawers over the floating widget, `<besing-host>` is explicitly styled with `position: fixed !important; top: 0 !important; left: 0 !important; width: 0 !important; height: 0 !important; z-index: 2147483647 !important; pointer-events: none !important; overflow: visible !important; display: block !important;`. The widget and menu wrappers explicitly declare `pointer-events: auto !important; z-index: 2147483647 !important;`, guaranteeing that BESing commands the highest possible visual stacking context in modern browsers.
+- **Dynamic Body Re-attachment**: Rather than blindly appending to `document.documentElement` as a detached root sibling, BESing mounts to `document.body || document.documentElement` and dynamically migrates the host into `document.body` as soon as the body becomes ready during SPA lifecycle re-renders.
+- **Content Security Policy (CSP) & Bootstrapper Mechanics**: Websites enforcing strict W3C Content Security Policies (such as LinkedIn, GitHub, or financial portals) prohibit runtime dynamic evaluation (`eval` and `new Function`) via `script-src` directives. The standalone mega-script (`besing-manager.user.js`) is completely pre-compiled with zero calls to `eval`, executing natively within Tampermonkey's privileged userscript world without restriction. For users running the minimal stable bootstrapper, `@sandbox JavaScript` is declared to utilize privileged userscript execution realms where available, and clear fallback guidance is provided.
+
+### 7.10 Centralized Site-Specific Rules & Polished Secondary Header UI
+- **Unified Settings Site Management**: Site-specific overrides and cross-domain exclusions (`site-off` / `site`) are unified into the primary Settings page under the "Site Specific Rules" section. Script-specific secondary configuration menus no longer feature duplicate or cluttered override lists, keeping each script's sub-panel laser-focused on its own functional controls (e.g. font zoom levels, background brightness filters, force-copy checkboxes). Users can manage, toggle, remove, or add domain-specific rules directly from Settings across all bundled modules.
+- **Two-Tier Secondary Header Layout**: The secondary configuration page features a clean two-row header: a top utility bar housing the `< All Scripts` back button and a segmented tri-state status toggle (`OFF`, `SITE ONLY`, `ON (GLOBAL)` or `OFF (ALL)`, `OFF (SITE)`, `ON (GLOBAL)`), followed by a dedicated title row displaying the script's icon, full name, version, and category tag.
+- **Vibrant Segmented Control Styling**: The secondary status buttons use dedicated high-contrast status themes (dark slate for complete OFF, glowing cyan for Site-Only, amber for domain exclusions, and emerald green for global ON) with rounded pill encapsulation, eliminating text crowding and unstyled button artifacts.
 
 
 

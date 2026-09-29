@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         BESing Stable Loader
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.4
-// @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub with silent auto-updates.
+// @version      1.0.5
+// @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub/GreasyFork with silent auto-updates.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
+// @sandbox      JavaScript
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -13,9 +14,12 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
+// @connect      update.greasyfork.org
+// @connect      greasyfork.org
+// @connect      cdn.jsdelivr.net
 // @connect      127.0.0.1
 // @connect      localhost
-// @run-at       document-idle
+// @run-at       document-end
 // ==/UserScript==
 
 (function () {
@@ -59,6 +63,9 @@
           inst.openModal('extensions');
         }
       });
+      GM_registerMenuCommand('ℹ️ Direct Install (For Strict CSP Sites)', () => {
+        if (typeof window !== 'undefined') window.open('https://greasyfork.org/en/scripts/597772-besing-script-manager', '_blank');
+      });
     } catch (e) {}
   }
 
@@ -73,9 +80,13 @@
     });
   }
 
-  const REMOTE_SCRIPT_URL = 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js';
+  const PRIMARY_SCRIPT_URL = 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.user.js';
+  const CDN_MIRRORS = [
+    'https://update.greasyfork.org/scripts/597772/BESing%20Script%20Manager.user.js',
+    'https://cdn.jsdelivr.net/gh/CoronRing/BESing@master/userscript/besing-manager.user.js',
+    'http://127.0.0.1:8765/userscript/besing-manager.user.js'
+  ];
   const REMOTE_META_URL = 'https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-manager.meta.js';
-  const LOCAL_DEV_URL = 'http://127.0.0.1:8765/userscript/besing-manager.user.js';
   const CHECK_INTERVAL_MS = 15 * 60 * 1000; // Check meta.js every 15 minutes in background
 
   function parseVersion(text) {
@@ -122,10 +133,14 @@
       console.log('[BESing Stable Loader] BESing successfully initialized.');
     } catch (err) {
       console.error('[BESing Stable Loader] Execution error:', err);
+      const isCspError = err && (err.name === 'EvalError' || (err.message && err.message.includes('Content Security Policy')));
+      if (isCspError) {
+        console.warn('[BESing Stable Loader] Website Content Security Policy (CSP) blocked dynamic eval(). On sites like LinkedIn or GitHub, either enable "Modify CSP headers" in Tampermonkey Settings or install the full direct script: https://greasyfork.org/en/scripts/597772-besing-script-manager');
+      }
       try {
         const s = document.createElement('script');
         s.textContent = code;
-        (document.head || document.documentElement).appendChild(s);
+        (document.body || document.head || document.documentElement).appendChild(s);
         s.remove();
       } catch (fallbackErr) {
         console.error('[BESing Stable Loader] Fallback execution failed:', fallbackErr);
@@ -133,15 +148,30 @@
     }
   }
 
-  function fetchRemote(url) {
+  function fetchRemote(url, timeoutMs = 4000) {
     return new Promise((resolve, reject) => {
+      let resolved = false;
+
+      // Safe AbortController for native fetch fallback
+      const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          if (controller) controller.abort();
+          reject(new Error(`Timeout (${timeoutMs}ms) for ${url}`));
+        }
+      }, timeoutMs);
+
       if (typeof GM_xmlhttpRequest === 'function') {
         try {
           GM_xmlhttpRequest({
             method: 'GET',
             url: `${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`,
-            timeout: 10000,
+            timeout: timeoutMs,
             onload: (res) => {
+              if (resolved) return;
+              resolved = true;
+              clearTimeout(timer);
               if (res.status >= 200 && res.status < 300 && res.responseText) {
                 resolve(res.responseText);
               } else {
@@ -149,37 +179,58 @@
               }
             },
             onerror: (err) => {
-              fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache' })
+              if (resolved) return;
+              // Fallback to fetch with controller
+              fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache', signal: controller ? controller.signal : undefined })
                 .then(r => r.ok ? r.text() : Promise.reject(new Error('Fetch HTTP ' + r.status)))
-                .then(resolve)
-                .catch(() => reject(new Error(err.error || 'Network error')));
+                .then(text => { if (!resolved) { resolved = true; clearTimeout(timer); resolve(text); } })
+                .catch(e => { if (!resolved) { resolved = true; clearTimeout(timer); reject(e); } });
             },
             ontimeout: () => {
-              fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache' })
-                .then(r => r.ok ? r.text() : Promise.reject(new Error('Fetch HTTP ' + r.status)))
-                .then(resolve)
-                .catch(() => reject(new Error('Timeout')));
+              if (resolved) return;
+              resolved = true;
+              clearTimeout(timer);
+              reject(new Error('GM_xmlhttpRequest timeout'));
             }
           });
           return;
         } catch (e) {}
       }
 
-      fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache' })
+      fetch(`${url}?_t=${Date.now()}`, { cache: 'no-cache', signal: controller ? controller.signal : undefined })
         .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
-        .then(resolve)
-        .catch(reject);
+        .then(text => { if (!resolved) { resolved = true; clearTimeout(timer); resolve(text); } })
+        .catch(e => { if (!resolved) { resolved = true; clearTimeout(timer); reject(e); } });
     });
   }
 
   async function downloadAndCacheFull() {
     let code = null;
-    try {
-      code = await fetchRemote(REMOTE_SCRIPT_URL);
-    } catch (e) {
-      console.warn('[BESing Stable Loader] Remote fetch failed, trying local server:', e.message);
-      code = await fetchRemote(LOCAL_DEV_URL);
+    const targets = [PRIMARY_SCRIPT_URL, ...CDN_MIRRORS];
+
+    for (const url of targets) {
+      try {
+        code = await fetchRemote(url, 3500);
+        if (code && code.length > 500) {
+          break;
+        }
+      } catch (e) {
+        console.warn(`[BESing Stable Loader] Mirror fetch failed (${url}):`, e.message);
+      }
     }
+
+    if (code && code.length > 500) {
+      const ver = parseVersion(code) || '1.0.0';
+      if (typeof GM_setValue === 'function') {
+        GM_setValue('besing_cached_code', code);
+        GM_setValue('besing_cached_version', ver);
+        GM_setValue('besing_last_check', Date.now());
+      }
+      console.log(`[BESing Stable Loader] Successfully fetched and cached latest BESing release (v${ver}).`);
+      return { code, version: ver };
+    }
+    return null;
+  }
 
     if (code && code.length > 500) {
       const ver = parseVersion(code) || '1.0.0';

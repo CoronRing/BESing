@@ -71,9 +71,21 @@ export class BESManager {
   async _mount() {
     if (this.hostElement) return;
 
+    const docRoot = document.body || document.documentElement;
+    if (!docRoot) return;
+
     const host = document.createElement('besing-host');
     host.id = '__besing_root__';
-    document.documentElement.appendChild(host);
+    host.style.position = 'fixed';
+    host.style.top = '0';
+    host.style.left = '0';
+    host.style.width = '0';
+    host.style.height = '0';
+    host.style.zIndex = '2147483647';
+    host.style.overflow = 'visible';
+    host.style.pointerEvents = 'none';
+    host.style.display = 'block';
+    docRoot.appendChild(host);
     this.hostElement = host;
 
     const shadow = host.attachShadow({ mode: 'open' });
@@ -135,9 +147,19 @@ export class BESManager {
 
   openManager(view = 'extensions') {
     if (!this.shadowRoot) {
+      const docRoot = document.body || document.documentElement;
       const host = document.createElement('besing-host');
       host.id = '__besing_root__';
-      document.documentElement.appendChild(host);
+      host.style.position = 'fixed';
+      host.style.top = '0';
+      host.style.left = '0';
+      host.style.width = '0';
+      host.style.height = '0';
+      host.style.zIndex = '2147483647';
+      host.style.overflow = 'visible';
+      host.style.pointerEvents = 'none';
+      host.style.display = 'block';
+      if (docRoot) docRoot.appendChild(host);
       this.hostElement = host;
       this.shadowRoot = host.attachShadow({ mode: 'open' });
       this._injectStyles(this.shadowRoot);
@@ -218,21 +240,21 @@ export class BESManager {
 
   _getDefaultStyles() {
     return `
-      :host { all: initial; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }
+      :host { all: initial; position: fixed !important; top: 0 !important; left: 0 !important; width: 0 !important; height: 0 !important; z-index: 2147483647 !important; pointer-events: none !important; overflow: visible !important; display: block !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-      .besing-trigger { position: fixed; width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border: 1.5px solid rgba(129, 140, 248, 0.45); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 18px rgba(99, 102, 241, 0.3); display: flex; align-items: center; justify-content: center; color: #c7d2fe; cursor: grab; user-select: none; touch-action: none; z-index: 2147483640; transition: transform 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.2s ease, border-color 0.2s ease, opacity 0.2s ease; }
+      .besing-trigger { position: fixed; width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border: 1.5px solid rgba(129, 140, 248, 0.45); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 18px rgba(99, 102, 241, 0.3); display: flex; align-items: center; justify-content: center; color: #c7d2fe; cursor: grab; user-select: none; touch-action: none; z-index: 2147483647; pointer-events: auto; transition: transform 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.2s ease, border-color 0.2s ease, opacity 0.2s ease; }
       .besing-trigger:hover { transform: scale(1.1); border-color: rgba(165, 180, 252, 0.85); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 26px rgba(99, 102, 241, 0.55); }
       .besing-trigger:active { cursor: grabbing; transform: scale(0.95); }
-      .besing-trigger.folded-right { transform: translateX(65%); opacity: 0.82; }
+      .besing-trigger.folded-right { transform: translateX(26px); clip-path: inset(-12px 26px -12px -12px); opacity: 0.88; }
       .besing-trigger.folded-left { transform: translateX(-65%); opacity: 0.82; }
-      .besing-trigger.folded-right:hover, .besing-trigger.folded-left:hover { transform: translateX(0) scale(1.08); opacity: 1; }
+      .besing-trigger.folded-right:hover, .besing-trigger.folded-left:hover { transform: translateX(0) scale(1.08); clip-path: none; opacity: 1; }
       .besing-trigger.folded-right::before { content: ""; position: absolute; left: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; }
       .besing-trigger.folded-left::after { content: ""; position: absolute; right: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; }
       .besing-badge-count { position: absolute; top: -2px; right: -2px; background: linear-gradient(135deg, #06b6d4, #3b82f6); color: #fff; font-size: 10px; font-weight: 700; height: 18px; min-width: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #0f172a; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
       .besing-pet-eye { transform-origin: center; animation: petBlink 4.5s infinite; }
       .besing-pet-face:hover .besing-pet-eye { animation: none; transform: scaleY(0.2) translateY(1px); }
       @keyframes petBlink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
-      .besing-bubble-wrapper { position: fixed; z-index: 2147483642; pointer-events: auto; animation: besingBubblePop 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+      .besing-bubble-wrapper { position: fixed; z-index: 2147483647; pointer-events: auto; animation: besingBubblePop 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
       .besing-bubble-arrow { position: absolute; width: 14px; height: 14px; background: #0d1322; border: 1px solid rgba(255, 255, 255, 0.14); transform: rotate(45deg); z-index: 2; }
       .besing-bubble-arrow.arrow-bottom { bottom: -7px; border-top: none; border-left: none; }
       .besing-bubble-arrow.arrow-top { top: -7px; border-bottom: none; border-right: none; }
