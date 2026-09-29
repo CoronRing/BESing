@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.5.3  
+**Version:** 1.5.4  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -256,3 +256,11 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Resilient Selector Engine**: The selector calculation algorithm (`computeSelector`) prioritizes clean DOM identifiers (omitting numeric or internal `__besing` IDs), falls back to concise non-utility CSS classes when document frequency is low, and constructs stable nth-child parent-path selectors if classes are dynamic.
 - **Smooth Animation & Live Dynamic Style Injection**: Clicking an element executes an instant shrink-and-fade animation (`scale(0.88)` and `opacity: 0`), immediately hides the element, and appends the computed selector to `blockedSelectors`. A dynamic `<style id="besing-ad-cleaner-style">` element applies `display: none !important; visibility: hidden !important;` to all blocked selectors across the page.
 - **Bi-Directional Persistence & Restoration**: Elements zapped via point-and-click or `Alt + Z` are automatically synchronized to persistent storage under `siteRules[host].configs['ad-cleaner'].blockedSelectors`. In the script's secondary menu, users are presented with a scrollable list of all zapped elements on the current website, complete with individual restore buttons (`✕`) to unblock specific elements and a "Clear All" button to restore all zapped content simultaneously.
+
+### 7.12 Shadow DOM SVG Hardening, Dimensional Resets & SPA Error Boundary (v1.5.4)
+- **Problem**: When running on complex SPAs such as LinkedIn, host stylesheets apply aggressive global resets (e.g. `body { overflow: hidden; height: 11039px; font-size: 10px; }`) and flex-shrink constraints. Furthermore, in userscript versions prior to v1.5.2, without explicit `!important` dimensional guards and flex-shrink protections inside Shadow DOM, `.besing-bubble-panel` collapsed into an empty 22px bar showing only the header text `BESing v1.5.1`. In addition, inline SVGs (`.besing-pet-face`, `.besing-header-actions svg`, `.besing-logo-icon svg`) collapsed to 0px or disappeared when host styles affected SVG rendering, and any unhandled exception in `renderBody()` could result in a blank panel.
+- **Dimensional & Layout Hardening**: `.besing-bubble-panel` enforces strict `min-width: 360px !important; min-height: 380px !important;` with `.besing-header { flex-shrink: 0 !important; }` and `.besing-body { min-height: 280px !important; flex: 1 1 auto !important; }`. This completely eliminates dimensional collapse regardless of host page flex, height, or overflow overrides.
+- **Global Shadow DOM SVG Rule**: All SVG elements within `#__besing_root__` are explicitly protected via `svg { display: block !important; overflow: visible !important; flex-shrink: 0 !important; }`, guaranteeing that vector icons, pet faces, and navigation controls render crisply across all websites.
+- **Docked Edge Peeking**: The edge-tucking transform when docked on the right margin is refined to `translateX(20px) !important; clip-path: inset(-12px 20px -12px -12px) !important;` so the pet's animated facial features and glance animations remain clearly visible and interactive while parked.
+- **Defensive Error Boundary in `renderBody()`**: A top-level `try...catch` wrapper surrounds `renderBody()`. If any runtime or data parsing error occurs during panel assembly, a styled error card is rendered with an intuitive "Retry Loading" button rather than leaving the menu in an unrecoverable blank state.
+

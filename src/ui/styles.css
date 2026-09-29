@@ -19,9 +19,19 @@
 }
 
 *, *::before, *::after {
-  box-sizing: border-box;
+  box-sizing: border-box !important;
   margin: 0;
   padding: 0;
+}
+
+svg {
+  display: block !important;
+  overflow: visible !important;
+  flex-shrink: 0 !important;
+}
+
+svg:not(:root) {
+  overflow: visible !important;
 }
 
 /* ==========================================================================
@@ -61,44 +71,47 @@
 
 /* Corner / Edge Folding Behavior (4-Direction & Corner Support) */
 .besing-trigger.folded-left {
-  transform: translateX(-65%);
-  opacity: 0.82;
+  transform: translateX(-20px) !important;
+  clip-path: inset(-12px -12px -12px 20px) !important;
+  opacity: 0.88;
 }
 
 /* Scrollbar-safe right folding: clips translated portion so it never overlaps or blocks native scrollbar */
 .besing-trigger.folded-right {
-  transform: translateX(26px);
-  clip-path: inset(-12px 26px -12px -12px);
+  transform: translateX(20px) !important;
+  clip-path: inset(-12px 20px -12px -12px) !important;
   opacity: 0.88;
 }
 
 .besing-trigger.folded-top {
-  transform: translateY(-65%);
-  opacity: 0.82;
+  transform: translateY(-20px) !important;
+  clip-path: inset(20px -12px -12px -12px) !important;
+  opacity: 0.88;
 }
 
 .besing-trigger.folded-bottom {
-  transform: translateY(65%);
-  opacity: 0.82;
+  transform: translateY(20px) !important;
+  clip-path: inset(-12px -12px 20px -12px) !important;
+  opacity: 0.88;
 }
 
 /* Corner Folds */
 .besing-trigger.folded-top.folded-left {
-  transform: translate(-55%, -55%);
+  transform: translate(-20px, -20px) !important;
 }
 
 .besing-trigger.folded-top.folded-right {
-  transform: translate(32px, -55%);
-  clip-path: inset(-12px 32px -12px -12px);
+  transform: translate(20px, -20px) !important;
+  clip-path: inset(-12px 20px -12px -12px) !important;
 }
 
 .besing-trigger.folded-bottom.folded-left {
-  transform: translate(-55%, 55%);
+  transform: translate(-20px, 20px) !important;
 }
 
 .besing-trigger.folded-bottom.folded-right {
-  transform: translate(32px, 55%);
-  clip-path: inset(-12px 32px -12px -12px);
+  transform: translate(20px, 20px) !important;
+  clip-path: inset(-12px 20px -12px -12px) !important;
 }
 
 /* Smooth expansion on hover */
@@ -106,9 +119,9 @@
 .besing-trigger.folded-left:hover,
 .besing-trigger.folded-top:hover,
 .besing-trigger.folded-bottom:hover {
-  transform: translate(0, 0) scale(1.08);
-  clip-path: none;
-  opacity: 1;
+  transform: translate(0, 0) scale(1.08) !important;
+  clip-path: none !important;
+  opacity: 1 !important;
 }
 
 /* Peek indicators when folded */
@@ -243,26 +256,29 @@
 
 /* Bubble / Modal Body Container */
 .besing-bubble-panel {
-  width: 390px;
-  max-width: calc(100vw - 28px);
-  max-height: 520px;
-  background: linear-gradient(180deg, rgba(16, 23, 38, 0.98) 0%, rgba(9, 13, 22, 0.99) 100%);
+  width: 390px !important;
+  min-width: 360px !important;
+  max-width: calc(100vw - 28px) !important;
+  min-height: 380px !important;
+  max-height: 520px !important;
+  background: linear-gradient(180deg, rgba(16, 23, 38, 0.98) 0%, rgba(9, 13, 22, 0.99) 100%) !important;
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.13);
-  border-radius: 18px;
-  box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.75), 0 0 30px rgba(99, 102, 241, 0.16);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.13) !important;
+  border-radius: 18px !important;
+  box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.75), 0 0 30px rgba(99, 102, 241, 0.16) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+  color: #e2e8f0 !important;
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* Expanded Full-Modal Mode */
 .besing-bubble-panel.is-expanded {
-  width: 540px;
-  max-height: 80vh;
+  width: 540px !important;
+  min-height: 500px !important;
+  max-height: 80vh !important;
 }
 
 .besing-modal-backdrop-expanded {
@@ -276,30 +292,37 @@
 
 /* Header */
 .besing-header {
-  padding: 14px 18px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
+  min-height: 54px !important;
+  height: 54px !important;
+  padding: 14px 18px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+  background: rgba(255, 255, 255, 0.02) !important;
+  flex-shrink: 0 !important;
 }
 
 .besing-logo-group {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  display: flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  flex-shrink: 0 !important;
 }
 
 .besing-logo-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #6366f1, #3b82f6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #ffffff;
-  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  min-height: 28px !important;
+  border-radius: 8px !important;
+  background: linear-gradient(135deg, #6366f1, #3b82f6) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4) !important;
+  flex-shrink: 0 !important;
 }
 
 .besing-title {
@@ -319,9 +342,10 @@
 }
 
 .besing-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  flex-shrink: 0 !important;
 }
 
 .besing-btn-icon {
@@ -350,12 +374,13 @@
 
 /* Body */
 .besing-body {
-  padding: 14px 18px;
-  overflow-y: auto;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  padding: 14px 18px !important;
+  overflow-y: auto !important;
+  flex: 1 1 auto !important;
+  min-height: 280px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 12px !important;
 }
 
 /* Search Bar */

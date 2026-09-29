@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.5.3
+ * Version 1.5.4
  */
 
 (function () {
@@ -1425,7 +1425,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.5.3';
+    static CURRENT_VERSION = '1.5.4';
 
     static isStableLoader() {
       const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || (typeof window !== 'undefined' && window);
@@ -2289,8 +2289,10 @@
     }
 
     renderBody() {
-      const body = this.menuWrapperEl.querySelector('#besing-body');
-      body.innerHTML = '';
+      const body = this.menuWrapperEl ? this.menuWrapperEl.querySelector('#besing-body') : null;
+      if (!body) return;
+      try {
+        body.innerHTML = '';
 
       if (this.currentView === 'settings') {
         const currentHost = window.location.hostname || 'localhost';
@@ -2689,7 +2691,19 @@
 
         renderCards();
       }
+    } catch (err) {
+      console.error('[BESing] Error rendering menu body:', err);
+      body.innerHTML = `
+        <div class="besing-empty-state" style="color:#fca5a5;border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.05);padding:16px;">
+          <div style="font-weight:700;margin-bottom:6px;">Failed to render script menu</div>
+          <div style="font-size:11px;color:#94a3b8;font-family:monospace;">${err.message || err}</div>
+          <button type="button" id="besing-btn-retry-render" style="margin-top:10px;padding:4px 10px;font-size:11px;background:#38bdf8;color:#0f172a;border:none;border-radius:6px;cursor:pointer;font-weight:700;">Retry</button>
+        </div>
+      `;
+      const retryBtn = body.querySelector('#besing-btn-retry-render');
+      if (retryBtn) retryBtn.onclick = () => this.renderBody();
     }
+  }
 
     renderScriptConfig(body) {
       const m = this.modules.find(mod => mod.id === this.activeConfigScriptId);
@@ -3212,19 +3226,21 @@
       const style = document.createElement('style');
       style.textContent = `
         :host { all: initial; position: fixed !important; top: 0 !important; left: 0 !important; width: 0 !important; height: 0 !important; z-index: 2147483647 !important; pointer-events: none !important; overflow: visible !important; display: block !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        *, *::before, *::after { box-sizing: border-box !important; margin: 0; padding: 0; }
+        svg { display: block !important; overflow: visible !important; flex-shrink: 0 !important; }
+        svg:not(:root) { overflow: visible !important; }
         .besing-trigger { position: fixed; width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border: 1.5px solid rgba(129, 140, 248, 0.45); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 18px rgba(99, 102, 241, 0.3); display: flex; align-items: center; justify-content: center; color: #c7d2fe; cursor: grab; user-select: none; touch-action: none; z-index: 2147483647; pointer-events: auto; transition: transform 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.2s ease, border-color 0.2s ease, opacity 0.2s ease; }
         .besing-trigger:hover { transform: scale(1.1); border-color: rgba(165, 180, 252, 0.85); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 26px rgba(99, 102, 241, 0.55); }
         .besing-trigger:active { cursor: grabbing; transform: scale(0.95); }
-        .besing-trigger.folded-left { transform: translateX(-65%); opacity: 0.82; }
-        .besing-trigger.folded-right { transform: translateX(26px); clip-path: inset(-12px 26px -12px -12px); opacity: 0.88; }
-        .besing-trigger.folded-top { transform: translateY(-65%); opacity: 0.82; }
-        .besing-trigger.folded-bottom { transform: translateY(65%); opacity: 0.82; }
-        .besing-trigger.folded-top.folded-left { transform: translate(-55%, -55%); }
-        .besing-trigger.folded-top.folded-right { transform: translate(26px, -55%); clip-path: inset(-12px 26px -12px -12px); }
-        .besing-trigger.folded-bottom.folded-left { transform: translate(-55%, 55%); }
-        .besing-trigger.folded-bottom.folded-right { transform: translate(26px, 55%); clip-path: inset(-12px 26px -12px -12px); }
-        .besing-trigger.folded-right:hover, .besing-trigger.folded-left:hover, .besing-trigger.folded-top:hover, .besing-trigger.folded-bottom:hover { transform: translate(0, 0) scale(1.08); clip-path: none; opacity: 1; }
+        .besing-trigger.folded-left { transform: translateX(-20px) !important; clip-path: inset(-12px -12px -12px 20px) !important; opacity: 0.88; }
+        .besing-trigger.folded-right { transform: translateX(20px) !important; clip-path: inset(-12px 20px -12px -12px) !important; opacity: 0.88; }
+        .besing-trigger.folded-top { transform: translateY(-20px) !important; clip-path: inset(20px -12px -12px -12px) !important; opacity: 0.88; }
+        .besing-trigger.folded-bottom { transform: translateY(20px) !important; clip-path: inset(-12px -12px 20px -12px) !important; opacity: 0.88; }
+        .besing-trigger.folded-top.folded-left { transform: translate(-20px, -20px) !important; }
+        .besing-trigger.folded-top.folded-right { transform: translate(20px, -20px) !important; clip-path: inset(-12px 20px -12px -12px) !important; }
+        .besing-trigger.folded-bottom.folded-left { transform: translate(-20px, 20px) !important; }
+        .besing-trigger.folded-bottom.folded-right { transform: translate(20px, 20px) !important; clip-path: inset(-12px 20px -12px -12px) !important; }
+        .besing-trigger.folded-right:hover, .besing-trigger.folded-left:hover, .besing-trigger.folded-top:hover, .besing-trigger.folded-bottom:hover { transform: translate(0, 0) scale(1.08) !important; clip-path: none !important; opacity: 1 !important; }
         .besing-trigger.folded-right::before { content: ""; position: absolute; left: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
         .besing-trigger.folded-left::after { content: ""; position: absolute; right: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
         .besing-trigger.folded-top:not(.folded-right)::before, .besing-trigger.folded-top.folded-right::after { content: ""; position: absolute; bottom: 2px; left: 14px; right: 14px; height: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
@@ -3242,18 +3258,18 @@
         .besing-bubble-arrow { position: absolute; width: 14px; height: 14px; background: #0d1322; border: 1px solid rgba(255, 255, 255, 0.14); transform: rotate(45deg); z-index: 2; }
         .besing-bubble-arrow.arrow-bottom { bottom: -7px; border-top: none; border-left: none; }
         .besing-bubble-arrow.arrow-top { top: -7px; border-bottom: none; border-right: none; }
-        .besing-bubble-panel { width: 390px; max-width: calc(100vw - 28px); max-height: 520px; background: linear-gradient(180deg, rgba(16, 23, 38, 0.98) 0%, rgba(9, 13, 22, 0.99) 100%); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.13); border-radius: 18px; box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.75), 0 0 30px rgba(99, 102, 241, 0.16); display: flex; flex-direction: column; overflow: hidden; color: #e2e8f0; transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
-        .besing-bubble-panel.is-expanded { width: 540px; max-height: 80vh; }
-        .besing-header { padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.02); }
-        .besing-logo-group { display: flex; align-items: center; gap: 10px; }
-        .besing-logo-icon { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #6366f1, #3b82f6); display: flex; align-items: center; justify-content: center; color: #ffffff; box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4); }
+        .besing-bubble-panel { width: 390px !important; min-width: 360px !important; max-width: calc(100vw - 28px) !important; min-height: 380px !important; max-height: 520px !important; background: linear-gradient(180deg, rgba(16, 23, 38, 0.98) 0%, rgba(9, 13, 22, 0.99) 100%) !important; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.13) !important; border-radius: 18px !important; box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.75), 0 0 30px rgba(99, 102, 241, 0.16) !important; display: flex !important; flex-direction: column !important; overflow: hidden !important; color: #e2e8f0 !important; transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
+        .besing-bubble-panel.is-expanded { width: 540px !important; min-height: 500px !important; max-height: 80vh !important; }
+        .besing-header { min-height: 54px !important; height: 54px !important; padding: 14px 18px !important; display: flex !important; align-items: center !important; justify-content: space-between !important; border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important; background: rgba(255, 255, 255, 0.02) !important; flex-shrink: 0 !important; }
+        .besing-logo-group { display: flex !important; align-items: center !important; gap: 10px !important; flex-shrink: 0 !important; }
+        .besing-logo-icon { width: 28px !important; height: 28px !important; min-width: 28px !important; min-height: 28px !important; border-radius: 8px !important; background: linear-gradient(135deg, #6366f1, #3b82f6) !important; display: flex !important; align-items: center !important; justify-content: center !important; color: #ffffff !important; box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4) !important; flex-shrink: 0 !important; }
         .besing-title { font-size: 14px; font-weight: 700; color: #f8fafc; }
         .besing-tag { font-size: 10px; font-weight: 600; background: rgba(99, 102, 241, 0.18); color: #a5b4fc; padding: 2px 6px; border-radius: 6px; border: 1px solid rgba(99, 102, 241, 0.3); }
-        .besing-header-actions { display: flex; align-items: center; gap: 6px; }
+        .besing-header-actions { display: flex !important; align-items: center !important; gap: 6px !important; flex-shrink: 0 !important; }
         .besing-btn-icon { background: transparent; border: none; color: #94a3b8; width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; }
         .besing-btn-icon:hover { background: rgba(255, 255, 255, 0.08); color: #f8fafc; }
         .besing-btn-icon.active { background: rgba(99, 102, 241, 0.25); color: #818cf8; }
-        .besing-body { padding: 14px 18px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px; }
+        .besing-body { padding: 14px 18px !important; overflow-y: auto !important; flex: 1 1 auto !important; min-height: 280px !important; display: flex !important; flex-direction: column !important; gap: 12px !important; }
         .besing-search-wrap { position: relative; display: flex; align-items: center; }
         .besing-search-icon { position: absolute; left: 12px; color: #64748b; pointer-events: none; }
         .besing-search-input { width: 100%; background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 8px 12px 8px 34px; color: #f1f5f9; font-size: 13px; outline: none; transition: border-color 0.2s, background 0.2s; }
