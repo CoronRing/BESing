@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Stable
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.6
+// @version      1.1.0
 // @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub/GreasyFork with silent auto-updates.
 // @author       BESing Team
 // @license      MIT
@@ -14,6 +14,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_info
 // @grant        unsafeWindow
+// @connect      *
 // @connect      raw.githubusercontent.com
 // @connect      github.com
 // @connect      update.greasyfork.org
@@ -21,7 +22,7 @@
 // @connect      cdn.jsdelivr.net
 // @connect      127.0.0.1
 // @connect      localhost
-// @run-at       document-end
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
@@ -41,6 +42,117 @@
     if (typeof window !== 'undefined') window.__BESING_ENVIRONMENT__ = 'stable-loader';
     if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_ENVIRONMENT__ = 'stable-loader';
   } catch (e) {}
+
+  // Preemptive Security Shield at document-start (instant protection before cached code runs or initial fetch completes)
+  (function initEarlyShield() {
+    try {
+      const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+      const isAdUrl = (u) => {
+        if (!u || typeof u !== 'string') return false;
+        const s = u.toLowerCase();
+        if (/(?:^|\/)(?:config\/)?(?:v\d+|tj|fumeiti|ads?|union|pop|float|jump|tongji)\.js(?:$|\?)/i.test(s)) return true;
+        if (/:(8001|8002|8003|8080|8081|8887|8888|9999|20091|20092|20093)\b/.test(s)) return true;
+        if (/(lkg6odg|kt6th8f|fumeiti|comprelu|dsygc|uuysi5|uuysi6|5bjoeih|xq04k6u|qq26oeg|adzxdimq|vdxqxca|oybhpsij|7461c|7461m)/.test(s)) return true;
+        if (/(\/sc\/\d+|\/cc\/\d+|\/d\/\d+|\/mj1\/\d+|\/stats\/\d+|\/push\/|\/stat\/|\/click\/)/.test(s)) return true;
+        if (s.includes('?n=') || s.includes('&target=1') || s.includes('is_not=1') || s.includes('ikooenpn') || s.includes('srisnadi')) return true;
+        return false;
+      };
+      const isAdCode = (s) => {
+        if (!s || typeof s !== 'string') return false;
+        const str = s.toLowerCase();
+        if (/(top\.location|window\.location|location\.href)\s*(!=|==|=)/.test(str) && (str.includes('http') || str.includes('7461') || str.includes('ikooenpn') || str.includes('target=1') || str.includes('purl') || str.includes('adzxdimq') || str.includes('lkg6odg') || str.includes('kt6th8f'))) return true;
+        if ((str.includes('touchend') || str.includes('touchstart') || str.includes('changedtouches')) && (str.includes('location.href') || str.includes('top.location'))) return true;
+        if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|7461c|7461m|wsxg|adzxdimq)/.test(str)) return true;
+        return false;
+      };
+
+      const OrigFn = unsafeWin.Function || window.Function;
+      const hookedFn = function(...args) {
+        const c = args[args.length - 1] || '';
+        if (typeof c === 'string' && isAdCode(c)) return function() {};
+        return OrigFn.apply(this, args);
+      };
+      hookedFn.prototype = OrigFn.prototype;
+      window.Function = hookedFn;
+      if (unsafeWin && unsafeWin !== window) { try { unsafeWin.Function = hookedFn; } catch(e) {} }
+
+      const origST = window.setTimeout;
+      const hookedST = function(h, d, ...args) {
+        if (typeof h === 'function' && isAdCode(h.toString())) return 0;
+        return origST.call(this, h, d, ...args);
+      };
+      window.setTimeout = hookedST;
+      if (unsafeWin && unsafeWin !== window) { try { unsafeWin.setTimeout = hookedST; } catch(e) {} }
+
+      const scriptProto = (unsafeWin.HTMLScriptElement || HTMLScriptElement).prototype;
+      const scriptDesc = Object.getOwnPropertyDescriptor(scriptProto, 'src');
+      if (scriptDesc && scriptDesc.set) {
+        const origSet = scriptDesc.set;
+        Object.defineProperty(scriptProto, 'src', {
+          set: function(v) {
+            if (isAdUrl(v)) return origSet.call(this, 'data:text/javascript,/*besing-blocked*/');
+            return origSet.call(this, v);
+          },
+          get: scriptDesc.get,
+          configurable: true
+        });
+      }
+
+      const eventProto = (unsafeWin.EventTarget || EventTarget).prototype;
+      const origAEL = eventProto.addEventListener;
+      eventProto.addEventListener = function(type, listener, options) {
+        if (type === 'devicemotion' || type === 'deviceorientation') return;
+        if (typeof listener === 'function' && isAdCode(listener.toString())) return;
+        return origAEL.call(this, type, listener, options);
+      };
+
+      const root = document.documentElement || document;
+      if (root) {
+        const obs = new MutationObserver((mutations) => {
+          for (let m = 0; m < mutations.length; m++) {
+            const added = mutations[m].addedNodes;
+            for (let i = 0; i < added.length; i++) {
+              const node = added[i];
+              if (!node || node.nodeType !== 1) continue;
+              if (node.tagName === 'SCRIPT') {
+                const src = node.getAttribute('src') || node.src || '';
+                if (isAdUrl(src) || isAdCode(node.textContent || '')) {
+                  node.type = 'javascript/blocked';
+                  try { node.src = ''; } catch(e) {}
+                  node.remove();
+                }
+              } else if (node.tagName === 'DIV' || node.tagName === 'A') {
+                const style = node.getAttribute('style') || '';
+                if (style && (style.includes('opacity:0.01') || style.includes('opacity: 0.01') || style.includes('opacity:0;') || style.includes('opacity: 0;')) && (style.includes('position:fixed') || style.includes('position: fixed') || style.includes('position:absolute'))) {
+                  node.remove();
+                }
+              }
+            }
+          }
+        });
+        obs.observe(root, { childList: true, subtree: true });
+      }
+
+      const touchTrapKiller = (e) => {
+        const target = e.target;
+        if (target && target.nodeType === 1) {
+          const style = target.getAttribute('style') || '';
+          if (style && (style.includes('opacity:0.01') || style.includes('opacity: 0.01') || style.includes('opacity:0;') || style.includes('opacity: 0;')) && (style.includes('position:fixed') || style.includes('position: fixed') || style.includes('position:absolute'))) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            try { target.remove(); } catch(err) {}
+          }
+        }
+      };
+      window.addEventListener('touchstart', touchTrapKiller, true);
+      document.addEventListener('touchstart', touchTrapKiller, true);
+      window.addEventListener('touchend', touchTrapKiller, true);
+      document.addEventListener('touchend', touchTrapKiller, true);
+      window.addEventListener('click', touchTrapKiller, true);
+      document.addEventListener('click', touchTrapKiller, true);
+    } catch(e) {}
+  })();
 
   // Register Tampermonkey Control Panel commands if not already registered
   if (typeof GM_registerMenuCommand === 'function' && !window.__BESING_MENU_REGISTERED__) {

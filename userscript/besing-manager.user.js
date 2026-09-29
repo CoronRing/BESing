@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.6.0
+// @version      1.6.1
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -1302,7 +1302,7 @@
       const mod = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.3.1',
+    version: '1.4.0',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
     _origOpen: null,
@@ -1326,6 +1326,9 @@
     _origInsertAdjacentHTML: null,
     _origAEL: null,
     _origDocAEL: null,
+    _origDocWrite: null,
+    _origDocWriteln: null,
+    _scriptObserver: null,
     _clickHandler: null,
     _auxClickHandler: null,
     _touchHandler: null,
@@ -1357,29 +1360,34 @@
       const u = targetUrl.toLowerCase().trim();
       if (!u || u.startsWith('#') || u.startsWith('javascript:') || u.startsWith('about:')) return false;
 
-      // 1. Non-standard ports commonly used by evasive ad/redirect servers
+      // 1. Relative or absolute script paths commonly used for mobile redirect and malicious tracking
+      if (/(?:^|\/)(?:config\/)?(?:v\d+|tj|fumeiti|ads?|union|pop|float|jump|tongji|statistics)\.js(?:$|\?)/i.test(u)) {
+        return true;
+      }
+
+      // 2. Non-standard ports commonly used by evasive ad/redirect servers
       if (/:(8001|8002|8003|8080|8081|8887|8888|9999|20091|20092|20093)\b/.test(u)) {
         if (!this._isSameHost(u)) return true;
       }
 
-      // 2. Known mobile ad / redirect networks
+      // 3. Known mobile ad / redirect networks
       const adDomains = [
         'lkg6odg', 'kt6th8f', 'fumeiti', 'comprelu', 'dsygc',
         'uuysi5', 'uuysi6', '5bjoeih', 'xq04k6u', 'qq26oeg',
         'adzxdimq', 'vdxqxca', 'oybhpsij', 'popcash', 'propellerads',
         'exoclick', 'adsterra', 'clickadu', 'richpush', 'trafficjunky',
         'adservice', 'adnetwork', 'tsyndicate', 'hilltopads', 'adcash',
-        'juicyads', 'yabidos'
+        'juicyads', 'yabidos', '7461c', '7461m'
       ];
       for (let i = 0; i < adDomains.length; i++) {
         if (u.includes(adDomains[i])) return true;
       }
 
-      // 3. Known ad tracking redirect url path patterns
+      // 4. Known ad tracking redirect url path patterns
       if (/(\/sc\/\d+|\/cc\/\d+|\/d\/\d+|\/mj1\/\d+|\/stats\/\d+|\/push\/|\/stat\/|\/click\/)/.test(u) && !this._isSameHost(u)) {
         return true;
       }
-      if ((u.includes('?n=') || u.includes('&target=1') || u.includes('is_not=1')) && !this._isSameHost(u)) {
+      if ((u.includes('?n=') || u.includes('&target=1') || u.includes('is_not=1') || u.includes('ikooenpn') || u.includes('srisnadi')) && !this._isSameHost(u)) {
         return true;
       }
 
@@ -1390,15 +1398,19 @@
       if (!codeStr || typeof codeStr !== 'string') return false;
       const s = codeStr.toLowerCase();
       // 1. Direct location hijacking with ad tokens or evasion params
-      if (/(top\.location|window\.location|location\.href)\s*(!=|==|=)\s*.*(target=1|purl|ikooenpn|srisnadi|:800|:888|comprelu|kt6th8f|lkg6odg|adzxdimq|dsygc)/.test(s)) {
+      if (/(top\.location|window\.location|location\.href)\s*(!=|==|=)/.test(s) && (s.includes('http') || s.includes('target=1') || s.includes('purl') || s.includes('ikooenpn') || s.includes('srisnadi') || s.includes(':800') || s.includes(':888') || s.includes('7461') || s.includes('comprelu') || s.includes('kt6th8f') || s.includes('lkg6odg') || s.includes('adzxdimq') || s.includes('dsygc'))) {
         return true;
       }
-      // 2. Mobile ad skip delay timers & evasion functions
-      if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij)/.test(s)) {
+      // 2. Mobile touch/sensor trap listeners that manipulate location
+      if ((s.includes('touchend') || s.includes('touchstart') || s.includes('changedtouches') || s.includes('clientheight')) && (s.includes('location.href') || s.includes('top.location') || s.includes('window.location'))) {
         return true;
       }
-      // 3. Evasive websocket payload loaders
-      if (s.includes('new function') && (s.includes('_tdcs') || s.includes('wvsyru') || s.includes('nnkqek'))) {
+      // 3. Mobile ad skip delay timers & evasion functions
+      if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij|7461c|7461m)/.test(s)) {
+        return true;
+      }
+      // 4. Evasive websocket payload loaders
+      if (s.includes('new function') && (s.includes('_tdcs') || s.includes('wvsyru') || s.includes('nnkqek') || s.includes('7461'))) {
         return true;
       }
       return false;
@@ -1796,12 +1808,104 @@
         }
       };
 
+      // Intercept document.write and document.writeln to block synchronous ad script injections
+      try {
+        const origWrite = document.write;
+        const origWriteln = document.writeln;
+        this._origDocWrite = origWrite;
+        this._origDocWriteln = origWriteln;
+        document.write = function(...args) {
+          const content = args.join('');
+          if (self._isAdCode(content) || (content.includes('<script') && self._isAdOrRedirectUrl(content))) {
+            self.notifyBlocked('document.write', 'malicious script injection via document.write');
+            return;
+          }
+          return origWrite.apply(this, args);
+        };
+        document.writeln = function(...args) {
+          const content = args.join('');
+          if (self._isAdCode(content) || (content.includes('<script') && self._isAdOrRedirectUrl(content))) {
+            self.notifyBlocked('document.writeln', 'malicious script injection via document.writeln');
+            return;
+          }
+          return origWriteln.apply(this, args);
+        };
+      } catch (e) {}
+
+      // Freeze malicious cookie setting (e.g. fumeiti tracking counter)
+      try {
+        const cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') || Object.getOwnPropertyDescriptor(document, 'cookie');
+        if (cookieDesc && cookieDesc.set) {
+          const origCookieSet = cookieDesc.set;
+          Object.defineProperty(document, 'cookie', {
+            set: function(val) {
+              if (typeof val === 'string' && val.includes('fumeiti')) {
+                return;
+              }
+              return origCookieSet.call(this, val);
+            },
+            get: cookieDesc.get,
+            configurable: true
+          });
+        }
+      } catch (e) {}
+
+      // Synchronously scan and intercept script tags and invisible overlay tiles added to DOM
+      try {
+        const root = document.documentElement || document;
+        if (root) {
+          const observer = new MutationObserver((mutations) => {
+            for (let m = 0; m < mutations.length; m++) {
+              const added = mutations[m].addedNodes;
+              for (let i = 0; i < added.length; i++) {
+                const node = added[i];
+                if (!node || node.nodeType !== 1) continue;
+                if (node.tagName === 'SCRIPT') {
+                  const src = node.getAttribute('src') || node.src || '';
+                  const text = node.textContent || '';
+                  if (self._isAdOrRedirectUrl(src) || (text && self._isAdCode(text))) {
+                    self.notifyBlocked(src || 'inline script', 'DOM MutationObserver blocked script');
+                    node.type = 'javascript/blocked';
+                    try { node.src = ''; } catch (err) {}
+                    try { node.textContent = ''; } catch (err) {}
+                    node.remove();
+                  }
+                } else if (node.tagName === 'DIV' || node.tagName === 'A') {
+                  const style = node.getAttribute('style') || '';
+                  if (style && (style.includes('opacity:0.01') || style.includes('opacity: 0.01') || style.includes('opacity:0;') || style.includes('opacity: 0;')) && (style.includes('position:fixed') || style.includes('position: fixed') || style.includes('position:absolute'))) {
+                    self.notifyBlocked('overlay', 'DOM MutationObserver blocked invisible overlay tile');
+                    node.remove();
+                  }
+                }
+              }
+            }
+          });
+          observer.observe(root, { childList: true, subtree: true });
+          this._scriptObserver = observer;
+        }
+      } catch (e) {}
+
       this._touchHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
           return;
+        }
+        // Neutralize touch on invisible overlays or malicious click-jack tiles
+        const target = e.target;
+        if (target && target.nodeType === 1) {
+          const style = target.getAttribute('style') || '';
+          const isTrap = (style.includes('opacity:0.01') || style.includes('opacity: 0.01') || style.includes('opacity:0;') || style.includes('opacity: 0;')) &&
+                         (style.includes('position:fixed') || style.includes('position: fixed') || style.includes('position:absolute'));
+          if (isTrap) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            self.notifyBlocked('touch-trap', 'quarantined touch on invisible overlay tile');
+            try { target.remove(); } catch(err) {}
+            return;
+          }
         }
       };
 
@@ -1834,6 +1938,8 @@
 
       window.addEventListener('click', this._clickHandler, true);
       document.addEventListener('click', this._clickHandler, true);
+      window.addEventListener('touchstart', this._touchHandler, true);
+      document.addEventListener('touchstart', this._touchHandler, true);
       window.addEventListener('touchend', this._touchHandler, true);
       document.addEventListener('touchend', this._touchHandler, true);
       window.addEventListener('auxclick', this._auxClickHandler, true);
@@ -1864,10 +1970,11 @@
             function isAd(u) {
               if (!u || typeof u !== 'string') return false;
               var s = u.toLowerCase();
+              if (/(?:^|\\/)(?:config\\/)?(?:v\\d+|tj|fumeiti|ads?|union|pop|float|jump|tongji|statistics)\\.js(?:$|\\?)/i.test(s)) return true;
               if (/:(8001|8002|8003|8080|8081|8887|8888|9999|20091|20092|20093)\\b/.test(s) && !isSame(s)) return true;
-              if (/(lkg6odg|kt6th8f|fumeiti|comprelu|dsygc|uuysi5|uuysi6|5bjoeih|xq04k6u|qq26oeg|adzxdimq|vdxqxca|oybhpsij|popcash|propellerads|exoclick|adsterra|clickadu|richpush|trafficjunky|adservice|adnetwork)/.test(s)) return true;
+              if (/(lkg6odg|kt6th8f|fumeiti|comprelu|dsygc|uuysi5|uuysi6|5bjoeih|xq04k6u|qq26oeg|adzxdimq|vdxqxca|oybhpsij|popcash|propellerads|exoclick|adsterra|clickadu|richpush|trafficjunky|adservice|adnetwork|7461c|7461m)/.test(s)) return true;
               if (/(\\/sc\\/\\d+|\\/cc\\/\\d+|\\/d\\/\\d+|\\/mj1\\/\\d+|\\/stats\\/\\d+|\\/push\\/|\\/stat\\/|\\/click\\/)/.test(s) && !isSame(s)) return true;
-              if (s.indexOf('?n=') !== -1 || s.indexOf('&target=1') !== -1 || s.indexOf('is_not=1') !== -1) {
+              if (s.indexOf('?n=') !== -1 || s.indexOf('&target=1') !== -1 || s.indexOf('is_not=1') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1) {
                 if (!isSame(s)) return true;
               }
               return false;
@@ -1876,9 +1983,10 @@
             function isAdCode(str) {
               if (!str || typeof str !== 'string') return false;
               var s = str.toLowerCase();
-              if (/(top\\.location|window\\.location|location\\.href)\\s*(!=|==|=)\\s*.*(target=1|purl|ikooenpn|srisnadi|:800|:888|comprelu|kt6th8f|lkg6odg|adzxdimq|dsygc)/.test(s)) return true;
-              if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij)/.test(s)) return true;
-              if (s.indexOf('new function') !== -1 && (s.indexOf('_tdcs') !== -1 || s.indexOf('wvsyru') !== -1 || s.indexOf('nnkqek') !== -1)) return true;
+              if (/(top\\.location|window\\.location|location\\.href)\\s*(!=|==|=)/.test(s) && (s.indexOf('http') !== -1 || s.indexOf('target=1') !== -1 || s.indexOf('purl') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1 || s.indexOf(':800') !== -1 || s.indexOf(':888') !== -1 || s.indexOf('7461') !== -1 || s.indexOf('comprelu') !== -1 || s.indexOf('kt6th8f') !== -1 || s.indexOf('lkg6odg') !== -1 || s.indexOf('adzxdimq') !== -1 || s.indexOf('dsygc') !== -1)) return true;
+              if ((s.indexOf('touchend') !== -1 || s.indexOf('touchstart') !== -1 || s.indexOf('changedtouches') !== -1 || s.indexOf('clientheight') !== -1) && (s.indexOf('location.href') !== -1 || s.indexOf('top.location') !== -1 || s.indexOf('window.location') !== -1)) return true;
+              if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij|7461c|7461m)/.test(s)) return true;
+              if (s.indexOf('new function') !== -1 && (s.indexOf('_tdcs') !== -1 || s.indexOf('wvsyru') !== -1 || s.indexOf('nnkqek') !== -1 || s.indexOf('7461') !== -1)) return true;
               return false;
             }
 
@@ -1922,7 +2030,10 @@
               if (t === 'devicemotion' || t === 'deviceorientation') return;
               if (typeof l === 'function') {
                 try {
-                  if (isAdCode(l.toString())) return;
+                  if (isAdCode(l.toString())) {
+                    window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: t, reason: 'page-script addEventListener' } }));
+                    return;
+                  }
                 } catch(e) {}
               }
               return origAEL.call(this, t, l, o);
@@ -1984,7 +2095,7 @@
             // Hook insertAdjacentHTML in page context
             var oInsert = Element.prototype.insertAdjacentHTML;
             Element.prototype.insertAdjacentHTML = function(p, h) {
-              if (typeof h === 'string' && h.indexOf('position:fixed') !== -1 && (h.indexOf('opacity:0.01') !== -1 || h.indexOf('opacity: 0.01') !== -1)) {
+              if (typeof h === 'string' && h.indexOf('position:fixed') !== -1 && (h.indexOf('opacity:0.01') !== -1 || h.indexOf('opacity: 0.01') !== -1 || h.indexOf('opacity:0;') !== -1)) {
                 return;
               }
               return oInsert.call(this, p, h);
@@ -2108,9 +2219,23 @@
         this._clickHandler = null;
       }
       if (this._touchHandler) {
+        window.removeEventListener('touchstart', this._touchHandler, true);
+        document.removeEventListener('touchstart', this._touchHandler, true);
         window.removeEventListener('touchend', this._touchHandler, true);
         document.removeEventListener('touchend', this._touchHandler, true);
         this._touchHandler = null;
+      }
+      if (this._scriptObserver) {
+        try { this._scriptObserver.disconnect(); } catch (e) {}
+        this._scriptObserver = null;
+      }
+      if (this._origDocWrite) {
+        try { document.write = this._origDocWrite; } catch (e) {}
+        this._origDocWrite = null;
+      }
+      if (this._origDocWriteln) {
+        try { document.writeln = this._origDocWriteln; } catch (e) {}
+        this._origDocWriteln = null;
       }
       if (this._auxClickHandler) {
         window.removeEventListener('auxclick', this._auxClickHandler, true);
@@ -2137,7 +2262,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.6.0';
+    static CURRENT_VERSION = '1.6.1';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
