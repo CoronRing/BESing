@@ -47,34 +47,60 @@ export class BESMenu {
     this.panelEl = panel;
 
     // Header
-    panel.innerHTML = `
-      <div class="besing-header">
-        <div class="besing-logo-group">
-          <div class="besing-logo-icon">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
-          </div>
-          <div>
-            <span class="besing-title">BESing Hub</span>
-            <span class="besing-tag">v1.1</span>
-          </div>
-        </div>
-        <div class="besing-header-actions">
-          <!-- Tiny Expand / Collapse Button -->
-          <button class="besing-btn-icon" id="besing-btn-expand" title="Toggle Compact / Expanded View">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
-          </button>
-          <!-- Settings Button -->
-          <button class="besing-btn-icon ${this.currentView === 'settings' ? 'active' : ''}" id="besing-btn-toggle-settings" title="Settings & Blocked Sites">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-          </button>
-          <!-- Close Button -->
-          <button class="besing-btn-icon" id="besing-btn-close" title="Close">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-          </button>
-        </div>
-      </div>
-      <div class="besing-body" id="besing-modal-body"></div>
-    `;
+    const header = document.createElement('div');
+    header.className = 'besing-header';
+
+    const logoGroup = document.createElement('div');
+    logoGroup.className = 'besing-logo-group';
+
+    const logoIcon = document.createElement('div');
+    logoIcon.className = 'besing-logo-icon';
+    logoIcon.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>`;
+    logoGroup.appendChild(logoIcon);
+
+    const titleGroup = document.createElement('div');
+    const titleSpan = document.createElement('span');
+    titleSpan.className = 'besing-title';
+    titleSpan.textContent = 'BESing Hub';
+    const tagSpan = document.createElement('span');
+    tagSpan.className = 'besing-tag';
+    tagSpan.textContent = 'v1.5.6';
+    titleGroup.appendChild(titleSpan);
+    titleGroup.appendChild(tagSpan);
+    logoGroup.appendChild(titleGroup);
+    header.appendChild(logoGroup);
+
+    const headerActions = document.createElement('div');
+    headerActions.className = 'besing-header-actions';
+
+    const expandBtn = document.createElement('button');
+    expandBtn.className = 'besing-btn-icon';
+    expandBtn.id = 'besing-btn-expand';
+    expandBtn.title = 'Toggle Compact / Expanded View';
+    expandBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>`;
+    headerActions.appendChild(expandBtn);
+
+    const settingsBtn = document.createElement('button');
+    settingsBtn.className = `besing-btn-icon ${this.currentView === 'settings' ? 'active' : ''}`;
+    settingsBtn.id = 'besing-btn-toggle-settings';
+    settingsBtn.title = 'Settings & Blocked Sites';
+    settingsBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`;
+    headerActions.appendChild(settingsBtn);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'besing-btn-icon';
+    closeBtn.id = 'besing-btn-close';
+    closeBtn.title = 'Close';
+    closeBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+    headerActions.appendChild(closeBtn);
+
+    header.appendChild(headerActions);
+    panel.appendChild(header);
+
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'besing-body';
+    bodyEl.id = 'besing-modal-body';
+    panel.appendChild(bodyEl);
 
     container.appendChild(wrapper);
     this.wrapperEl = wrapper;
@@ -83,15 +109,14 @@ export class BESMenu {
     this._positionBubble();
 
     // Event listeners
-    panel.querySelector('#besing-btn-close').addEventListener('click', () => this.close());
+    closeBtn.addEventListener('click', () => this.close());
 
-    panel.querySelector('#besing-btn-expand').addEventListener('click', () => {
+    expandBtn.addEventListener('click', () => {
       this.isExpanded = !this.isExpanded;
       panel.classList.toggle('is-expanded', this.isExpanded);
       this._positionBubble();
     });
 
-    const settingsBtn = panel.querySelector('#besing-btn-toggle-settings');
     settingsBtn.addEventListener('click', () => {
       this.currentView = this.currentView === 'settings' ? 'extensions' : 'settings';
       settingsBtn.classList.toggle('active', this.currentView === 'settings');

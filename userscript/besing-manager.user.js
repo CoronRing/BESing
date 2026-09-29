@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.5.5
+// @version      1.5.6
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -1447,7 +1447,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.5.5';
+    static CURRENT_VERSION = '1.5.6';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -2032,6 +2032,72 @@
       badge.style.display = activeCount > 0 ? 'flex' : 'none';
     }
 
+    getTrustedPolicy() {
+      if (this._ttPolicy !== undefined) return this._ttPolicy;
+      this._ttPolicy = null;
+      if (typeof window !== 'undefined' && window.trustedTypes && typeof window.trustedTypes.createPolicy === 'function') {
+        try {
+          this._ttPolicy = window.trustedTypes.createPolicy('besing-dom-policy', {
+            createHTML: (s) => s,
+            createScript: (s) => s,
+            createScriptURL: (s) => s
+          });
+        } catch (_) {
+          try {
+            this._ttPolicy = window.trustedTypes.defaultPolicy || null;
+          } catch (_) {}
+        }
+      }
+      return this._ttPolicy;
+    }
+
+    createSVG(svgString) {
+      if (!svgString) return null;
+      try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(svgString.trim(), 'image/svg+xml');
+        if (doc && doc.documentElement && doc.documentElement.nodeName.toLowerCase() === 'svg') {
+          return document.importNode(doc.documentElement, true);
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    setSafeHTML(container, htmlString) {
+      if (!container) return;
+      while (container.firstChild) {
+        container.removeChild(container.firstChild);
+      }
+      if (!htmlString) return;
+
+      const policy = this.getTrustedPolicy();
+      if (policy && typeof policy.createHTML === 'function') {
+        try {
+          container.innerHTML = policy.createHTML(htmlString);
+          return;
+        } catch (_) {}
+      }
+
+      try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlString, 'text/html');
+        if (doc && doc.body) {
+          const frag = document.createDocumentFragment();
+          while (doc.body.firstChild) {
+            frag.appendChild(document.importNode(doc.body.firstChild, true));
+          }
+          container.appendChild(frag);
+          return;
+        }
+      } catch (_) {}
+
+      try {
+        container.innerHTML = htmlString;
+      } catch (err) {
+        console.error('[BESing] setSafeHTML fallback error:', err);
+      }
+    }
+
     updatePetIcon(btn) {
       const theme = this.storage.getTheme();
       let inner = '';
@@ -2073,7 +2139,14 @@
           </svg>
         `;
       }
-      btn.innerHTML = inner;
+      const oldSvg = btn.querySelector('svg');
+      if (oldSvg) oldSvg.remove();
+      const node = this.createSVG(inner);
+      if (node) {
+        btn.insertBefore(node, btn.firstChild);
+      } else {
+        this.setSafeHTML(btn, inner);
+      }
       this.updateBadge();
     }
 
@@ -2196,46 +2269,64 @@
       panel.className = 'besing-bubble-panel';
       wrapper.appendChild(panel);
 
-      panel.innerHTML = `
-        <div class="besing-header">
-          <div class="besing-logo-group">
-            <div class="besing-logo-icon">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-                <polyline points="2 17 12 22 22 17"></polyline>
-                <polyline points="2 12 12 17 22 12"></polyline>
-              </svg>
-            </div>
-            <div>
-              <span class="besing-title">${BESUpdater.isStableLoader() ? 'BESing Stable' : 'BESing Packed'}</span>
-              <span class="besing-tag">v${BESUpdater.CURRENT_VERSION}</span>
-            </div>
-          </div>
-          <div class="besing-header-actions">
-            <button class="besing-btn-icon" id="besing-btn-settings" title="Settings">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="3"></circle>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-              </svg>
-            </button>
-            <button class="besing-btn-icon" id="besing-btn-expand" title="Toggle Size">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="15 3 21 3 21 9"></polyline>
-                <polyline points="9 21 3 21 3 15"></polyline>
-                <line x1="21" y1="3" x2="14" y2="10"></line>
-                <line x1="3" y1="21" x2="10" y2="14"></line>
-              </svg>
-            </button>
-            <button class="besing-btn-icon" id="besing-btn-close" title="Close">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-              </svg>
-            </button>
-          </div>
-        </div>
-        <div class="besing-body" id="besing-body"></div>
-      `;
+      const header = document.createElement('div');
+      header.className = 'besing-header';
+
+      const logoGroup = document.createElement('div');
+      logoGroup.className = 'besing-logo-group';
+
+      const logoIcon = document.createElement('div');
+      logoIcon.className = 'besing-logo-icon';
+      const logoSvg = this.createSVG(`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>`);
+      if (logoSvg) logoIcon.appendChild(logoSvg);
+      logoGroup.appendChild(logoIcon);
+
+      const titleGroup = document.createElement('div');
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'besing-title';
+      titleSpan.textContent = BESUpdater.isStableLoader() ? 'BESing Stable' : 'BESing Packed';
+      const tagSpan = document.createElement('span');
+      tagSpan.className = 'besing-tag';
+      tagSpan.textContent = `v${BESUpdater.CURRENT_VERSION}`;
+      titleGroup.appendChild(titleSpan);
+      titleGroup.appendChild(tagSpan);
+      logoGroup.appendChild(titleGroup);
+      header.appendChild(logoGroup);
+
+      const headerActions = document.createElement('div');
+      headerActions.className = 'besing-header-actions';
+
+      const settingsBtn = document.createElement('button');
+      settingsBtn.className = `besing-btn-icon ${this.currentView === 'settings' ? 'active' : ''}`;
+      settingsBtn.id = 'besing-btn-settings';
+      settingsBtn.title = 'Settings';
+      const settingsSvg = this.createSVG(`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`);
+      if (settingsSvg) settingsBtn.appendChild(settingsSvg);
+      headerActions.appendChild(settingsBtn);
+
+      const expandBtn = document.createElement('button');
+      expandBtn.className = 'besing-btn-icon';
+      expandBtn.id = 'besing-btn-expand';
+      expandBtn.title = 'Toggle Size';
+      const expandSvg = this.createSVG(`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>`);
+      if (expandSvg) expandBtn.appendChild(expandSvg);
+      headerActions.appendChild(expandBtn);
+
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'besing-btn-icon';
+      closeBtn.id = 'besing-btn-close';
+      closeBtn.title = 'Close';
+      const closeSvg = this.createSVG(`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`);
+      if (closeSvg) closeBtn.appendChild(closeSvg);
+      headerActions.appendChild(closeBtn);
+
+      header.appendChild(headerActions);
+      panel.appendChild(header);
+
+      const body = document.createElement('div');
+      body.className = 'besing-body';
+      body.id = 'besing-body';
+      panel.appendChild(body);
 
       this.shadow.appendChild(wrapper);
       this.menuWrapperEl = wrapper;
@@ -2245,18 +2336,16 @@
       wrapper.addEventListener('click', (e) => e.stopPropagation());
       wrapper.addEventListener('mousedown', (e) => e.stopPropagation());
 
-      panel.querySelector('#besing-btn-close').onclick = (e) => {
+      closeBtn.onclick = (e) => {
         e.stopPropagation();
         this.closeModal();
       };
-      panel.querySelector('#besing-btn-expand').onclick = (e) => {
+      expandBtn.onclick = (e) => {
         e.stopPropagation();
         this.isExpanded = !this.isExpanded;
         panel.classList.toggle('is-expanded', this.isExpanded);
         this.positionBubble(wrapper, panel, arrow);
       };
-
-      const settingsBtn = panel.querySelector('#besing-btn-settings');
       settingsBtn.onclick = (e) => {
         e.stopPropagation();
         this.currentView = this.currentView === 'settings' ? 'extensions' : 'settings';
@@ -2330,13 +2419,13 @@
       const body = this.menuWrapperEl ? this.menuWrapperEl.querySelector('#besing-body') : null;
       if (!body) return;
       try {
-        body.innerHTML = '';
+        this.setSafeHTML(body, '');
 
       if (this.currentView === 'settings') {
         const currentHost = window.location.hostname || 'localhost';
         const curTheme = this.storage.getTheme();
 
-        body.innerHTML = `
+        this.setSafeHTML(body, `
           <div class="besing-settings-section">
             <div class="besing-theme-picker">
               <div class="besing-section-title">Display Pattern & Desktop Pet</div>
@@ -2420,7 +2509,7 @@
               </div>
             </div>
           </div>
-        `;
+        `);
 
         body.querySelectorAll('.besing-theme-btn').forEach(btn => {
           btn.onclick = async () => {
@@ -2442,11 +2531,11 @@
             if (res.ok) {
               if (res.hasUpdate) {
                 if (res.isStableLoader && res.autoUpdated) {
-                  updateMsg.innerHTML = `<span style="color:#10b981;font-weight:700;">✅ Auto-Updated to v${res.remoteVersion}!</span> The latest code is installed. <button id="besing-btn-reload-now" style="margin-left:8px;padding:3px 8px;font-size:11px;background:#10b981;color:#fff;border:none;border-radius:4px;cursor:pointer;">Reload Page</button> to activate.`;
+                  this.setSafeHTML(updateMsg, `<span style="color:#10b981;font-weight:700;">✅ Auto-Updated to v${res.remoteVersion}!</span> The latest code is installed. <button id="besing-btn-reload-now" style="margin-left:8px;padding:3px 8px;font-size:11px;background:#10b981;color:#fff;border:none;border-radius:4px;cursor:pointer;">Reload Page</button> to activate.`);
                   const rBtn = body.querySelector('#besing-btn-reload-now');
                   if (rBtn) rBtn.onclick = () => window.location.reload();
                 } else {
-                  updateMsg.innerHTML = `<span style="color:#a78bfa;font-weight:700;">Update found!</span> v${res.remoteVersion} available. <a href="${res.downloadUrl}" target="_blank" style="color:#38bdf8;text-decoration:underline;">Click here to install update via Userscript Manager</a>.`;
+                  this.setSafeHTML(updateMsg, `<span style="color:#a78bfa;font-weight:700;">Update found!</span> v${res.remoteVersion} available. <a href="${res.downloadUrl}" target="_blank" style="color:#38bdf8;text-decoration:underline;">Click here to install update via Userscript Manager</a>.`);
                 }
               } else {
                 updateMsg.textContent = `✅ BESing is up to date (v${res.currentVersion}).`;
@@ -2472,13 +2561,13 @@
           const container = body.querySelector('#besing-site-rules-container');
           const countEl = body.querySelector('#besing-rules-count');
           if (!container) return;
-          container.innerHTML = '';
+          this.setSafeHTML(container, '');
           const allRules = this.storage.getAllSiteRules();
           const hosts = Object.keys(allRules).sort();
           if (countEl) countEl.textContent = hosts.length;
 
           if (!hosts.length) {
-            container.innerHTML = '<div class="besing-empty-state">No site-specific rules configured.<br><span style="font-size:10px;color:#64748b;">Set a script to "SITE" in the main list to enable it for a single site.</span></div>';
+            this.setSafeHTML(container, '<div class="besing-empty-state">No site-specific rules configured.<br><span style="font-size:10px;color:#64748b;">Set a script to "SITE" in the main list to enable it for a single site.</span></div>');
             return;
           }
 
@@ -2489,13 +2578,13 @@
 
             const groupHeader = document.createElement('div');
             groupHeader.className = 'besing-site-group-header';
-            groupHeader.innerHTML = `
+            this.setSafeHTML(groupHeader, `
               <div class="besing-site-group-title">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
                 <span>${host}</span>
               </div>
               <button class="besing-btn-del-site" title="Remove all rules for ${host}">Remove Site</button>
-            `;
+            `);
             groupHeader.querySelector('.besing-btn-del-site').onclick = async () => {
               await this.storage.removeSiteRule(host, 'all');
               renderSiteRulesList();
@@ -2509,7 +2598,7 @@
             if (rule.disableAll) {
               const row = document.createElement('div');
               row.className = 'besing-site-rule-row';
-              row.innerHTML = `
+              this.setSafeHTML(row, `
                 <div class="besing-site-rule-info">
                   <span class="besing-site-rule-name" style="color:#f87171;font-weight:600;">Disable all</span>
                   <span class="besing-site-rule-tag" style="background:rgba(239,68,68,0.15);color:#fca5a5;">Site Disabled</span>
@@ -2521,7 +2610,7 @@
                   </label>
                   <button class="besing-rule-remove" title="Remove rule">✕</button>
                 </div>
-              `;
+              `);
               row.querySelector('input').onchange = async (e) => {
                 await this.storage.toggleSiteRule(host, 'disableAll', e.target.checked);
                 renderSiteRulesList();
@@ -2541,7 +2630,7 @@
                 const m = this.modules.find(mod => mod.id === scriptId) || { name: scriptId };
                 const row = document.createElement('div');
                 row.className = 'besing-site-rule-row';
-                row.innerHTML = `
+                this.setSafeHTML(row, `
                   <div class="besing-site-rule-info">
                     <span class="besing-site-rule-name">${m.name}</span>
                     <span class="besing-site-rule-tag" style="${isEnabled ? 'background:rgba(56,189,248,0.15);color:#38bdf8;' : 'background:rgba(245,158,11,0.15);color:#fbbf24;'}">${isEnabled ? 'Site ON' : 'Excluded (OFF)'}</span>
@@ -2553,7 +2642,7 @@
                     </label>
                     <button class="besing-rule-remove" title="Remove rule">✕</button>
                   </div>
-                `;
+                `);
                 row.querySelector('input').onchange = async (e) => {
                   await this.storage.setSiteOverride(scriptId, host, e.target.checked ? 'site' : 'site-off');
                   renderSiteRulesList();
@@ -2595,19 +2684,19 @@
         this.renderScriptConfig(body);
       } else {
         // Extensions View: 3-stage toggles (OFF / SITE / ON)
-        body.innerHTML = `
+        this.setSafeHTML(body, `
           <div class="besing-search-wrap">
             <svg class="besing-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             <input type="text" class="besing-search-input" placeholder="Search installed scripts..." value="${this.searchQuery}">
           </div>
           <div class="besing-ext-list" id="besing-ext-container"></div>
-        `;
+        `);
 
         const searchInput = body.querySelector('.besing-search-input');
         const extContainer = body.querySelector('#besing-ext-container');
 
         const renderCards = () => {
-          extContainer.innerHTML = '';
+          this.setSafeHTML(extContainer, '');
           const q = this.searchQuery;
           const currentHost = this.storage.getCurrentHost();
           const filtered = this.modules.filter(m => {
@@ -2617,10 +2706,10 @@
 
           const header = document.createElement('div');
           header.className = 'besing-section-heading';
-          header.innerHTML = `
+          this.setSafeHTML(header, `
             <span>Installed Scripts</span>
             <span class="besing-pill-count">${filtered.length}</span>
-          `;
+          `);
           extContainer.appendChild(header);
 
           if (!filtered.length) {
@@ -2657,7 +2746,7 @@
               rotatorTitle = `State: EXCLUDED on ${currentHost} (Active elsewhere). Click to turn OFF globally`;
             }
 
-            card.innerHTML = `
+            this.setSafeHTML(card, `
               <div class="besing-ext-info-group">
                 <div class="besing-ext-icon">${m.icon || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>'}</div>
                 <div class="besing-ext-meta">
@@ -2677,7 +2766,7 @@
                   <span class="besing-rotator-text">${rotatorText}</span>
                 </button>
               </div>
-            `;
+            `);
 
             const rotatorBtn = card.querySelector('.besing-rotator-toggle');
             rotatorBtn.onclick = async (e) => {
@@ -2736,13 +2825,13 @@
       }
     } catch (err) {
       console.error('[BESing] Error rendering menu body:', err);
-      body.innerHTML = `
+      this.setSafeHTML(body, `
         <div class="besing-empty-state" style="color:#fca5a5;border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.05);padding:16px;">
           <div style="font-weight:700;margin-bottom:6px;">Failed to render script menu</div>
           <div style="font-size:11px;color:#94a3b8;font-family:monospace;">${err.message || err}</div>
           <button type="button" id="besing-btn-retry-render" style="margin-top:10px;padding:4px 10px;font-size:11px;background:#38bdf8;color:#0f172a;border:none;border-radius:6px;cursor:pointer;font-weight:700;">Retry</button>
         </div>
-      `;
+      `);
       const retryBtn = body.querySelector('#besing-btn-retry-render');
       if (retryBtn) retryBtn.onclick = () => this.renderBody();
     }
@@ -3040,7 +3129,7 @@
         `;
       }
 
-      body.innerHTML = `
+      this.setSafeHTML(body, `
         <div class="besing-secondary-header">
           <div class="besing-secondary-top-bar">
             <button type="button" class="besing-btn-back" id="besing-btn-back">
@@ -3065,7 +3154,7 @@
         <div class="besing-secondary-content" style="display:flex;flex-direction:column;gap:10px;">
           ${specificControls}
         </div>
-      `;
+      `);
 
       // Bind Back Button
       const btnBack = body.querySelector('#besing-btn-back');
@@ -3309,9 +3398,9 @@
         .besing-title { font-size: 14px; font-weight: 700; color: #f8fafc; }
         .besing-tag { font-size: 10px; font-weight: 600; background: rgba(99, 102, 241, 0.18); color: #a5b4fc; padding: 2px 6px; border-radius: 6px; border: 1px solid rgba(99, 102, 241, 0.3); }
         .besing-header-actions { display: flex !important; align-items: center !important; gap: 6px !important; flex-shrink: 0 !important; }
-        .besing-btn-icon { background: transparent; border: none; color: #94a3b8; width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; }
-        .besing-btn-icon:hover { background: rgba(255, 255, 255, 0.08); color: #f8fafc; }
-        .besing-btn-icon.active { background: rgba(99, 102, 241, 0.25); color: #818cf8; }
+        .besing-btn-icon { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); color: #cbd5e1; width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; }
+        .besing-btn-icon:hover { background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.2); color: #ffffff; transform: translateY(-1px); }
+        .besing-btn-icon.active { background: rgba(99, 102, 241, 0.35); border-color: rgba(129, 140, 248, 0.5); color: #c7d2fe; }
         .besing-body { padding: 14px 18px !important; overflow-y: auto !important; flex: 1 1 auto !important; min-height: 280px !important; display: flex !important; flex-direction: column !important; gap: 12px !important; }
         .besing-search-wrap { position: relative; display: flex; align-items: center; }
         .besing-search-icon { position: absolute; left: 12px; color: #64748b; pointer-events: none; }
