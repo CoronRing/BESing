@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.5.6"
+VERSION = "1.5.7"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -1068,35 +1068,93 @@ def build():
       badge.style.display = activeCount > 0 ? 'flex' : 'none';
     }}
 
-    getTrustedPolicy() {{
-      if (this._ttPolicy !== undefined) return this._ttPolicy;
-      this._ttPolicy = null;
-      if (typeof window !== 'undefined' && window.trustedTypes && typeof window.trustedTypes.createPolicy === 'function') {{
-        try {{
-          this._ttPolicy = window.trustedTypes.createPolicy('besing-dom-policy', {{
-            createHTML: (s) => s,
-            createScript: (s) => s,
-            createScriptURL: (s) => s
-          }});
-        }} catch (_) {{
-          try {{
-            this._ttPolicy = window.trustedTypes.defaultPolicy || null;
-          }} catch (_) {{}}
+    safeParseHTML(htmlStr) {{
+      if (!htmlStr) return document.createDocumentFragment();
+      const frag = document.createDocumentFragment();
+      const svgNS = 'http://www.w3.org/2000/svg';
+
+      const tokenRegex = /<!--[\\s\\S]*?-->|<\\s*(\\/?)\\s*([a-zA-Z0-9\\-:]+)([^>]*?)(\\/?>)|([^<]+)/g;
+      const attrRegex = /([a-zA-Z0-9\\-:]+)(?:\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+)))?/g;
+
+      const voidElements = new Set([
+        'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 
+        'link', 'meta', 'param', 'source', 'track', 'wbr',
+        'path', 'circle', 'rect', 'line', 'polygon', 'polyline', 'ellipse', 'stop'
+      ]);
+
+      const stack = [{{ node: frag, inSVG: false }}];
+      let match;
+
+      while ((match = tokenRegex.exec(htmlStr)) !== null) {{
+        if (match[0].startsWith('<!--')) continue;
+        if (match[5]) {{
+          const text = match[5];
+          if (text) {{
+            stack[stack.length - 1].node.appendChild(document.createTextNode(text));
+          }}
+          continue;
+        }}
+
+        const isClosing = match[1] === '/';
+        const rawTagName = match[2];
+        const tagName = rawTagName ? rawTagName.toLowerCase() : '';
+        const rawAttrs = match[3];
+        const isSelfClosing = (match[4] && match[4].startsWith('/')) || voidElements.has(tagName);
+
+        if (isClosing) {{
+          for (let i = stack.length - 1; i > 0; i--) {{
+            if (stack[i].tagName === tagName) {{
+              stack.length = i;
+              break;
+            }}
+          }}
+        }} else if (tagName) {{
+          const parent = stack[stack.length - 1];
+          const isSVGTag = tagName === 'svg' || parent.inSVG;
+          
+          const el = isSVGTag ? document.createElementNS(svgNS, tagName) : document.createElement(tagName);
+
+          let aMatch;
+          attrRegex.lastIndex = 0;
+          while ((aMatch = attrRegex.exec(rawAttrs)) !== null) {{
+            const aName = aMatch[1];
+            if (aName === '/' || !aName) continue;
+            const aVal = aMatch[2] !== undefined ? aMatch[2] : (aMatch[3] !== undefined ? aMatch[3] : (aMatch[4] !== undefined ? aMatch[4] : ''));
+            if (aName.startsWith('on')) continue;
+            if (aName === 'class') {{
+              if (!isSVGTag) el.className = aVal;
+              el.setAttribute('class', aVal);
+            }} else if (aName === 'style') {{
+              el.style.cssText = aVal;
+              el.setAttribute('style', aVal);
+            }} else if (aName === 'checked') {{
+              el.checked = true;
+            }} else if (aName === 'disabled') {{
+              el.disabled = true;
+            }} else if (aName === 'selected') {{
+              el.selected = true;
+            }} else if (aName === 'value' && (tagName === 'input' || tagName === 'textarea' || tagName === 'select')) {{
+              el.value = aVal;
+              el.setAttribute('value', aVal);
+            }} else {{
+              el.setAttribute(aName, aVal);
+            }}
+          }}
+
+          parent.node.appendChild(el);
+
+          if (!isSelfClosing) {{
+            stack.push({{ node: el, inSVG: isSVGTag, tagName: tagName }});
+          }}
         }}
       }}
-      return this._ttPolicy;
+      return frag;
     }}
 
     createSVG(svgString) {{
       if (!svgString) return null;
-      try {{
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(svgString.trim(), 'image/svg+xml');
-        if (doc && doc.documentElement && doc.documentElement.nodeName.toLowerCase() === 'svg') {{
-          return document.importNode(doc.documentElement, true);
-        }}
-      }} catch (_) {{}}
-      return null;
+      const frag = this.safeParseHTML(svgString);
+      return frag.querySelector('svg') || frag.firstElementChild || null;
     }}
 
     setSafeHTML(container, htmlString) {{
@@ -1105,33 +1163,8 @@ def build():
         container.removeChild(container.firstChild);
       }}
       if (!htmlString) return;
-
-      const policy = this.getTrustedPolicy();
-      if (policy && typeof policy.createHTML === 'function') {{
-        try {{
-          container.innerHTML = policy.createHTML(htmlString);
-          return;
-        }} catch (_) {{}}
-      }}
-
-      try {{
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(htmlString, 'text/html');
-        if (doc && doc.body) {{
-          const frag = document.createDocumentFragment();
-          while (doc.body.firstChild) {{
-            frag.appendChild(document.importNode(doc.body.firstChild, true));
-          }}
-          container.appendChild(frag);
-          return;
-        }}
-      }} catch (_) {{}}
-
-      try {{
-        container.innerHTML = htmlString;
-      }} catch (err) {{
-        console.error('[BESing] setSafeHTML fallback error:', err);
-      }}
+      const frag = this.safeParseHTML(htmlString);
+      container.appendChild(frag);
     }}
 
     updatePetIcon(btn) {{
@@ -1246,13 +1279,30 @@ def build():
         this.storage.setWidgetPosition({{ x: Math.round(rect.left), y: Math.round(rect.top) }});
         this.checkEdgeDocking(btn);
 
-        if (!this.dragMoved) {{
+        let lastToggle = 0;
+        const doToggle = () => {{
+          const now = Date.now();
+          if (now - lastToggle < 250) return;
+          lastToggle = now;
           this.toggleModal();
+        }};
+
+        if (!this.dragMoved) {{
+          doToggle();
         }}
       }};
 
+      let lastClickToggle = 0;
       btn.addEventListener('mousedown', onStart);
       btn.addEventListener('touchstart', onStart, {{ passive: true }});
+      btn.addEventListener('click', (e) => {{
+        if (!this.dragMoved) {{
+          const now = Date.now();
+          if (now - lastClickToggle < 250) return;
+          lastClickToggle = now;
+          this.toggleModal();
+        }}
+      }});
     }}
 
     checkEdgeDocking(btn) {{
@@ -1852,10 +1902,12 @@ def build():
           }});
         }};
 
-        searchInput.oninput = (e) => {{
-          this.searchQuery = e.target.value.toLowerCase().trim();
-          renderCards();
-        }};
+        if (searchInput) {{
+          searchInput.oninput = (e) => {{
+            this.searchQuery = e.target.value.toLowerCase().trim();
+            renderCards();
+          }};
+        }}
 
         renderCards();
       }}

@@ -55,7 +55,8 @@ export class BESMenu {
 
     const logoIcon = document.createElement('div');
     logoIcon.className = 'besing-logo-icon';
-    logoIcon.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>`;
+    const logoSvg = this.createSVG(`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>`);
+    if (logoSvg) logoIcon.appendChild(logoSvg);
     logoGroup.appendChild(logoIcon);
 
     const titleGroup = document.createElement('div');
@@ -64,7 +65,7 @@ export class BESMenu {
     titleSpan.textContent = 'BESing Hub';
     const tagSpan = document.createElement('span');
     tagSpan.className = 'besing-tag';
-    tagSpan.textContent = 'v1.5.6';
+    tagSpan.textContent = 'v1.5.7';
     titleGroup.appendChild(titleSpan);
     titleGroup.appendChild(tagSpan);
     logoGroup.appendChild(titleGroup);
@@ -77,21 +78,24 @@ export class BESMenu {
     expandBtn.className = 'besing-btn-icon';
     expandBtn.id = 'besing-btn-expand';
     expandBtn.title = 'Toggle Compact / Expanded View';
-    expandBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>`;
+    const expandSvg = this.createSVG(`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>`);
+    if (expandSvg) expandBtn.appendChild(expandSvg);
     headerActions.appendChild(expandBtn);
 
     const settingsBtn = document.createElement('button');
     settingsBtn.className = `besing-btn-icon ${this.currentView === 'settings' ? 'active' : ''}`;
     settingsBtn.id = 'besing-btn-toggle-settings';
     settingsBtn.title = 'Settings & Blocked Sites';
-    settingsBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`;
+    const settingsSvg = this.createSVG(`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`);
+    if (settingsSvg) settingsBtn.appendChild(settingsSvg);
     headerActions.appendChild(settingsBtn);
 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'besing-btn-icon';
     closeBtn.id = 'besing-btn-close';
     closeBtn.title = 'Close';
-    closeBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+    const closeSvg = this.createSVG(`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`);
+    if (closeSvg) closeBtn.appendChild(closeSvg);
     headerActions.appendChild(closeBtn);
 
     header.appendChild(headerActions);
@@ -252,15 +256,19 @@ export class BESMenu {
     // Search input
     const searchWrap = document.createElement('div');
     searchWrap.className = 'besing-search-wrap';
-    searchWrap.innerHTML = `
-      <svg class="besing-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-      <input type="text" class="besing-search-input" placeholder="Search installed extensions..." value="${this._escapeHTML(this.searchQuery)}">
-    `;
-    const searchInput = searchWrap.querySelector('input');
+    const searchSvg = this.createSVG(`<svg class="besing-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`);
+    if (searchSvg) searchWrap.appendChild(searchSvg);
+
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'besing-search-input';
+    searchInput.placeholder = 'Search installed extensions...';
+    searchInput.value = this.searchQuery;
     searchInput.addEventListener('input', (e) => {
       this.searchQuery = e.target.value.toLowerCase().trim();
       this._updateListItems(listContainer);
     });
+    searchWrap.appendChild(searchInput);
     body.appendChild(searchWrap);
 
     // Extensions List
@@ -356,5 +364,94 @@ export class BESMenu {
     return String(str || '').replace(/[&<>'"]/g, 
       tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
     );
+  }
+
+  safeParseHTML(htmlStr) {
+    if (!htmlStr) return document.createDocumentFragment();
+    const frag = document.createDocumentFragment();
+    const svgNS = 'http://www.w3.org/2000/svg';
+
+    const tokenRegex = /<!--[\s\S]*?-->|<\s*(\/?)\s*([a-zA-Z0-9\-:]+)([^>]*?)(\/?>)|([^<]+)/g;
+    const attrRegex = /([a-zA-Z0-9\-:]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+
+    const voidElements = new Set([
+      'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 
+      'link', 'meta', 'param', 'source', 'track', 'wbr',
+      'path', 'circle', 'rect', 'line', 'polygon', 'polyline', 'ellipse', 'stop'
+    ]);
+
+    const stack = [{ node: frag, inSVG: false }];
+    let match;
+
+    while ((match = tokenRegex.exec(htmlStr)) !== null) {
+      if (match[0].startsWith('<!--')) continue;
+      if (match[5]) {
+        const text = match[5];
+        if (text) {
+          stack[stack.length - 1].node.appendChild(document.createTextNode(text));
+        }
+        continue;
+      }
+
+      const isClosing = match[1] === '/';
+      const rawTagName = match[2];
+      const tagName = rawTagName ? rawTagName.toLowerCase() : '';
+      const rawAttrs = match[3];
+      const isSelfClosing = (match[4] && match[4].startsWith('/')) || voidElements.has(tagName);
+
+      if (isClosing) {
+        for (let i = stack.length - 1; i > 0; i--) {
+          if (stack[i].tagName === tagName) {
+            stack.length = i;
+            break;
+          }
+        }
+      } else if (tagName) {
+        const parent = stack[stack.length - 1];
+        const isSVGTag = tagName === 'svg' || parent.inSVG;
+        
+        const el = isSVGTag ? document.createElementNS(svgNS, tagName) : document.createElement(tagName);
+
+        let aMatch;
+        attrRegex.lastIndex = 0;
+        while ((aMatch = attrRegex.exec(rawAttrs)) !== null) {
+          const aName = aMatch[1];
+          if (aName === '/' || !aName) continue;
+          const aVal = aMatch[2] !== undefined ? aMatch[2] : (aMatch[3] !== undefined ? aMatch[3] : (aMatch[4] !== undefined ? aMatch[4] : ''));
+          if (aName.startsWith('on')) continue;
+          if (aName === 'class') {
+            if (!isSVGTag) el.className = aVal;
+            el.setAttribute('class', aVal);
+          } else if (aName === 'style') {
+            el.style.cssText = aVal;
+            el.setAttribute('style', aVal);
+          } else if (aName === 'checked') {
+            el.checked = true;
+          } else if (aName === 'disabled') {
+            el.disabled = true;
+          } else if (aName === 'selected') {
+            el.selected = true;
+          } else if (aName === 'value' && (tagName === 'input' || tagName === 'textarea' || tagName === 'select')) {
+            el.value = aVal;
+            el.setAttribute('value', aVal);
+          } else {
+            el.setAttribute(aName, aVal);
+          }
+        }
+
+        parent.node.appendChild(el);
+
+        if (!isSelfClosing) {
+          stack.push({ node: el, inSVG: isSVGTag, tagName: tagName });
+        }
+      }
+    }
+    return frag;
+  }
+
+  createSVG(svgString) {
+    if (!svgString) return null;
+    const frag = this.safeParseHTML(svgString);
+    return frag.querySelector('svg') || frag.firstElementChild || null;
   }
 }
