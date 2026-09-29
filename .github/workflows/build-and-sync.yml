@@ -36,8 +36,8 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add userscript/besing-manager.user.js userscript/besing-manager.meta.js
-          if ! git diff-index --quiet HEAD; then
+          git add userscript/besing-manager.user.js userscript/besing-manager.meta.js extension/content.js
+          if ! git diff-index --quiet --cached HEAD; then
             git commit -m "chore(release): auto-rebuild mega-file and meta headers [skip ci]"
             git push origin HEAD:${{ github.ref }}
           else
