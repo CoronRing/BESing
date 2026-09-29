@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.5.9
+ * Version 1.6.0
  */
 
 (function () {
@@ -853,8 +853,8 @@
       const mod = {
     id: 'ad-cleaner',
     name: 'Ad Cleaner & Element Zapper',
-    version: '1.2.0',
-    description: 'Hides intrusive overlays, cookie popups, and provides an interactive point-and-click Element Zapper to block any element permanently.',
+    version: '1.3.0',
+    description: 'Hides intrusive overlays, cookie popups, and provides an interactive point-and-click / mobile touch Element Zapper to block any element permanently.',
     category: 'Privacy',
     _styleEl: null,
     _config: null,
@@ -863,7 +863,11 @@
     _highlightEl: null,
     _currentHoveredTarget: null,
     _mouseMoveHandler: null,
+    _touchStartHandler: null,
+    _touchMoveHandler: null,
+    _touchEndHandler: null,
     _clickHandler: null,
+    _auxHandler: null,
     _keyDownHandler: null,
     _contextHandler: null,
     _shortcutAttached: false,
@@ -955,9 +959,65 @@
       return tag;
     },
 
+    _updateHighlightBox(el) {
+      if (!this._highlightEl || !el) return;
+      const rect = el.getBoundingClientRect();
+      this._highlightEl.style.display = 'block';
+      this._highlightEl.style.left = `${rect.left}px`;
+      this._highlightEl.style.top = `${rect.top}px`;
+      this._highlightEl.style.width = `${rect.width}px`;
+      this._highlightEl.style.height = `${rect.height}px`;
+
+      const sel = this.computeSelector(el);
+      const tagBadge = this._highlightEl.querySelector('#besing-zapper-tag-badge');
+      if (tagBadge) {
+        tagBadge.textContent = `${sel} (${Math.round(rect.width)}×${Math.round(rect.height)})`;
+      }
+    },
+
+    _zapElement(target, onZappedCallback) {
+      if (!target) return;
+      const sel = this.computeSelector(target);
+      if (!sel) return;
+
+      // Immediate shrink & fade animation
+      target.style.transition = 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)';
+      target.style.opacity = '0';
+      target.style.transform = 'scale(0.88)';
+      setTimeout(() => {
+        target.style.display = 'none';
+      }, 220);
+
+      this._config = this._config || {};
+      const currentList = this._config.blockedSelectors || [];
+      if (!currentList.includes(sel)) {
+        currentList.push(sel);
+        this._config.blockedSelectors = currentList;
+        this._applyStyles();
+        if (typeof onZappedCallback === 'function') {
+          onZappedCallback(sel, currentList);
+        }
+        const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                       (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+        if (appMgr && typeof appMgr.applyScriptConfig === 'function') {
+          appMgr.applyScriptConfig(this.id, { blockedSelectors: currentList });
+        }
+      }
+
+      const statusEl = this._zapperHud ? this._zapperHud.querySelector('#besing-zapper-status') : null;
+      if (statusEl) {
+        statusEl.textContent = `✅ Zapped: ${sel}`;
+        setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2500);
+      }
+    },
+
     startZapper(onZappedCallback) {
       if (this._zapperActive) return;
       this._zapperActive = true;
+      if (typeof window !== 'undefined') window.__BESING_ZAPPER_ACTIVE__ = true;
+      if (typeof unsafeWindow !== 'undefined') {
+        try { unsafeWindow.__BESING_ZAPPER_ACTIVE__ = true; } catch (e) {}
+      }
 
       // Close manager modal if open
       const mgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
@@ -966,33 +1026,43 @@
         mgr.closeModal();
       }
 
-      // 1. Create Floating Top HUD
+      // 1. Create Floating Top HUD with responsive mobile layout
       const hud = document.createElement('div');
       hud.id = 'besing-zapper-hud';
       hud.innerHTML = `
-        <div style="display:flex;align-items:center;gap:10px;">
-          <span style="background:#ef4444;color:#fff;font-size:10px;font-weight:800;padding:2px 7px;border-radius:6px;letter-spacing:0.5px;">⚡ ELEMENT ZAPPER</span>
-          <span style="font-size:11px;color:#f1f5f9;">Hover to target • <strong style="color:#38bdf8;">Left-Click</strong> to Zap • <strong style="color:#fca5a5;">Esc / Right-Click</strong> to Exit</span>
+        <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+          <span style="background:#ef4444;color:#fff;font-size:10px;font-weight:800;padding:2px 7px;border-radius:6px;letter-spacing:0.5px;flex-shrink:0;">⚡ ZAPPER</span>
+          <span style="font-size:11px;color:#f1f5f9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Tap or click any ad to Zap</span>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span id="besing-zapper-status" style="font-size:10px;color:#a5b4fc;font-family:monospace;"></span>
-          <button type="button" id="besing-zapper-exit-btn" style="background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.2);color:#fff;font-size:10px;font-weight:700;padding:3px 8px;border-radius:5px;cursor:pointer;">✕ Exit</button>
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+          <span id="besing-zapper-status" style="font-size:10px;color:#4ade80;font-weight:700;font-family:monospace;"></span>
+          <button type="button" id="besing-zapper-exit-btn" style="background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.25);color:#fff;font-size:11px;font-weight:700;padding:4px 10px;border-radius:6px;cursor:pointer;">✕ Exit</button>
         </div>
       `;
-      hud.setAttribute('style', 'position:fixed;top:12px;left:50%;transform:translateX(-50%);background:rgba(15,23,42,0.95);border:1.5px solid rgba(239,68,68,0.6);border-radius:12px;padding:8px 16px;z-index:2147483647;box-shadow:0 10px 30px rgba(0,0,0,0.7),0 0 20px rgba(239,68,68,0.3);display:flex;align-items:center;gap:20px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);font-family:-apple-system,sans-serif;pointer-events:auto;');
+      hud.setAttribute('style', 'position:fixed;top:10px;left:50%;transform:translateX(-50%);width:calc(100vw - 24px);max-width:480px;box-sizing:border-box;background:rgba(15,23,42,0.95);border:1.5px solid rgba(239,68,68,0.7);border-radius:12px;padding:8px 14px;z-index:2147483647;box-shadow:0 10px 30px rgba(0,0,0,0.7),0 0 20px rgba(239,68,68,0.3);display:flex;align-items:center;justify-content:space-between;gap:8px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;pointer-events:auto;');
       (document.body || document.documentElement).appendChild(hud);
       this._zapperHud = hud;
 
-      hud.querySelector('#besing-zapper-exit-btn').onclick = () => this.stopZapper();
+      const exitBtn = hud.querySelector('#besing-zapper-exit-btn');
+      if (exitBtn) {
+        exitBtn.onclick = (e) => {
+          e.stopPropagation();
+          this.stopZapper();
+        };
+        exitBtn.ontouchend = (e) => {
+          e.stopPropagation();
+          this.stopZapper();
+        };
+      }
 
       // 2. Create Target Highlight Box
       const box = document.createElement('div');
       box.id = 'besing-zapper-highlight';
-      box.setAttribute('style', 'position:fixed;pointer-events:none;border:2px solid #ef4444;background:rgba(239,68,68,0.22);z-index:2147483646;display:none;transition:top 0.05s ease, left 0.05s ease, width 0.05s ease, height 0.05s ease;border-radius:4px;box-shadow:0 0 16px rgba(239,68,68,0.6);');
+      box.setAttribute('style', 'position:fixed;pointer-events:none;border:2.5px solid #ef4444;background:rgba(239,68,68,0.22);z-index:2147483646;display:none;transition:top 0.05s ease, left 0.05s ease, width 0.05s ease, height 0.05s ease;border-radius:4px;box-shadow:0 0 16px rgba(239,68,68,0.6);');
       
       const tagBadge = document.createElement('div');
       tagBadge.id = 'besing-zapper-tag-badge';
-      tagBadge.setAttribute('style', 'position:absolute;top:-24px;left:0;background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;white-space:nowrap;font-family:monospace;pointer-events:none;box-shadow:0 2px 6px rgba(0,0,0,0.4);');
+      tagBadge.setAttribute('style', 'position:absolute;top:-24px;left:0;background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;white-space:nowrap;font-family:monospace;pointer-events:none;box-shadow:0 2px 6px rgba(0,0,0,0.4);max-width:90vw;overflow:hidden;text-overflow:ellipsis;');
       box.appendChild(tagBadge);
 
       (document.body || document.documentElement).appendChild(box);
@@ -1000,68 +1070,112 @@
 
       document.body.style.cursor = 'crosshair';
 
+      const isZapperUI = (el) => {
+        if (!el) return false;
+        return !!(el.closest('#besing-zapper-hud') || el.closest('#besing-zapper-highlight') || el.closest('#__besing_root__'));
+      };
+
+      const getPoint = (e) => {
+        if (e.touches && e.touches.length > 0) return e.touches[0];
+        if (e.changedTouches && e.changedTouches.length > 0) return e.changedTouches[0];
+        return e;
+      };
+
+      // 3. Desktop Mouse Move
       this._mouseMoveHandler = (e) => {
         if (!this._zapperActive) return;
         const el = document.elementFromPoint(e.clientX, e.clientY);
-        if (!el || el.closest('#besing-zapper-hud') || el.closest('#besing-zapper-highlight') || el.closest('#__besing_root__')) {
+        if (!el || isZapperUI(el)) {
           box.style.display = 'none';
           this._currentHoveredTarget = null;
           return;
         }
-
         this._currentHoveredTarget = el;
-        const rect = el.getBoundingClientRect();
-        box.style.display = 'block';
-        box.style.left = `${rect.left}px`;
-        box.style.top = `${rect.top}px`;
-        box.style.width = `${rect.width}px`;
-        box.style.height = `${rect.height}px`;
-
-        const sel = this.computeSelector(el);
-        tagBadge.textContent = `${sel} (${Math.round(rect.width)}×${Math.round(rect.height)})`;
+        this._updateHighlightBox(el);
       };
 
-      this._clickHandler = (e) => {
+      // 4. Mobile Touch Start: Quarantine event, prevent ad redirect, highlight element
+      this._touchStartHandler = (e) => {
         if (!this._zapperActive) return;
-        if (e.target.closest('#besing-zapper-hud')) return;
+        if (isZapperUI(e.target)) return;
+
         e.preventDefault();
         e.stopPropagation();
+        e.stopImmediatePropagation();
 
-        const target = this._currentHoveredTarget;
-        if (!target) return;
+        const pt = getPoint(e);
+        const el = document.elementFromPoint(pt.clientX, pt.clientY);
+        if (el && !isZapperUI(el)) {
+          this._currentHoveredTarget = el;
+          this._updateHighlightBox(el);
+        }
+      };
 
-        const sel = this.computeSelector(target);
-        if (!sel) return;
+      // 5. Mobile Touch Move: Follow finger
+      this._touchMoveHandler = (e) => {
+        if (!this._zapperActive) return;
+        if (isZapperUI(e.target)) return;
 
-        // Shrink & fade out zapping animation
-        target.style.transition = 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)';
-        target.style.opacity = '0';
-        target.style.transform = 'scale(0.88)';
-        setTimeout(() => {
-          target.style.display = 'none';
-        }, 220);
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
 
-        this._config = this._config || {};
-        const currentList = this._config.blockedSelectors || [];
-        if (!currentList.includes(sel)) {
-          currentList.push(sel);
-          this._config.blockedSelectors = currentList;
-          this._applyStyles();
-          if (typeof onZappedCallback === 'function') {
-            onZappedCallback(sel, currentList);
-          }
-          const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
-                         (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
-          if (appMgr && typeof appMgr.applyScriptConfig === 'function') {
-            appMgr.applyScriptConfig(this.id, { blockedSelectors: currentList });
+        const pt = getPoint(e);
+        const el = document.elementFromPoint(pt.clientX, pt.clientY);
+        if (el && !isZapperUI(el)) {
+          this._currentHoveredTarget = el;
+          this._updateHighlightBox(el);
+        }
+      };
+
+      // 6. Mobile Touch End: Zap target immediately on release
+      this._touchEndHandler = (e) => {
+        if (!this._zapperActive) return;
+        if (isZapperUI(e.target)) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+
+        const pt = getPoint(e);
+        let target = this._currentHoveredTarget;
+        if (!target && pt) {
+          const el = document.elementFromPoint(pt.clientX, pt.clientY);
+          if (el && !isZapperUI(el)) {
+            target = el;
           }
         }
 
-        const statusEl = hud.querySelector('#besing-zapper-status');
-        if (statusEl) {
-          statusEl.textContent = `✅ Zapped: ${sel}`;
-          setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2500);
+        if (target) {
+          this._zapElement(target, onZappedCallback);
+          this._currentHoveredTarget = null;
+          if (this._highlightEl) this._highlightEl.style.display = 'none';
         }
+      };
+
+      // 7. Click Handler: Desktop click zap & synthetic click isolation
+      this._clickHandler = (e) => {
+        if (!this._zapperActive) return;
+        if (isZapperUI(e.target)) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+
+        const target = this._currentHoveredTarget || document.elementFromPoint(e.clientX, e.clientY);
+        if (target && !isZapperUI(target)) {
+          this._zapElement(target, onZappedCallback);
+          this._currentHoveredTarget = null;
+          if (this._highlightEl) this._highlightEl.style.display = 'none';
+        }
+      };
+
+      this._auxHandler = (e) => {
+        if (!this._zapperActive) return;
+        if (isZapperUI(e.target)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
       };
 
       this._keyDownHandler = (e) => {
@@ -1073,18 +1187,32 @@
       this._contextHandler = (e) => {
         if (this._zapperActive) {
           e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
           this.stopZapper();
         }
       };
 
-      window.addEventListener('mousemove', this._mouseMoveHandler, { passive: true });
+      // Bind all input streams in capture phase to completely isolate page from ad redirects
+      window.addEventListener('touchstart', this._touchStartHandler, { capture: true, passive: false });
+      window.addEventListener('touchmove', this._touchMoveHandler, { capture: true, passive: false });
+      window.addEventListener('touchend', this._touchEndHandler, { capture: true, passive: false });
+      window.addEventListener('pointerdown', this._touchStartHandler, { capture: true });
+      window.addEventListener('pointermove', this._touchMoveHandler, { capture: true });
+      window.addEventListener('pointerup', this._touchEndHandler, { capture: true });
+      window.addEventListener('mousemove', this._mouseMoveHandler, { capture: true, passive: true });
       window.addEventListener('click', this._clickHandler, { capture: true });
-      window.addEventListener('keydown', this._keyDownHandler);
+      window.addEventListener('auxclick', this._auxHandler, { capture: true });
       window.addEventListener('contextmenu', this._contextHandler, { capture: true });
+      window.addEventListener('keydown', this._keyDownHandler);
     },
 
     stopZapper() {
       this._zapperActive = false;
+      if (typeof window !== 'undefined') window.__BESING_ZAPPER_ACTIVE__ = false;
+      if (typeof unsafeWindow !== 'undefined') {
+        try { unsafeWindow.__BESING_ZAPPER_ACTIVE__ = false; } catch (e) {}
+      }
       document.body.style.cursor = '';
       if (this._zapperHud) {
         this._zapperHud.remove();
@@ -1094,13 +1222,32 @@
         this._highlightEl.remove();
         this._highlightEl = null;
       }
+      if (this._touchStartHandler) {
+        window.removeEventListener('touchstart', this._touchStartHandler, { capture: true, passive: false });
+        window.removeEventListener('pointerdown', this._touchStartHandler, { capture: true });
+        this._touchStartHandler = null;
+      }
+      if (this._touchMoveHandler) {
+        window.removeEventListener('touchmove', this._touchMoveHandler, { capture: true, passive: false });
+        window.removeEventListener('pointermove', this._touchMoveHandler, { capture: true });
+        this._touchMoveHandler = null;
+      }
+      if (this._touchEndHandler) {
+        window.removeEventListener('touchend', this._touchEndHandler, { capture: true, passive: false });
+        window.removeEventListener('pointerup', this._touchEndHandler, { capture: true });
+        this._touchEndHandler = null;
+      }
       if (this._mouseMoveHandler) {
-        window.removeEventListener('mousemove', this._mouseMoveHandler);
+        window.removeEventListener('mousemove', this._mouseMoveHandler, { capture: true, passive: true });
         this._mouseMoveHandler = null;
       }
       if (this._clickHandler) {
         window.removeEventListener('click', this._clickHandler, { capture: true });
         this._clickHandler = null;
+      }
+      if (this._auxHandler) {
+        window.removeEventListener('auxclick', this._auxHandler, { capture: true });
+        this._auxHandler = null;
       }
       if (this._keyDownHandler) {
         window.removeEventListener('keydown', this._keyDownHandler);
@@ -1133,7 +1280,7 @@
       const mod = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.3.0',
+    version: '1.3.1',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
     _origOpen: null,
@@ -1307,11 +1454,17 @@
     },
 
     _recordUserClick(e) {
+      if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) return;
       const target = e && e.target;
       const link = target && target.closest ? target.closest('a') : null;
       if (link) {
         const href = link.getAttribute('href') || link.href;
-        if (this._isSameHost(href)) {
+        if (!href || typeof href !== 'string') return;
+        const trimmed = href.trim();
+        if (trimmed === '#' || trimmed.startsWith('#') || trimmed.startsWith('javascript:') || this._isAdOrRedirectUrl(trimmed)) {
+          return;
+        }
+        if (this._isSameHost(trimmed)) {
           this._userIntentionalClick = true;
           if (this._userClickTimer) clearTimeout(this._userClickTimer);
           this._userClickTimer = setTimeout(() => {
@@ -1592,6 +1745,12 @@
 
       // 12. Click and touch tracking to distinguish user navigation from background hijacks
       this._clickHandler = function (e) {
+        if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          return;
+        }
         self._recordUserClick(e);
         const link = e.target && e.target.closest ? e.target.closest('a') : null;
         if (!link) return;
@@ -1616,10 +1775,21 @@
       };
 
       this._touchHandler = function (e) {
-        self._recordUserClick(e);
+        if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          return;
+        }
       };
 
       this._auxClickHandler = function (e) {
+        if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          return;
+        }
         if (e.button === 1) {
           const link = e.target && e.target.closest ? e.target.closest('a') : null;
           if (link) {
@@ -1804,7 +1974,18 @@
           root.appendChild(guardScript);
           this._injectedGuardEl = guardScript;
           guardScript.remove();
+        } else {
+          const docObs = new MutationObserver(() => {
+            const r = document.head || document.documentElement;
+            if (r) {
+              docObs.disconnect();
+              r.appendChild(guardScript);
+              guardScript.remove();
+            }
+          });
+          docObs.observe(document, { childList: true, subtree: true });
         }
+        if (typeof window !== 'undefined') window.__BESING_PREVENT_REDIRECT__ = this;
       } catch (e) {}
     },
 
@@ -1934,7 +2115,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.5.9';
+    static CURRENT_VERSION = '1.6.0';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -2111,25 +2292,74 @@
       this.outsideClickHandler = null;
     }
 
+    initPreemptiveShields() {
+      // 1. Immediately and synchronously arm the security shield (prevent-redirect)
+      // so zero page scripts or ad networks can slip through during async storage loading.
+      if (!this.modules || this.modules.length === 0) {
+        this.modules = BUILTIN_MODULES.map(m => ({
+          ...m,
+          running: false
+        }));
+      }
+
+      const prModule = this.modules.find(m => m.id === 'prevent-redirect');
+      if (prModule && typeof prModule.init === 'function') {
+        try {
+          prModule.init({});
+          prModule.running = true;
+          console.log('[BESing] Preemptive security shield synchronously armed at document-start.');
+        } catch (e) {
+          console.warn('[BESing] Preemptive shield init error:', e);
+        }
+      }
+    }
+
     async init() {
       await this.storage.init();
       const currentHost = this.storage.getCurrentHost();
 
-      // Initialize pre-bundled modules
-      this.modules = BUILTIN_MODULES.map(m => ({
-        ...m,
-        running: false
-      }));
+      if (!this.modules || this.modules.length === 0) {
+        this.modules = BUILTIN_MODULES.map(m => ({
+          ...m,
+          running: false
+        }));
+      }
 
-      // Run any modules that are active on current site
+      // Re-evaluate modules with loaded storage configuration
       this.modules.forEach(m => {
-        if (this.storage.isScriptActiveOnSite(m.id, currentHost)) {
+        const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
+        const cfg = this.storage.getScriptConfig(m.id, currentHost);
+
+        if (m.id === 'prevent-redirect') {
+          // If explicitly disabled on this site by user, deactivate the preemptive shield
+          if (!shouldBeActive && m.running) {
+            try {
+              m.destroy();
+              m.running = false;
+              console.log('[BESing] Preemptive security shield deactivated per site rule.');
+            } catch (err) {}
+          } else if (shouldBeActive && !m.running) {
+            try {
+              m.init(cfg);
+              m.running = true;
+            } catch (err) {}
+          }
+          return;
+        }
+
+        if (shouldBeActive && !m.running) {
           try {
-            const cfg = this.storage.getScriptConfig(m.id, currentHost);
             m.init(cfg);
             m.running = true;
           } catch (err) {
             console.error(`[BESing] Error initializing ${m.id}:`, err);
+          }
+        } else if (!shouldBeActive && m.running) {
+          try {
+            m.destroy();
+            m.running = false;
+          } catch (err) {
+            console.error(`[BESing] Error destroying ${m.id}:`, err);
           }
         }
       });
@@ -4117,7 +4347,10 @@
     if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_INSTANCE__ = app;
   } catch (e) {}
 
-  // Initialize immediately at document-start so security shields and active modules start before page scripts execute
+  // 1. Synchronously arm security shields at document-start before yielding to event loop
+  app.initPreemptiveShields();
+
+  // 2. Initialize storage and load remaining active modules
   app.init();
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {

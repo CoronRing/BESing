@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.5.9"
+VERSION = "1.6.0"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -671,25 +671,74 @@ def build():
       this.outsideClickHandler = null;
     }}
 
+    initPreemptiveShields() {{
+      // 1. Immediately and synchronously arm the security shield (prevent-redirect)
+      // so zero page scripts or ad networks can slip through during async storage loading.
+      if (!this.modules || this.modules.length === 0) {{
+        this.modules = BUILTIN_MODULES.map(m => ({{
+          ...m,
+          running: false
+        }}));
+      }}
+
+      const prModule = this.modules.find(m => m.id === 'prevent-redirect');
+      if (prModule && typeof prModule.init === 'function') {{
+        try {{
+          prModule.init({{}});
+          prModule.running = true;
+          console.log('[BESing] Preemptive security shield synchronously armed at document-start.');
+        }} catch (e) {{
+          console.warn('[BESing] Preemptive shield init error:', e);
+        }}
+      }}
+    }}
+
     async init() {{
       await this.storage.init();
       const currentHost = this.storage.getCurrentHost();
 
-      // Initialize pre-bundled modules
-      this.modules = BUILTIN_MODULES.map(m => ({{
-        ...m,
-        running: false
-      }}));
+      if (!this.modules || this.modules.length === 0) {{
+        this.modules = BUILTIN_MODULES.map(m => ({{
+          ...m,
+          running: false
+        }}));
+      }}
 
-      // Run any modules that are active on current site
+      // Re-evaluate modules with loaded storage configuration
       this.modules.forEach(m => {{
-        if (this.storage.isScriptActiveOnSite(m.id, currentHost)) {{
+        const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
+        const cfg = this.storage.getScriptConfig(m.id, currentHost);
+
+        if (m.id === 'prevent-redirect') {{
+          // If explicitly disabled on this site by user, deactivate the preemptive shield
+          if (!shouldBeActive && m.running) {{
+            try {{
+              m.destroy();
+              m.running = false;
+              console.log('[BESing] Preemptive security shield deactivated per site rule.');
+            }} catch (err) {{}}
+          }} else if (shouldBeActive && !m.running) {{
+            try {{
+              m.init(cfg);
+              m.running = true;
+            }} catch (err) {{}}
+          }}
+          return;
+        }}
+
+        if (shouldBeActive && !m.running) {{
           try {{
-            const cfg = this.storage.getScriptConfig(m.id, currentHost);
             m.init(cfg);
             m.running = true;
           }} catch (err) {{
             console.error(`[BESing] Error initializing ${{m.id}}:`, err);
+          }}
+        }} else if (!shouldBeActive && m.running) {{
+          try {{
+            m.destroy();
+            m.running = false;
+          }} catch (err) {{
+            console.error(`[BESing] Error destroying ${{m.id}}:`, err);
           }}
         }}
       }});
@@ -2677,7 +2726,10 @@ def build():
     if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_INSTANCE__ = app;
   }} catch (e) {{}}
 
-  // Initialize immediately at document-start so security shields and active modules start before page scripts execute
+  // 1. Synchronously arm security shields at document-start before yielding to event loop
+  app.initPreemptiveShields();
+
+  // 2. Initialize storage and load remaining active modules
   app.init();
   if (document.readyState === 'loading') {{
     document.addEventListener('DOMContentLoaded', () => {{

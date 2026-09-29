@@ -1,7 +1,7 @@
 # Prevent Redirect & Tab Hijack
 
 **Script Identifier:** `prevent-redirect`  
-**Current Version:** 1.3.0  
+**Current Version:** 1.3.1  
 **Category:** Security  
 **Author:** BESing Team  
 **License:** MIT  

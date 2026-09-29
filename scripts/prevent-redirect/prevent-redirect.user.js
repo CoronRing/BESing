@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prevent Redirect & Tab Hijack
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.3.0
+// @version      1.3.1
 // @description  Prevents unwanted automatic redirects, mobile touch/sensor traps, popups, and malicious ad network script injections while preserving normal site navigation.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const PreventRedirect = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.3.0',
+    version: '1.3.1',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
     _origOpen: null,
@@ -190,11 +190,17 @@
     },
 
     _recordUserClick(e) {
+      if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) return;
       const target = e && e.target;
       const link = target && target.closest ? target.closest('a') : null;
       if (link) {
         const href = link.getAttribute('href') || link.href;
-        if (this._isSameHost(href)) {
+        if (!href || typeof href !== 'string') return;
+        const trimmed = href.trim();
+        if (trimmed === '#' || trimmed.startsWith('#') || trimmed.startsWith('javascript:') || this._isAdOrRedirectUrl(trimmed)) {
+          return;
+        }
+        if (this._isSameHost(trimmed)) {
           this._userIntentionalClick = true;
           if (this._userClickTimer) clearTimeout(this._userClickTimer);
           this._userClickTimer = setTimeout(() => {
@@ -475,6 +481,12 @@
 
       // 12. Click and touch tracking to distinguish user navigation from background hijacks
       this._clickHandler = function (e) {
+        if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          return;
+        }
         self._recordUserClick(e);
         const link = e.target && e.target.closest ? e.target.closest('a') : null;
         if (!link) return;
@@ -499,10 +511,21 @@
       };
 
       this._touchHandler = function (e) {
-        self._recordUserClick(e);
+        if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          return;
+        }
       };
 
       this._auxClickHandler = function (e) {
+        if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          return;
+        }
         if (e.button === 1) {
           const link = e.target && e.target.closest ? e.target.closest('a') : null;
           if (link) {
@@ -687,7 +710,18 @@
           root.appendChild(guardScript);
           this._injectedGuardEl = guardScript;
           guardScript.remove();
+        } else {
+          const docObs = new MutationObserver(() => {
+            const r = document.head || document.documentElement;
+            if (r) {
+              docObs.disconnect();
+              r.appendChild(guardScript);
+              guardScript.remove();
+            }
+          });
+          docObs.observe(document, { childList: true, subtree: true });
         }
+        if (typeof window !== 'undefined') window.__BESING_PREVENT_REDIRECT__ = this;
       } catch (e) {}
     },
 
