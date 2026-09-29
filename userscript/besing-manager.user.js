@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.5.8
+// @version      1.5.9
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -115,6 +115,9 @@
 
       this.enabledScripts = await BESAdapter.get('enabled_scripts', {});
       if (!this.enabledScripts || typeof this.enabledScripts !== 'object') this.enabledScripts = {};
+      if (this.enabledScripts['prevent-redirect'] === undefined) {
+        this.enabledScripts['prevent-redirect'] = true;
+      }
 
       this.scriptConfigs = await BESAdapter.get('script_configs', {});
       if (!this.scriptConfigs || typeof this.scriptConfigs !== 'object') this.scriptConfigs = {};
@@ -155,7 +158,11 @@
         return siteConfig.scripts[scriptId] ? 'site' : 'site-off';
       }
 
-      return this.enabledScripts[scriptId] ? 'on' : 'off';
+      if (this.enabledScripts[scriptId] !== undefined) {
+        return this.enabledScripts[scriptId] ? 'on' : 'off';
+      }
+      if (scriptId === 'prevent-redirect') return 'on';
+      return 'off';
     }
 
     isScriptActiveOnSite(scriptId, host = this.getCurrentHost()) {
@@ -167,7 +174,12 @@
         return !!siteConfig.scripts[scriptId];
       }
 
-      return !!this.enabledScripts[scriptId];
+      if (this.enabledScripts[scriptId] !== undefined) {
+        return !!this.enabledScripts[scriptId];
+      }
+      if (scriptId === 'prevent-redirect') return true;
+
+      return false;
     }
 
     async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {
@@ -189,16 +201,14 @@
           delete this.siteRules[h].configs[scriptId];
         }
       } else {
-        // OFF: If there was a site override, clear it (and wipe its site config)
+        // OFF: Remove site override if present, and disable globally
         if (this.siteRules[h].scripts[scriptId] !== undefined) {
           delete this.siteRules[h].scripts[scriptId];
           if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
             delete this.siteRules[h].configs[scriptId];
           }
-        } else {
-          // Otherwise turn off globally
-          this.enabledScripts[scriptId] = false;
         }
+        this.enabledScripts[scriptId] = false;
       }
 
       this.cleanupSiteRule(h);
@@ -1145,14 +1155,21 @@
       const mod = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.2.0',
+    version: '1.3.0',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
     _origOpen: null,
     _origUnsafeOpen: null,
     _origWebSocket: null,
     _origUnsafeWebSocket: null,
+    _origFunction: null,
+    _origUnsafeFunction: null,
+    _origSetTimeout: null,
+    _origUnsafeSetTimeout: null,
+    _origSetInterval: null,
+    _origUnsafeSetInterval: null,
     _origAnchorClick: null,
+    _origElementClick: null,
     _origAssign: null,
     _origReplace: null,
     _origScriptSrcDesc: null,
@@ -1161,6 +1178,7 @@
     _origInsertBefore: null,
     _origInsertAdjacentHTML: null,
     _origAEL: null,
+    _origDocAEL: null,
     _clickHandler: null,
     _auxClickHandler: null,
     _touchHandler: null,
@@ -1193,30 +1211,49 @@
       if (!u || u.startsWith('#') || u.startsWith('javascript:') || u.startsWith('about:')) return false;
 
       // 1. Non-standard ports commonly used by evasive ad/redirect servers
-      if (/:(8001|8002|8003|8080|8081|8888|9999|20091|20092|20093)\b/.test(u)) {
+      if (/:(8001|8002|8003|8080|8081|8887|8888|9999|20091|20092|20093)\b/.test(u)) {
         if (!this._isSameHost(u)) return true;
       }
 
       // 2. Known mobile ad / redirect networks
       const adDomains = [
-        'lkg6odg.com', 'kt6th8f.com', 'fumeiti', 'comprelu.cc', 'dsygc.com',
-        'uuysi5.cc', 'uuysi6.cc', '5bjoeih.com', 'xq04k6u.com', 'qq26oeg.com',
-        'popcash', 'propellerads', 'exoclick', 'adsterra', 'clickadu',
-        'richpush', 'trafficjunky', 'adservice', 'adnetwork', 'tsyndicate',
-        'hilltopads', 'adcash', 'juicyads', 'yabidos'
+        'lkg6odg', 'kt6th8f', 'fumeiti', 'comprelu', 'dsygc',
+        'uuysi5', 'uuysi6', '5bjoeih', 'xq04k6u', 'qq26oeg',
+        'adzxdimq', 'vdxqxca', 'oybhpsij', 'popcash', 'propellerads',
+        'exoclick', 'adsterra', 'clickadu', 'richpush', 'trafficjunky',
+        'adservice', 'adnetwork', 'tsyndicate', 'hilltopads', 'adcash',
+        'juicyads', 'yabidos'
       ];
       for (let i = 0; i < adDomains.length; i++) {
         if (u.includes(adDomains[i])) return true;
       }
 
       // 3. Known ad tracking redirect url path patterns
-      if (/(\/sc\/\d+|\/cc\/\d+|\/d\/\d+\?c=|\/push\/|\/stat\/|\/click\/)/.test(u) && !this._isSameHost(u)) {
+      if (/(\/sc\/\d+|\/cc\/\d+|\/d\/\d+|\/mj1\/\d+|\/stats\/\d+|\/push\/|\/stat\/|\/click\/)/.test(u) && !this._isSameHost(u)) {
         return true;
       }
-      if ((u.includes('?n=ikooenpn') || u.includes('&target=1')) && !this._isSameHost(u)) {
+      if ((u.includes('?n=') || u.includes('&target=1') || u.includes('is_not=1')) && !this._isSameHost(u)) {
         return true;
       }
 
+      return false;
+    },
+
+    _isAdCode(codeStr) {
+      if (!codeStr || typeof codeStr !== 'string') return false;
+      const s = codeStr.toLowerCase();
+      // 1. Direct location hijacking with ad tokens or evasion params
+      if (/(top\.location|window\.location|location\.href)\s*(!=|==|=)\s*.*(target=1|purl|ikooenpn|srisnadi|:800|:888|comprelu|kt6th8f|lkg6odg|adzxdimq|dsygc)/.test(s)) {
+        return true;
+      }
+      // 2. Mobile ad skip delay timers & evasion functions
+      if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij)/.test(s)) {
+        return true;
+      }
+      // 3. Evasive websocket payload loaders
+      if (s.includes('new function') && (s.includes('_tdcs') || s.includes('wvsyru') || s.includes('nnkqek'))) {
+        return true;
+      }
       return false;
     },
 
@@ -1311,7 +1348,118 @@
       const self = this;
       const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
 
-      // 1. Hook window.open in current scope and unsafeWindow
+      // 1. Intercept Function constructor (new Function) to block decrypted mobile ad payloads
+      try {
+        const OrigFunction = unsafeWin.Function || window.Function;
+        this._origFunction = window.Function;
+        const hookedFunction = function(...args) {
+          const code = args[args.length - 1] || '';
+          if (typeof code === 'string' && self._isAdCode(code)) {
+            self.notifyBlocked('dynamic payload', 'malicious new Function redirect payload');
+            return function() {};
+          }
+          return OrigFunction.apply(this, args);
+        };
+        hookedFunction.prototype = OrigFunction.prototype;
+        window.Function = hookedFunction;
+        if (unsafeWin && unsafeWin !== window) {
+          this._origUnsafeFunction = unsafeWin.Function;
+          try { unsafeWin.Function = hookedFunction; } catch (e) {}
+        }
+      } catch (e) {}
+
+      // 2. Intercept EventTarget.prototype.addEventListener & drop malicious listeners
+      try {
+        const eventProto = (unsafeWin.EventTarget || EventTarget).prototype;
+        const origAEL = eventProto.addEventListener;
+        this._origAEL = origAEL;
+        const hookedAEL = function(type, listener, options) {
+          if (type === 'devicemotion' || type === 'deviceorientation') {
+            console.warn('[BESing Prevent Redirect] Suppressed mobile sensor trap:', type);
+            return;
+          }
+          if (typeof listener === 'function') {
+            try {
+              const fnStr = listener.toString();
+              if (self._isAdCode(fnStr)) {
+                self.notifyBlocked(type, 'malicious redirect event listener');
+                return;
+              }
+            } catch (e) {}
+          }
+          return origAEL.call(this, type, listener, options);
+        };
+        eventProto.addEventListener = hookedAEL;
+      } catch (e) {}
+
+      // 3. Intercept setTimeout & setInterval to drop auto-redirect timers
+      try {
+        const origSetTimeout = window.setTimeout;
+        this._origSetTimeout = origSetTimeout;
+        const hookedSetTimeout = function(handler, delay, ...args) {
+          if (typeof handler === 'function') {
+            try {
+              const fnStr = handler.toString();
+              if (self._isAdCode(fnStr)) {
+                self.notifyBlocked('timer', 'malicious auto-redirect setTimeout');
+                return 0;
+              }
+            } catch (e) {}
+          }
+          return origSetTimeout.call(this, handler, delay, ...args);
+        };
+        window.setTimeout = hookedSetTimeout;
+        if (unsafeWin && unsafeWin !== window) {
+          this._origUnsafeSetTimeout = unsafeWin.setTimeout;
+          try { unsafeWin.setTimeout = hookedSetTimeout; } catch (e) {}
+        }
+
+        const origSetInterval = window.setInterval;
+        this._origSetInterval = origSetInterval;
+        const hookedSetInterval = function(handler, delay, ...args) {
+          if (typeof handler === 'function') {
+            try {
+              const fnStr = handler.toString();
+              if (self._isAdCode(fnStr)) {
+                self.notifyBlocked('timer', 'malicious auto-redirect setInterval');
+                return 0;
+              }
+            } catch (e) {}
+          }
+          return origSetInterval.call(this, handler, delay, ...args);
+        };
+        window.setInterval = hookedSetInterval;
+        if (unsafeWin && unsafeWin !== window) {
+          this._origUnsafeSetInterval = unsafeWin.setInterval;
+          try { unsafeWin.setInterval = hookedSetInterval; } catch (e) {}
+        }
+      } catch (e) {}
+
+      // 4. Hook WebSocket to block ad tunnels (e.g. wss://...:20091, :20093, :8887)
+      try {
+        const OrigWS = unsafeWin.WebSocket || window.WebSocket;
+        if (OrigWS) {
+          this._origWebSocket = window.WebSocket;
+          const hookedWebSocket = function(url, protocols) {
+            if (self._isAdOrRedirectUrl(url)) {
+              return self._createFakeWebSocket(url);
+            }
+            return new OrigWS(url, protocols);
+          };
+          hookedWebSocket.prototype = OrigWS.prototype;
+          hookedWebSocket.CONNECTING = 0;
+          hookedWebSocket.OPEN = 1;
+          hookedWebSocket.CLOSING = 2;
+          hookedWebSocket.CLOSED = 3;
+          window.WebSocket = hookedWebSocket;
+          if (unsafeWin && unsafeWin !== window) {
+            this._origUnsafeWebSocket = unsafeWin.WebSocket;
+            try { unsafeWin.WebSocket = hookedWebSocket; } catch (e) {}
+          }
+        }
+      } catch (e) {}
+
+      // 5. Hook window.open in current scope and unsafeWindow
       const hookedOpen = function (url, target, features) {
         const isExt = url && !self._isSameHost(url);
         const isNewTab = target === '_blank' || target === '_new' || !target;
@@ -1337,48 +1485,7 @@
         try { unsafeWin.open = hookedOpen; } catch (e) {}
       }
 
-      // 2. Hook WebSocket to block ad tunnels (e.g. wss://...:20091 or :20093)
-      try {
-        const OrigWS = window.WebSocket;
-        if (OrigWS) {
-          this._origWebSocket = OrigWS;
-          const hookedWebSocket = function(url, protocols) {
-            if (self._isAdOrRedirectUrl(url)) {
-              return self._createFakeWebSocket(url);
-            }
-            return new OrigWS(url, protocols);
-          };
-          hookedWebSocket.prototype = OrigWS.prototype;
-          hookedWebSocket.CONNECTING = 0;
-          hookedWebSocket.OPEN = 1;
-          hookedWebSocket.CLOSING = 2;
-          hookedWebSocket.CLOSED = 3;
-          window.WebSocket = hookedWebSocket;
-          if (unsafeWin && unsafeWin !== window) {
-            this._origUnsafeWebSocket = unsafeWin.WebSocket;
-            try { unsafeWin.WebSocket = hookedWebSocket; } catch (e) {}
-          }
-        }
-      } catch (e) {}
-
-      // 3. Drop mobile sensor traps (devicemotion, deviceorientation)
-      try {
-        const origAEL = window.addEventListener;
-        this._origAEL = origAEL;
-        const hookedAEL = function(type, listener, options) {
-          if (type === 'devicemotion' || type === 'deviceorientation') {
-            console.warn('[BESing Prevent Redirect] Suppressed mobile sensor trap:', type);
-            return;
-          }
-          return origAEL.call(this, type, listener, options);
-        };
-        window.addEventListener = hookedAEL;
-        if (unsafeWin && unsafeWin !== window) {
-          try { unsafeWin.addEventListener = hookedAEL; } catch (e) {}
-        }
-      } catch (e) {}
-
-      // 4. Hook HTMLScriptElement.prototype.src to intercept ad script injections
+      // 6. Hook HTMLScriptElement.prototype.src to intercept ad script injections
       try {
         const scriptProto = (unsafeWin.HTMLScriptElement || HTMLScriptElement).prototype;
         const scriptDesc = Object.getOwnPropertyDescriptor(scriptProto, 'src');
@@ -1399,7 +1506,7 @@
         }
       } catch (e) {}
 
-      // 5. Hook HTMLIFrameElement.prototype.src to intercept ad iframes
+      // 7. Hook HTMLIFrameElement.prototype.src to intercept ad iframes
       try {
         const iframeProto = (unsafeWin.HTMLIFrameElement || HTMLIFrameElement).prototype;
         const iframeDesc = Object.getOwnPropertyDescriptor(iframeProto, 'src');
@@ -1420,7 +1527,7 @@
         }
       } catch (e) {}
 
-      // 6. Hook Node.prototype.appendChild and insertBefore
+      // 8. Hook Node.prototype.appendChild and insertBefore
       try {
         const nodeProto = (unsafeWin.Node || Node).prototype;
         this._origAppendChild = nodeProto.appendChild;
@@ -1448,7 +1555,7 @@
         };
       } catch (e) {}
 
-      // 7. Hook Element.prototype.insertAdjacentHTML to filter invisible touch overlay tiles
+      // 9. Hook Element.prototype.insertAdjacentHTML to filter invisible touch overlay tiles
       try {
         const elemProto = (unsafeWin.Element || Element).prototype;
         this._origInsertAdjacentHTML = elemProto.insertAdjacentHTML;
@@ -1461,7 +1568,7 @@
         };
       } catch (e) {}
 
-      // 8. Hook HTMLAnchorElement.prototype.click
+      // 10. Hook HTMLAnchorElement.prototype.click and HTMLElement.prototype.click
       try {
         const anchorProto = (unsafeWin.HTMLAnchorElement || HTMLAnchorElement).prototype;
         this._origAnchorClick = anchorProto.click;
@@ -1480,7 +1587,7 @@
         };
       } catch (e) {}
 
-      // 9. Hook Location.prototype.assign and replace
+      // 11. Hook Location.prototype.assign and replace
       try {
         const locProto = (unsafeWin.Location || Location).prototype;
         if (locProto && locProto.assign) {
@@ -1505,7 +1612,7 @@
         }
       } catch (e) {}
 
-      // 10. Click and touch tracking to distinguish user navigation from background hijacks
+      // 12. Click and touch tracking to distinguish user navigation from background hijacks
       this._clickHandler = function (e) {
         self._recordUserClick(e);
         const link = e.target && e.target.closest ? e.target.closest('a') : null;
@@ -1563,7 +1670,7 @@
       document.addEventListener('auxclick', this._auxClickHandler, true);
       window.addEventListener('beforeunload', this._beforeUnloadHandler, true);
 
-      // 11. Inject page-context guard for page scripts in main execution world
+      // 13. Inject comprehensive page-context guard for page scripts in main execution world
       try {
         const guardScript = document.createElement('script');
         guardScript.id = '__besing_pr_guard__';
@@ -1572,6 +1679,7 @@
             if (window.__besing_pr_active__) return;
             window.__besing_pr_active__ = true;
             var curHost = (window.location.hostname || '').toLowerCase();
+
             function isSame(u) {
               if (!u || typeof u !== 'string') return true;
               var t = u.trim();
@@ -1582,15 +1690,28 @@
                 return h === curHost || h.endsWith('.' + curHost) || curHost.endsWith('.' + h);
               } catch(e) { return false; }
             }
+
             function isAd(u) {
               if (!u || typeof u !== 'string') return false;
               var s = u.toLowerCase();
-              if (/:(8001|8002|8003|8080|8081|8888|9999|20091|20092|20093)\\b/.test(s) && !isSame(s)) return true;
-              if (/(lkg6odg\\.com|kt6th8f\\.com|fumeiti|comprelu\\.cc|dsygc\\.com|uuysi5\\.cc|uuysi6\\.cc|5bjoeih\\.com|xq04k6u\\.com|qq26oeg\\.com|popcash|propellerads|exoclick|adsterra|clickadu|richpush|trafficjunky|adservice|adnetwork)/.test(s)) return true;
-              if (/(\\/sc\\/\\d+|\\/cc\\/\\d+|\\/d\\/\\d+\\?c=|\\/push\\/|\\/stat\\/|\\/click\\/)/.test(s) && !isSame(s)) return true;
-              if (s.indexOf('?n=ikooenpn') !== -1 || s.indexOf('&target=1') !== -1) return true;
+              if (/:(8001|8002|8003|8080|8081|8887|8888|9999|20091|20092|20093)\\b/.test(s) && !isSame(s)) return true;
+              if (/(lkg6odg|kt6th8f|fumeiti|comprelu|dsygc|uuysi5|uuysi6|5bjoeih|xq04k6u|qq26oeg|adzxdimq|vdxqxca|oybhpsij|popcash|propellerads|exoclick|adsterra|clickadu|richpush|trafficjunky|adservice|adnetwork)/.test(s)) return true;
+              if (/(\\/sc\\/\\d+|\\/cc\\/\\d+|\\/d\\/\\d+|\\/mj1\\/\\d+|\\/stats\\/\\d+|\\/push\\/|\\/stat\\/|\\/click\\/)/.test(s) && !isSame(s)) return true;
+              if (s.indexOf('?n=') !== -1 || s.indexOf('&target=1') !== -1 || s.indexOf('is_not=1') !== -1) {
+                if (!isSame(s)) return true;
+              }
               return false;
             }
+
+            function isAdCode(str) {
+              if (!str || typeof str !== 'string') return false;
+              var s = str.toLowerCase();
+              if (/(top\\.location|window\\.location|location\\.href)\\s*(!=|==|=)\\s*.*(target=1|purl|ikooenpn|srisnadi|:800|:888|comprelu|kt6th8f|lkg6odg|adzxdimq|dsygc)/.test(s)) return true;
+              if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij)/.test(s)) return true;
+              if (s.indexOf('new function') !== -1 && (s.indexOf('_tdcs') !== -1 || s.indexOf('wvsyru') !== -1 || s.indexOf('nnkqek') !== -1)) return true;
+              return false;
+            }
+
             function fakeWin(u) {
               var f = {
                 closed: false, name: '', opener: window, parent: window, top: window, frames: [], length: 0,
@@ -1602,6 +1723,8 @@
               f.window = f;
               return f;
             }
+
+            // Hook window.open in page context
             var origOpen = window.open;
             window.open = function(url, target, feat) {
               if (isAd(url) || (url && !isSame(url)) || target === '_blank' || target === '_new' || !target) {
@@ -1610,6 +1733,53 @@
               }
               return origOpen.call(this || window, url, target, feat);
             };
+
+            // Hook Function constructor in page context
+            var OrigFunction = window.Function;
+            window.Function = function(...args) {
+              var code = args[args.length - 1] || '';
+              if (typeof code === 'string' && isAdCode(code)) {
+                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: 'payload', reason: 'page-script new Function' } }));
+                return function() {};
+              }
+              return OrigFunction.apply(this, args);
+            };
+            window.Function.prototype = OrigFunction.prototype;
+
+            // Hook EventTarget.prototype.addEventListener in page context
+            var origAEL = EventTarget.prototype.addEventListener;
+            EventTarget.prototype.addEventListener = function(t, l, o) {
+              if (t === 'devicemotion' || t === 'deviceorientation') return;
+              if (typeof l === 'function') {
+                try {
+                  if (isAdCode(l.toString())) return;
+                } catch(e) {}
+              }
+              return origAEL.call(this, t, l, o);
+            };
+
+            // Hook setTimeout & setInterval in page context
+            var origSetTimeout = window.setTimeout;
+            window.setTimeout = function(h, d, ...args) {
+              if (typeof h === 'function') {
+                try {
+                  if (isAdCode(h.toString())) return 0;
+                } catch(e) {}
+              }
+              return origSetTimeout.call(this, h, d, ...args);
+            };
+
+            var origSetInterval = window.setInterval;
+            window.setInterval = function(h, d, ...args) {
+              if (typeof h === 'function') {
+                try {
+                  if (isAdCode(h.toString())) return 0;
+                } catch(e) {}
+              }
+              return origSetInterval.call(this, h, d, ...args);
+            };
+
+            // Hook WebSocket in page context
             var OrigWS = window.WebSocket;
             if (OrigWS) {
               window.WebSocket = function(url, proto) {
@@ -1621,11 +1791,8 @@
               };
               window.WebSocket.prototype = OrigWS.prototype;
             }
-            var origAEL = window.addEventListener;
-            window.addEventListener = function(t, l, o) {
-              if (t === 'devicemotion' || t === 'deviceorientation') return;
-              return origAEL.call(this, t, l, o);
-            };
+
+            // Hook HTMLScriptElement.prototype.src in page context
             try {
               var sDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
               if (sDesc && sDesc.set) {
@@ -1643,6 +1810,8 @@
                 });
               }
             } catch(e){}
+
+            // Hook insertAdjacentHTML in page context
             var oInsert = Element.prototype.insertAdjacentHTML;
             Element.prototype.insertAdjacentHTML = function(p, h) {
               if (typeof h === 'string' && h.indexOf('position:fixed') !== -1 && (h.indexOf('opacity:0.01') !== -1 || h.indexOf('opacity: 0.01') !== -1)) {
@@ -1671,6 +1840,30 @@
         try { unsafeWin.open = this._origUnsafeOpen; } catch (e) {}
         this._origUnsafeOpen = null;
       }
+      if (this._origFunction) {
+        window.Function = this._origFunction;
+        this._origFunction = null;
+      }
+      if (this._origUnsafeFunction && unsafeWin) {
+        try { unsafeWin.Function = this._origUnsafeFunction; } catch (e) {}
+        this._origUnsafeFunction = null;
+      }
+      if (this._origSetTimeout) {
+        window.setTimeout = this._origSetTimeout;
+        this._origSetTimeout = null;
+      }
+      if (this._origUnsafeSetTimeout && unsafeWin) {
+        try { unsafeWin.setTimeout = this._origUnsafeSetTimeout; } catch (e) {}
+        this._origUnsafeSetTimeout = null;
+      }
+      if (this._origSetInterval) {
+        window.setInterval = this._origSetInterval;
+        this._origSetInterval = null;
+      }
+      if (this._origUnsafeSetInterval && unsafeWin) {
+        try { unsafeWin.setInterval = this._origUnsafeSetInterval; } catch (e) {}
+        this._origUnsafeSetInterval = null;
+      }
       if (this._origWebSocket) {
         window.WebSocket = this._origWebSocket;
         this._origWebSocket = null;
@@ -1680,10 +1873,10 @@
         this._origUnsafeWebSocket = null;
       }
       if (this._origAEL) {
-        window.addEventListener = this._origAEL;
-        if (unsafeWin && unsafeWin !== window) {
-          try { unsafeWin.addEventListener = this._origAEL; } catch (e) {}
-        }
+        try {
+          const eventProto = (unsafeWin.EventTarget || EventTarget).prototype;
+          eventProto.addEventListener = this._origAEL;
+        } catch (e) {}
         this._origAEL = null;
       }
       if (this._origScriptSrcDesc) {
@@ -1763,7 +1956,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.5.8';
+    static CURRENT_VERSION = '1.5.9';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {

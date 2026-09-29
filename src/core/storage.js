@@ -36,6 +36,9 @@ export class BESStorage {
 
     this.enabledScripts = await BESAdapter.get(STORAGE_KEYS.ENABLED_SCRIPTS, {});
     if (!this.enabledScripts || typeof this.enabledScripts !== 'object') this.enabledScripts = {};
+    if (this.enabledScripts['prevent-redirect'] === undefined) {
+      this.enabledScripts['prevent-redirect'] = true;
+    }
 
     this.scriptConfigs = await BESAdapter.get(STORAGE_KEYS.SCRIPT_CONFIGS, {});
     if (!this.scriptConfigs || typeof this.scriptConfigs !== 'object') this.scriptConfigs = {};
@@ -78,7 +81,11 @@ export class BESStorage {
       return siteConfig.scripts[scriptId] ? 'site' : 'site-off';
     }
 
-    return this.enabledScripts[scriptId] ? 'on' : 'off';
+    if (this.enabledScripts[scriptId] !== undefined) {
+      return this.enabledScripts[scriptId] ? 'on' : 'off';
+    }
+    if (scriptId === 'prevent-redirect') return 'on';
+    return 'off';
   }
 
   isScriptActiveOnSite(scriptId, host = this.getCurrentHost()) {
@@ -90,7 +97,12 @@ export class BESStorage {
       return !!siteConfig.scripts[scriptId];
     }
 
-    return !!this.enabledScripts[scriptId];
+    if (this.enabledScripts[scriptId] !== undefined) {
+      return !!this.enabledScripts[scriptId];
+    }
+    if (scriptId === 'prevent-redirect') return true;
+
+    return false;
   }
 
   async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {
@@ -112,16 +124,14 @@ export class BESStorage {
         delete this.siteRules[h].configs[scriptId];
       }
     } else {
-      // OFF: If there was a site override, clear it (and wipe its site config)
+      // OFF: Remove site override if present, and disable globally
       if (this.siteRules[h].scripts[scriptId] !== undefined) {
         delete this.siteRules[h].scripts[scriptId];
         if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
           delete this.siteRules[h].configs[scriptId];
         }
-      } else {
-        // Otherwise turn off globally
-        this.enabledScripts[scriptId] = false;
       }
+      this.enabledScripts[scriptId] = false;
     }
 
     this.cleanupSiteRule(h);

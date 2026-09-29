@@ -65,7 +65,7 @@ export class BESMenu {
     titleSpan.textContent = 'BESing Hub';
     const tagSpan = document.createElement('span');
     tagSpan.className = 'besing-tag';
-    tagSpan.textContent = 'v1.5.8';
+    tagSpan.textContent = 'v1.5.9';
     titleGroup.appendChild(titleSpan);
     titleGroup.appendChild(tagSpan);
     logoGroup.appendChild(titleGroup);

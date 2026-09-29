@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.5.8"
+VERSION = "1.5.9"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -234,6 +234,9 @@ def build():
 
       this.enabledScripts = await BESAdapter.get('enabled_scripts', {{}});
       if (!this.enabledScripts || typeof this.enabledScripts !== 'object') this.enabledScripts = {{}};
+      if (this.enabledScripts['prevent-redirect'] === undefined) {{
+        this.enabledScripts['prevent-redirect'] = true;
+      }}
 
       this.scriptConfigs = await BESAdapter.get('script_configs', {{}});
       if (!this.scriptConfigs || typeof this.scriptConfigs !== 'object') this.scriptConfigs = {{}};
@@ -274,7 +277,11 @@ def build():
         return siteConfig.scripts[scriptId] ? 'site' : 'site-off';
       }}
 
-      return this.enabledScripts[scriptId] ? 'on' : 'off';
+      if (this.enabledScripts[scriptId] !== undefined) {{
+        return this.enabledScripts[scriptId] ? 'on' : 'off';
+      }}
+      if (scriptId === 'prevent-redirect') return 'on';
+      return 'off';
     }}
 
     isScriptActiveOnSite(scriptId, host = this.getCurrentHost()) {{
@@ -286,7 +293,12 @@ def build():
         return !!siteConfig.scripts[scriptId];
       }}
 
-      return !!this.enabledScripts[scriptId];
+      if (this.enabledScripts[scriptId] !== undefined) {{
+        return !!this.enabledScripts[scriptId];
+      }}
+      if (scriptId === 'prevent-redirect') return true;
+
+      return false;
     }}
 
     async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {{
@@ -308,16 +320,14 @@ def build():
           delete this.siteRules[h].configs[scriptId];
         }}
       }} else {{
-        // OFF: If there was a site override, clear it (and wipe its site config)
+        // OFF: Remove site override if present, and disable globally
         if (this.siteRules[h].scripts[scriptId] !== undefined) {{
           delete this.siteRules[h].scripts[scriptId];
           if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {{
             delete this.siteRules[h].configs[scriptId];
           }}
-        }} else {{
-          // Otherwise turn off globally
-          this.enabledScripts[scriptId] = false;
         }}
+        this.enabledScripts[scriptId] = false;
       }}
 
       this.cleanupSiteRule(h);
