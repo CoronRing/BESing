@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.5.2
+ * Version 1.5.3
  */
 
 (function () {
@@ -838,34 +838,272 @@
       return mod;
     })(),
 
-    // Module: Ad Cleaner Lite
+    // Module: Ad Cleaner & Element Zapper
     (() => {
       const mod = {
     id: 'ad-cleaner',
-    name: 'Ad Cleaner Lite',
-    version: '1.0.0',
-    description: 'Hides intrusive floating overlays, sticky marketing banners, and cookie popups.',
+    name: 'Ad Cleaner & Element Zapper',
+    version: '1.2.0',
+    description: 'Hides intrusive overlays, cookie popups, and provides an interactive point-and-click Element Zapper to block any element permanently.',
     category: 'Privacy',
     _styleEl: null,
+    _config: null,
+    _zapperActive: false,
+    _zapperHud: null,
+    _highlightEl: null,
+    _currentHoveredTarget: null,
+    _mouseMoveHandler: null,
+    _clickHandler: null,
+    _keyDownHandler: null,
+    _contextHandler: null,
+    _shortcutAttached: false,
 
-    init() {
+    init(config = {}) {
       this.destroy();
-      const style = document.createElement('style');
-      style.id = 'besing-ad-cleaner-style';
-      style.textContent = `
-        [class*="cookie-banner"], [id*="cookie-banner"],
-        [class*="consent-banner"], [id*="consent-banner"],
-        [class*="popup-overlay"]:not(#__besing_root__ *),
-        [class*="newsletter-popup"], [id*="newsletter-modal"],
-        .ad-banner, .ads-placement {
-          display: none !important;
+      this._config = config || {};
+      this._applyStyles();
+      this._setupGlobalShortcut();
+    },
+
+    onConfigChange(newConfig) {
+      this._config = newConfig || {};
+      this._applyStyles();
+    },
+
+    _applyStyles() {
+      if (!this._styleEl) {
+        const s = document.createElement('style');
+        s.id = 'besing-ad-cleaner-style';
+        (document.head || document.documentElement).appendChild(s);
+        this._styleEl = s;
+      }
+
+      const rules = [];
+      const autoClean = this._config.enableAutoClean !== false;
+      if (autoClean) {
+        rules.push(`
+          [class*="cookie-banner"]:not(#__besing_root__ *), [id*="cookie-banner"]:not(#__besing_root__ *),
+          [class*="consent-banner"]:not(#__besing_root__ *), [id*="consent-banner"]:not(#__besing_root__ *),
+          [class*="popup-overlay"]:not(#__besing_root__ *),
+          [class*="newsletter-popup"]:not(#__besing_root__ *), [id*="newsletter-modal"]:not(#__besing_root__ *),
+          .ad-banner:not(#__besing_root__ *), .ads-placement:not(#__besing_root__ *)
+        `);
+      }
+
+      const blocked = this._config.blockedSelectors || [];
+      if (Array.isArray(blocked) && blocked.length > 0) {
+        rules.push(blocked.join(',\n'));
+      }
+
+      if (rules.length > 0) {
+        this._styleEl.textContent = `
+          ${rules.join(',\n')} {
+            display: none !important;
+            visibility: hidden !important;
+          }
+        `;
+      } else {
+        this._styleEl.textContent = '';
+      }
+    },
+
+    _setupGlobalShortcut() {
+      if (this._shortcutAttached) return;
+      this._shortcutAttached = true;
+      window.addEventListener('keydown', (e) => {
+        // Alt + Z toggles Element Zapper
+        if (e.altKey && (e.key === 'z' || e.key === 'Z')) {
+          e.preventDefault();
+          if (this._zapperActive) {
+            this.stopZapper();
+          } else {
+            this.startZapper();
+          }
         }
+      });
+    },
+
+    computeSelector(el) {
+      if (!el || el === document.body || el === document.documentElement) return '';
+      if (el.id && !el.id.includes('__besing') && !/^\d/.test(el.id)) {
+        return `#${CSS.escape(el.id)}`;
+      }
+      const tag = el.tagName.toLowerCase();
+      const classes = Array.from(el.classList).filter(c => !c.startsWith('besing-') && !c.includes(':'));
+      if (classes.length > 0) {
+        const clsSelector = classes.slice(0, 3).map(c => `.${CSS.escape(c)}`).join('');
+        if (document.querySelectorAll(clsSelector).length <= 4) {
+          return `${tag}${clsSelector}`;
+        }
+      }
+      const parent = el.parentElement;
+      if (parent && parent !== document.body && parent !== document.documentElement) {
+        const parentSel = (parent.id && !parent.id.includes('__besing') && !/^\d/.test(parent.id)) ? `#${CSS.escape(parent.id)}` : parent.tagName.toLowerCase();
+        const index = Array.from(parent.children).indexOf(el) + 1;
+        return `${parentSel} > ${tag}:nth-child(${index})`;
+      }
+      return tag;
+    },
+
+    startZapper(onZappedCallback) {
+      if (this._zapperActive) return;
+      this._zapperActive = true;
+
+      // Close manager modal if open
+      const mgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                  (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      if (mgr && typeof mgr.closeModal === 'function') {
+        mgr.closeModal();
+      }
+
+      // 1. Create Floating Top HUD
+      const hud = document.createElement('div');
+      hud.id = 'besing-zapper-hud';
+      hud.innerHTML = `
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="background:#ef4444;color:#fff;font-size:10px;font-weight:800;padding:2px 7px;border-radius:6px;letter-spacing:0.5px;">⚡ ELEMENT ZAPPER</span>
+          <span style="font-size:11px;color:#f1f5f9;">Hover to target • <strong style="color:#38bdf8;">Left-Click</strong> to Zap • <strong style="color:#fca5a5;">Esc / Right-Click</strong> to Exit</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span id="besing-zapper-status" style="font-size:10px;color:#a5b4fc;font-family:monospace;"></span>
+          <button type="button" id="besing-zapper-exit-btn" style="background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.2);color:#fff;font-size:10px;font-weight:700;padding:3px 8px;border-radius:5px;cursor:pointer;">✕ Exit</button>
+        </div>
       `;
-      document.head.appendChild(style);
-      this._styleEl = style;
+      hud.setAttribute('style', 'position:fixed;top:12px;left:50%;transform:translateX(-50%);background:rgba(15,23,42,0.95);border:1.5px solid rgba(239,68,68,0.6);border-radius:12px;padding:8px 16px;z-index:2147483647;box-shadow:0 10px 30px rgba(0,0,0,0.7),0 0 20px rgba(239,68,68,0.3);display:flex;align-items:center;gap:20px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);font-family:-apple-system,sans-serif;pointer-events:auto;');
+      (document.body || document.documentElement).appendChild(hud);
+      this._zapperHud = hud;
+
+      hud.querySelector('#besing-zapper-exit-btn').onclick = () => this.stopZapper();
+
+      // 2. Create Target Highlight Box
+      const box = document.createElement('div');
+      box.id = 'besing-zapper-highlight';
+      box.setAttribute('style', 'position:fixed;pointer-events:none;border:2px solid #ef4444;background:rgba(239,68,68,0.22);z-index:2147483646;display:none;transition:top 0.05s ease, left 0.05s ease, width 0.05s ease, height 0.05s ease;border-radius:4px;box-shadow:0 0 16px rgba(239,68,68,0.6);');
+      
+      const tagBadge = document.createElement('div');
+      tagBadge.id = 'besing-zapper-tag-badge';
+      tagBadge.setAttribute('style', 'position:absolute;top:-24px;left:0;background:#ef4444;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;white-space:nowrap;font-family:monospace;pointer-events:none;box-shadow:0 2px 6px rgba(0,0,0,0.4);');
+      box.appendChild(tagBadge);
+
+      (document.body || document.documentElement).appendChild(box);
+      this._highlightEl = box;
+
+      document.body.style.cursor = 'crosshair';
+
+      this._mouseMoveHandler = (e) => {
+        if (!this._zapperActive) return;
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        if (!el || el.closest('#besing-zapper-hud') || el.closest('#besing-zapper-highlight') || el.closest('#__besing_root__')) {
+          box.style.display = 'none';
+          this._currentHoveredTarget = null;
+          return;
+        }
+
+        this._currentHoveredTarget = el;
+        const rect = el.getBoundingClientRect();
+        box.style.display = 'block';
+        box.style.left = `${rect.left}px`;
+        box.style.top = `${rect.top}px`;
+        box.style.width = `${rect.width}px`;
+        box.style.height = `${rect.height}px`;
+
+        const sel = this.computeSelector(el);
+        tagBadge.textContent = `${sel} (${Math.round(rect.width)}×${Math.round(rect.height)})`;
+      };
+
+      this._clickHandler = (e) => {
+        if (!this._zapperActive) return;
+        if (e.target.closest('#besing-zapper-hud')) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        const target = this._currentHoveredTarget;
+        if (!target) return;
+
+        const sel = this.computeSelector(target);
+        if (!sel) return;
+
+        // Shrink & fade out zapping animation
+        target.style.transition = 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)';
+        target.style.opacity = '0';
+        target.style.transform = 'scale(0.88)';
+        setTimeout(() => {
+          target.style.display = 'none';
+        }, 220);
+
+        this._config = this._config || {};
+        const currentList = this._config.blockedSelectors || [];
+        if (!currentList.includes(sel)) {
+          currentList.push(sel);
+          this._config.blockedSelectors = currentList;
+          this._applyStyles();
+          if (typeof onZappedCallback === 'function') {
+            onZappedCallback(sel, currentList);
+          }
+          const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                         (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+          if (appMgr && typeof appMgr.applyScriptConfig === 'function') {
+            appMgr.applyScriptConfig(this.id, { blockedSelectors: currentList });
+          }
+        }
+
+        const statusEl = hud.querySelector('#besing-zapper-status');
+        if (statusEl) {
+          statusEl.textContent = `✅ Zapped: ${sel}`;
+          setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2500);
+        }
+      };
+
+      this._keyDownHandler = (e) => {
+        if (e.key === 'Escape') {
+          this.stopZapper();
+        }
+      };
+
+      this._contextHandler = (e) => {
+        if (this._zapperActive) {
+          e.preventDefault();
+          this.stopZapper();
+        }
+      };
+
+      window.addEventListener('mousemove', this._mouseMoveHandler, { passive: true });
+      window.addEventListener('click', this._clickHandler, { capture: true });
+      window.addEventListener('keydown', this._keyDownHandler);
+      window.addEventListener('contextmenu', this._contextHandler, { capture: true });
+    },
+
+    stopZapper() {
+      this._zapperActive = false;
+      document.body.style.cursor = '';
+      if (this._zapperHud) {
+        this._zapperHud.remove();
+        this._zapperHud = null;
+      }
+      if (this._highlightEl) {
+        this._highlightEl.remove();
+        this._highlightEl = null;
+      }
+      if (this._mouseMoveHandler) {
+        window.removeEventListener('mousemove', this._mouseMoveHandler);
+        this._mouseMoveHandler = null;
+      }
+      if (this._clickHandler) {
+        window.removeEventListener('click', this._clickHandler, { capture: true });
+        this._clickHandler = null;
+      }
+      if (this._keyDownHandler) {
+        window.removeEventListener('keydown', this._keyDownHandler);
+        this._keyDownHandler = null;
+      }
+      if (this._contextHandler) {
+        window.removeEventListener('contextmenu', this._contextHandler, { capture: true });
+        this._contextHandler = null;
+      }
     },
 
     destroy() {
+      this.stopZapper();
       if (this._styleEl) {
         this._styleEl.remove();
         this._styleEl = null;
@@ -874,7 +1112,7 @@
       if (el) el.remove();
     }
   };
-      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z\"></path></svg>";
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><polygon points=\"13 2 3 14 12 14 11 22 21 10 12 10 13 2\"></polygon></svg>";
       mod.author = "BESing Team";
       mod.category = "Privacy";
       return mod;
@@ -1187,7 +1425,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.5.2';
+    static CURRENT_VERSION = '1.5.3';
 
     static isStableLoader() {
       const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || (typeof window !== 'undefined' && window);
@@ -2351,6 +2589,7 @@
           filtered.forEach(m => {
             const card = document.createElement('div');
             card.className = 'besing-ext-card';
+            card.setAttribute('data-id', m.id);
             const currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'site-off' | 'on'
 
             const overrides = this.storage.getScriptSiteOverrides(m.id);
@@ -2663,6 +2902,61 @@
             </div>
           </div>
         `;
+      } else if (m.id === 'ad-cleaner') {
+        const enableAutoClean = cfg.enableAutoClean !== false;
+        const blockedSelectors = Array.isArray(cfg.blockedSelectors) ? cfg.blockedSelectors : [];
+        let blockedListHtml = '';
+        if (blockedSelectors.length === 0) {
+          blockedListHtml = `<div class="besing-zapped-empty">No custom elements zapped on this site yet.</div>`;
+        } else {
+          blockedListHtml = blockedSelectors.map((sel, idx) => `
+            <div class="besing-zapped-item">
+              <code class="besing-zapped-selector" title="${sel}">${sel}</code>
+              <button type="button" class="besing-btn-restore-zapped" data-index="${idx}" title="Restore (unblock) this element">✕</button>
+            </div>
+          `).join('');
+        }
+
+        specificControls = `
+          <div class="besing-config-section besing-zapper-hero-section">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <span style="font-size:12px;font-weight:700;color:#f87171;display:flex;align-items:center;gap:6px;">
+                <span>🎯</span> Interactive Element Zapper
+              </span>
+              <span class="besing-shortcut-badge" title="Global Shortcut: Press Alt + Z anywhere on the webpage">Alt + Z</span>
+            </div>
+            <p style="font-size:11px;color:#cbd5e1;line-height:1.4;margin:0;">
+              Point and click on any annoying element, banner, or floating sidebar right on this webpage to zap and hide it permanently.
+            </p>
+            <button type="button" class="besing-btn-zapper-launch" id="btn-launch-zapper">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+              <span>Launch Element Zapper</span>
+            </button>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-toggle-row">
+              <div>
+                <div class="besing-toggle-title">Auto-Clean Cookie & Popup Overlays</div>
+                <div class="besing-toggle-desc">Automatically blocks generic consent banners, modals, and newsletter overlays</div>
+              </div>
+              <label class="besing-switch besing-switch-sm">
+                <input type="checkbox" id="chk-auto-clean" ${enableAutoClean ? 'checked' : ''}>
+                <span class="besing-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row" style="margin-bottom:6px;">
+              <span style="font-size:11px;font-weight:700;color:#cbd5e1;">Zapped Elements on this Website (${blockedSelectors.length})</span>
+              ${blockedSelectors.length > 0 ? '<button type="button" class="besing-btn-sub-action" id="btn-clear-zapped" style="color:#f87171;">Clear All</button>' : ''}
+            </div>
+            <div class="besing-zapped-list">
+              ${blockedListHtml}
+            </div>
+          </div>
+        `;
       } else {
         specificControls = `
           <div class="besing-config-section">
@@ -2848,6 +3142,54 @@
         if (chkCopy) chkCopy.onchange = saveForceCopy;
         if (chkPaste) chkPaste.onchange = saveForceCopy;
         if (chkContext) chkContext.onchange = saveForceCopy;
+      } else if (m.id === 'ad-cleaner') {
+        const btnLaunch = body.querySelector('#btn-launch-zapper');
+        const chkAutoClean = body.querySelector('#chk-auto-clean');
+        const btnClearAll = body.querySelector('#btn-clear-zapped');
+
+        if (btnLaunch) {
+          btnLaunch.onclick = () => {
+            this.closeModal();
+            const currentHost = this.storage.getCurrentHost();
+            const currentCfg = this.storage.getScriptConfig(m.id, currentHost);
+            if (typeof m.init === 'function' && !m.running) {
+              m.init(currentCfg);
+            }
+            if (typeof m.startZapper === 'function') {
+              m.startZapper(async (sel, currentList) => {
+                await this.applyScriptConfig(m.id, { blockedSelectors: currentList });
+              });
+            }
+          };
+        }
+
+        if (chkAutoClean) {
+          chkAutoClean.onchange = async () => {
+            await this.applyScriptConfig(m.id, { enableAutoClean: chkAutoClean.checked });
+          };
+        }
+
+        if (btnClearAll) {
+          btnClearAll.onclick = async () => {
+            await this.applyScriptConfig(m.id, { blockedSelectors: [] });
+            this.renderBody();
+          };
+        }
+
+        body.querySelectorAll('.besing-btn-restore-zapped').forEach(btn => {
+          btn.onclick = async (e) => {
+            e.stopPropagation();
+            const idx = Number(btn.getAttribute('data-index'));
+            const currentHost = this.storage.getCurrentHost();
+            const currentCfg = this.storage.getScriptConfig(m.id, currentHost);
+            const list = Array.isArray(currentCfg.blockedSelectors) ? [...currentCfg.blockedSelectors] : [];
+            if (idx >= 0 && idx < list.length) {
+              list.splice(idx, 1);
+              await this.applyScriptConfig(m.id, { blockedSelectors: list });
+              this.renderBody();
+            }
+          };
+        });
       }
     }
 
@@ -3062,6 +3404,16 @@
         .besing-override-tag.tag-site-off { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
         .besing-override-actions { display: flex; align-items: center; gap: 6px; }
         .besing-select-sm { background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.1); color: #f1f5f9; border-radius: 6px; padding: 3px 6px; font-size: 10px; outline: none; }
+        .besing-zapper-hero-section { background: linear-gradient(135deg, rgba(239, 68, 68, 0.12), rgba(15, 23, 42, 0.65)); border: 1px solid rgba(239, 68, 68, 0.35); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+        .besing-btn-zapper-launch { display: flex; align-items: center; justify-content: center; gap: 8px; background: linear-gradient(135deg, #ef4444, #dc2626); border: none; border-radius: 8px; color: #fff; font-size: 12px; font-weight: 700; padding: 9px 16px; cursor: pointer; box-shadow: 0 4px 14px rgba(239, 68, 68, 0.35); transition: all 0.18s ease; }
+        .besing-btn-zapper-launch:hover { background: linear-gradient(135deg, #f87171, #ef4444); transform: translateY(-1px); box-shadow: 0 6px 18px rgba(239, 68, 68, 0.45); }
+        .besing-shortcut-badge { background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15); color: #fca5a5; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 6px; font-family: monospace; }
+        .besing-zapped-list { display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; padding-right: 4px; }
+        .besing-zapped-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 6px 8px; }
+        .besing-zapped-selector { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; color: #fca5a5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+        .besing-btn-restore-zapped { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 11px; font-weight: 700; width: 22px; height: 22px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease; flex-shrink: 0; }
+        .besing-btn-restore-zapped:hover { background: #ef4444; color: #fff; }
+        .besing-zapped-empty { font-size: 11px; color: #64748b; text-align: center; padding: 12px 6px; font-style: italic; }
       `;
       shadow.appendChild(style);
     }

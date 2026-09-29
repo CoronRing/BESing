@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Script Manager
@@ -1643,6 +1643,7 @@ def build():
           filtered.forEach(m => {{
             const card = document.createElement('div');
             card.className = 'besing-ext-card';
+            card.setAttribute('data-id', m.id);
             const currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'site-off' | 'on'
 
             const overrides = this.storage.getScriptSiteOverrides(m.id);
@@ -1955,6 +1956,61 @@ def build():
             </div>
           </div>
         `;
+      }} else if (m.id === 'ad-cleaner') {{
+        const enableAutoClean = cfg.enableAutoClean !== false;
+        const blockedSelectors = Array.isArray(cfg.blockedSelectors) ? cfg.blockedSelectors : [];
+        let blockedListHtml = '';
+        if (blockedSelectors.length === 0) {{
+          blockedListHtml = `<div class="besing-zapped-empty">No custom elements zapped on this site yet.</div>`;
+        }} else {{
+          blockedListHtml = blockedSelectors.map((sel, idx) => `
+            <div class="besing-zapped-item">
+              <code class="besing-zapped-selector" title="${{sel}}">${{sel}}</code>
+              <button type="button" class="besing-btn-restore-zapped" data-index="${{idx}}" title="Restore (unblock) this element">✕</button>
+            </div>
+          `).join('');
+        }}
+
+        specificControls = `
+          <div class="besing-config-section besing-zapper-hero-section">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <span style="font-size:12px;font-weight:700;color:#f87171;display:flex;align-items:center;gap:6px;">
+                <span>🎯</span> Interactive Element Zapper
+              </span>
+              <span class="besing-shortcut-badge" title="Global Shortcut: Press Alt + Z anywhere on the webpage">Alt + Z</span>
+            </div>
+            <p style="font-size:11px;color:#cbd5e1;line-height:1.4;margin:0;">
+              Point and click on any annoying element, banner, or floating sidebar right on this webpage to zap and hide it permanently.
+            </p>
+            <button type="button" class="besing-btn-zapper-launch" id="btn-launch-zapper">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+              <span>Launch Element Zapper</span>
+            </button>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-toggle-row">
+              <div>
+                <div class="besing-toggle-title">Auto-Clean Cookie & Popup Overlays</div>
+                <div class="besing-toggle-desc">Automatically blocks generic consent banners, modals, and newsletter overlays</div>
+              </div>
+              <label class="besing-switch besing-switch-sm">
+                <input type="checkbox" id="chk-auto-clean" ${{enableAutoClean ? 'checked' : ''}}>
+                <span class="besing-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row" style="margin-bottom:6px;">
+              <span style="font-size:11px;font-weight:700;color:#cbd5e1;">Zapped Elements on this Website (${{blockedSelectors.length}})</span>
+              ${{blockedSelectors.length > 0 ? '<button type="button" class="besing-btn-sub-action" id="btn-clear-zapped" style="color:#f87171;">Clear All</button>' : ''}}
+            </div>
+            <div class="besing-zapped-list">
+              ${{blockedListHtml}}
+            </div>
+          </div>
+        `;
       }} else {{
         specificControls = `
           <div class="besing-config-section">
@@ -2140,6 +2196,54 @@ def build():
         if (chkCopy) chkCopy.onchange = saveForceCopy;
         if (chkPaste) chkPaste.onchange = saveForceCopy;
         if (chkContext) chkContext.onchange = saveForceCopy;
+      }} else if (m.id === 'ad-cleaner') {{
+        const btnLaunch = body.querySelector('#btn-launch-zapper');
+        const chkAutoClean = body.querySelector('#chk-auto-clean');
+        const btnClearAll = body.querySelector('#btn-clear-zapped');
+
+        if (btnLaunch) {{
+          btnLaunch.onclick = () => {{
+            this.closeModal();
+            const currentHost = this.storage.getCurrentHost();
+            const currentCfg = this.storage.getScriptConfig(m.id, currentHost);
+            if (typeof m.init === 'function' && !m.running) {{
+              m.init(currentCfg);
+            }}
+            if (typeof m.startZapper === 'function') {{
+              m.startZapper(async (sel, currentList) => {{
+                await this.applyScriptConfig(m.id, {{ blockedSelectors: currentList }});
+              }});
+            }}
+          }};
+        }}
+
+        if (chkAutoClean) {{
+          chkAutoClean.onchange = async () => {{
+            await this.applyScriptConfig(m.id, {{ enableAutoClean: chkAutoClean.checked }});
+          }};
+        }}
+
+        if (btnClearAll) {{
+          btnClearAll.onclick = async () => {{
+            await this.applyScriptConfig(m.id, {{ blockedSelectors: [] }});
+            this.renderBody();
+          }};
+        }}
+
+        body.querySelectorAll('.besing-btn-restore-zapped').forEach(btn => {{
+          btn.onclick = async (e) => {{
+            e.stopPropagation();
+            const idx = Number(btn.getAttribute('data-index'));
+            const currentHost = this.storage.getCurrentHost();
+            const currentCfg = this.storage.getScriptConfig(m.id, currentHost);
+            const list = Array.isArray(currentCfg.blockedSelectors) ? [...currentCfg.blockedSelectors] : [];
+            if (idx >= 0 && idx < list.length) {{
+              list.splice(idx, 1);
+              await this.applyScriptConfig(m.id, {{ blockedSelectors: list }});
+              this.renderBody();
+            }}
+          }};
+        }});
       }}
     }}
 
@@ -2354,6 +2458,16 @@ def build():
         .besing-override-tag.tag-site-off {{ background: rgba(245, 158, 11, 0.15); color: #fbbf24; }}
         .besing-override-actions {{ display: flex; align-items: center; gap: 6px; }}
         .besing-select-sm {{ background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.1); color: #f1f5f9; border-radius: 6px; padding: 3px 6px; font-size: 10px; outline: none; }}
+        .besing-zapper-hero-section {{ background: linear-gradient(135deg, rgba(239, 68, 68, 0.12), rgba(15, 23, 42, 0.65)); border: 1px solid rgba(239, 68, 68, 0.35); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }}
+        .besing-btn-zapper-launch {{ display: flex; align-items: center; justify-content: center; gap: 8px; background: linear-gradient(135deg, #ef4444, #dc2626); border: none; border-radius: 8px; color: #fff; font-size: 12px; font-weight: 700; padding: 9px 16px; cursor: pointer; box-shadow: 0 4px 14px rgba(239, 68, 68, 0.35); transition: all 0.18s ease; }}
+        .besing-btn-zapper-launch:hover {{ background: linear-gradient(135deg, #f87171, #ef4444); transform: translateY(-1px); box-shadow: 0 6px 18px rgba(239, 68, 68, 0.45); }}
+        .besing-shortcut-badge {{ background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15); color: #fca5a5; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 6px; font-family: monospace; }}
+        .besing-zapped-list {{ display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; padding-right: 4px; }}
+        .besing-zapped-item {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 6px 8px; }}
+        .besing-zapped-selector {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; color: #fca5a5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }}
+        .besing-btn-restore-zapped {{ background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 11px; font-weight: 700; width: 22px; height: 22px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease; flex-shrink: 0; }}
+        .besing-btn-restore-zapped:hover {{ background: #ef4444; color: #fff; }}
+        .besing-zapped-empty {{ font-size: 11px; color: #64748b; text-align: center; padding: 12px 6px; font-style: italic; }}
       `;
       shadow.appendChild(style);
     }}

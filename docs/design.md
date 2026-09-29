@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.5.2  
+**Version:** 1.5.3  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -249,7 +249,10 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 ### 7.10 Centralized Site-Specific Rules & Polished Secondary Header UI
 - **Unified Settings Site Management**: Site-specific overrides and cross-domain exclusions (`site-off` / `site`) are unified into the primary Settings page under the "Site Specific Rules" section. Script-specific secondary configuration menus no longer feature duplicate or cluttered override lists, keeping each script's sub-panel laser-focused on its own functional controls (e.g. font zoom levels, background brightness filters, force-copy checkboxes). Users can manage, toggle, remove, or add domain-specific rules directly from Settings across all bundled modules.
 - **Two-Tier Secondary Header Layout**: The secondary configuration page features a clean two-row header: a top utility bar housing the `< All Scripts` back button and a segmented tri-state status toggle (`OFF`, `SITE ONLY`, `ON (GLOBAL)` or `OFF (ALL)`, `OFF (SITE)`, `ON (GLOBAL)`), followed by a dedicated title row displaying the script's icon, full name, version, and category tag.
-- **Vibrant Segmented Control Styling**: The secondary status buttons use dedicated high-contrast status themes (dark slate for complete OFF, glowing cyan for Site-Only, amber for domain exclusions, and emerald green for global ON) with rounded pill encapsulation, eliminating text crowding and unstyled button artifacts.
 
-
-
+### 7.11 Interactive Element Zapper & Ad Cleaner Architecture (v1.5.3)
+- **Point-and-Click DOM Elimination**: Unlike traditional native OS right-click context menu options (which are prohibited by browser security in userscript sandbox environments and require Chrome MV3 `contextMenus` permissions), BESing provides an interactive in-page Element Zapper modeled after uBlock Origin.
+- **Floating HUD & Target Precision Highlighter**: When launched via the secondary menu button or global shortcut (`Alt + Z`), the Zapper closes the manager popover and attaches a high-stacking floating head-up display (`#besing-zapper-hud`) at `z-index: 2147483647` with live action guidance (`Hover to target • Left-Click to Zap • Esc / Right-Click to Exit`). A non-interactive targeting highlight box outlines hovered elements in real time, projecting a precision tag badge displaying the computed CSS selector and element dimensions.
+- **Resilient Selector Engine**: The selector calculation algorithm (`computeSelector`) prioritizes clean DOM identifiers (omitting numeric or internal `__besing` IDs), falls back to concise non-utility CSS classes when document frequency is low, and constructs stable nth-child parent-path selectors if classes are dynamic.
+- **Smooth Animation & Live Dynamic Style Injection**: Clicking an element executes an instant shrink-and-fade animation (`scale(0.88)` and `opacity: 0`), immediately hides the element, and appends the computed selector to `blockedSelectors`. A dynamic `<style id="besing-ad-cleaner-style">` element applies `display: none !important; visibility: hidden !important;` to all blocked selectors across the page.
+- **Bi-Directional Persistence & Restoration**: Elements zapped via point-and-click or `Alt + Z` are automatically synchronized to persistent storage under `siteRules[host].configs['ad-cleaner'].blockedSelectors`. In the script's secondary menu, users are presented with a scrollable list of all zapped elements on the current website, complete with individual restore buttons (`✕`) to unblock specific elements and a "Clear All" button to restore all zapped content simultaneously.

@@ -73,12 +73,12 @@
   },
   {
     "id": "ad-cleaner",
-    "name": "Ad Cleaner Lite",
-    "version": "1.0.0",
-    "description": "Hides intrusive floating overlays, sticky marketing banners, and cookie consent popups.",
+    "name": "Ad Cleaner & Element Zapper",
+    "version": "1.2.0",
+    "description": "Hides intrusive overlays, cookie popups, and provides an interactive point-and-click Element Zapper.",
     "category": "Privacy",
     "author": "BESing Team",
-    "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z\"></path></svg>",
+    "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><polygon points=\"13 2 3 14 12 14 11 22 21 10 12 10 13 2\"></polygon></svg>",
     "githubPath": "scripts/ad-cleaner/ad-cleaner.user.js",
     "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/ad-cleaner/ad-cleaner.user.js",
     "localUrl": "http://127.0.0.1:8765/scripts/ad-cleaner/ad-cleaner.user.js"
