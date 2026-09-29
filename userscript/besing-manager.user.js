@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.6.1
+// @version      1.6.2
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -192,8 +192,9 @@
         this.enabledScripts[scriptId] = true;
         delete this.siteRules[h].scripts[scriptId];
       } else if (mode === 'site') {
-        // Active on this site only
+        // Active on this site only; globally OFF elsewhere
         this.siteRules[h].scripts[scriptId] = true;
+        this.enabledScripts[scriptId] = false;
       } else if (mode === 'site-off') {
         // Explicitly disabled on this site only (e.g. RBC), global stays enabled
         this.siteRules[h].scripts[scriptId] = false;
@@ -2262,7 +2263,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.6.1';
+    static CURRENT_VERSION = '1.6.2';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -3644,16 +3645,16 @@
             }
 
             let rotatorText = 'off';
-            let rotatorTitle = 'State: OFF. Click to turn ON';
+            let rotatorTitle = 'State: OFF. Click to turn ON globally';
             if (currentMode === 'on') {
               rotatorText = 'on';
-              rotatorTitle = 'State: GLOBAL ON. Click to exclude on this site';
+              rotatorTitle = 'State: GLOBAL ON. Click to activate on THIS SITE ONLY';
             } else if (currentMode === 'site') {
-              rotatorText = 'site only';
-              rotatorTitle = `State: SITE ONLY (${currentHost}). Click to turn OFF`;
+              rotatorText = 'site on';
+              rotatorTitle = `State: SITE ON (${currentHost}). Click to turn OFF globally`;
             } else if (currentMode === 'site-off') {
               rotatorText = 'site off';
-              rotatorTitle = `State: EXCLUDED on ${currentHost} (Active elsewhere). Click to turn OFF globally`;
+              rotatorTitle = `State: EXCLUDED on ${currentHost}. Click to turn OFF globally`;
             }
 
             this.setSafeHTML(card, `
@@ -3685,10 +3686,10 @@
               if (currentMode === 'off') {
                 nextMode = 'on';
               } else if (currentMode === 'on') {
-                nextMode = 'site-off';
-              } else if (currentMode === 'site-off') {
-                nextMode = 'off';
+                nextMode = 'site';
               } else if (currentMode === 'site') {
+                nextMode = 'off';
+              } else if (currentMode === 'site-off') {
                 nextMode = 'off';
               }
               await this.storage.setScriptMode(m.id, nextMode, currentHost);

@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -311,8 +311,9 @@ def build():
         this.enabledScripts[scriptId] = true;
         delete this.siteRules[h].scripts[scriptId];
       }} else if (mode === 'site') {{
-        // Active on this site only
+        // Active on this site only; globally OFF elsewhere
         this.siteRules[h].scripts[scriptId] = true;
+        this.enabledScripts[scriptId] = false;
       }} else if (mode === 'site-off') {{
         // Explicitly disabled on this site only (e.g. RBC), global stays enabled
         this.siteRules[h].scripts[scriptId] = false;
@@ -1876,16 +1877,16 @@ def build():
             }}
 
             let rotatorText = 'off';
-            let rotatorTitle = 'State: OFF. Click to turn ON';
+            let rotatorTitle = 'State: OFF. Click to turn ON globally';
             if (currentMode === 'on') {{
               rotatorText = 'on';
-              rotatorTitle = 'State: GLOBAL ON. Click to exclude on this site';
+              rotatorTitle = 'State: GLOBAL ON. Click to activate on THIS SITE ONLY';
             }} else if (currentMode === 'site') {{
-              rotatorText = 'site only';
-              rotatorTitle = `State: SITE ONLY (${{currentHost}}). Click to turn OFF`;
+              rotatorText = 'site on';
+              rotatorTitle = `State: SITE ON (${{currentHost}}). Click to turn OFF globally`;
             }} else if (currentMode === 'site-off') {{
               rotatorText = 'site off';
-              rotatorTitle = `State: EXCLUDED on ${{currentHost}} (Active elsewhere). Click to turn OFF globally`;
+              rotatorTitle = `State: EXCLUDED on ${{currentHost}}. Click to turn OFF globally`;
             }}
 
             this.setSafeHTML(card, `
@@ -1917,10 +1918,10 @@ def build():
               if (currentMode === 'off') {{
                 nextMode = 'on';
               }} else if (currentMode === 'on') {{
-                nextMode = 'site-off';
-              }} else if (currentMode === 'site-off') {{
-                nextMode = 'off';
+                nextMode = 'site';
               }} else if (currentMode === 'site') {{
+                nextMode = 'off';
+              }} else if (currentMode === 'site-off') {{
                 nextMode = 'off';
               }}
               await this.storage.setScriptMode(m.id, nextMode, currentHost);
