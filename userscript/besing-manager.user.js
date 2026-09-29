@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Script Manager
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.5.0
+// @version      1.5.1
 // @description  Universal Browser Extension & Greasy Fork Script Manager with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -142,27 +142,16 @@
       await BESAdapter.set('site_rules', this.siteRules);
     }
 
-    // Mode: 'off' | 'site' | 'on'
+    // Mode: 'off' | 'site' | 'site-off' | 'on'
     getScriptMode(scriptId, host = this.getCurrentHost()) {
       const h = (host || '').toLowerCase().trim();
       const siteConfig = this.siteRules[h];
 
-      // 1. Explicit site override to disabled
-      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] === false) {
-        return 'off';
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {
+        return siteConfig.scripts[scriptId] ? 'site' : 'site-off';
       }
 
-      // 2. Global ON
-      if (this.enabledScripts[scriptId]) {
-        return 'on';
-      }
-
-      // 3. Site Only ON
-      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] === true) {
-        return 'site';
-      }
-
-      return 'off';
+      return this.enabledScripts[scriptId] ? 'on' : 'off';
     }
 
     isScriptActiveOnSite(scriptId, host = this.getCurrentHost()) {
@@ -170,13 +159,11 @@
       if (this.isSiteDisabledAll(h)) return false;
 
       const siteConfig = this.siteRules[h];
-      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] === false) {
-        return false;
+      if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {
+        return !!siteConfig.scripts[scriptId];
       }
 
-      if (this.enabledScripts[scriptId]) return true;
-
-      return !!(siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId]);
+      return !!this.enabledScripts[scriptId];
     }
 
     async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {
@@ -185,24 +172,78 @@
       if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
 
       if (mode === 'on') {
-        // Global ON: active across all sites, clear local site override
+        // Global ON: active across all sites by default; remove any site override for this host
         this.enabledScripts[scriptId] = true;
         delete this.siteRules[h].scripts[scriptId];
       } else if (mode === 'site') {
-        // Site Only: active ONLY on this site
-        this.enabledScripts[scriptId] = false;
+        // Active on this site only
         this.siteRules[h].scripts[scriptId] = true;
-      } else {
-        // Turn OFF: wipe globally and for this site
-        this.enabledScripts[scriptId] = false;
-        delete this.siteRules[h].scripts[scriptId];
+      } else if (mode === 'site-off') {
+        // Explicitly disabled on this site only (e.g. RBC), global stays enabled
+        this.siteRules[h].scripts[scriptId] = false;
         if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
           delete this.siteRules[h].configs[scriptId];
+        }
+      } else {
+        // OFF: If there was a site override, clear it (and wipe its site config)
+        if (this.siteRules[h].scripts[scriptId] !== undefined) {
+          delete this.siteRules[h].scripts[scriptId];
+          if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
+            delete this.siteRules[h].configs[scriptId];
+          }
+        } else {
+          // Otherwise turn off globally
+          this.enabledScripts[scriptId] = false;
         }
       }
 
       this.cleanupSiteRule(h);
       await BESAdapter.set('enabled_scripts', this.enabledScripts);
+      await BESAdapter.set('site_rules', this.siteRules);
+    }
+
+    getScriptSiteOverrides(scriptId) {
+      const list = [];
+      Object.keys(this.siteRules || {}).forEach(h => {
+        const rule = this.siteRules[h];
+        if (rule && rule.scripts && rule.scripts[scriptId] !== undefined) {
+          list.push({
+            host: h,
+            mode: rule.scripts[scriptId] ? 'site' : 'site-off',
+            enabled: !!rule.scripts[scriptId],
+            hasConfig: !!(rule.configs && rule.configs[scriptId])
+          });
+        }
+      });
+      return list;
+    }
+
+    async setSiteOverride(scriptId, host, mode) {
+      const h = (host || '').toLowerCase().trim();
+      if (!h) return;
+      if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+      if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
+
+      if (mode === 'site' || mode === true) {
+        this.siteRules[h].scripts[scriptId] = true;
+      } else if (mode === 'site-off' || mode === false) {
+        this.siteRules[h].scripts[scriptId] = false;
+        if (this.siteRules[h].configs) delete this.siteRules[h].configs[scriptId];
+      } else {
+        delete this.siteRules[h].scripts[scriptId];
+        if (this.siteRules[h].configs) delete this.siteRules[h].configs[scriptId];
+      }
+
+      this.cleanupSiteRule(h);
+      await BESAdapter.set('site_rules', this.siteRules);
+    }
+
+    async removeSiteOverride(scriptId, host) {
+      const h = (host || '').toLowerCase().trim();
+      if (!h || !this.siteRules[h]) return;
+      if (this.siteRules[h].scripts) delete this.siteRules[h].scripts[scriptId];
+      if (this.siteRules[h].configs) delete this.siteRules[h].configs[scriptId];
+      this.cleanupSiteRule(h);
       await BESAdapter.set('site_rules', this.siteRules);
     }
 
@@ -1164,13 +1205,15 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.5.0';
+    static CURRENT_VERSION = '1.5.1';
 
     static isStableLoader() {
-      return typeof window !== 'undefined' && (
-        window.__BESING_ENVIRONMENT__ === 'stable-loader' ||
-        typeof window.__BESING_AUTO_UPDATE__ === 'function' ||
-        typeof window.__BESING_RELOAD_LATEST__ === 'function'
+      const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || (typeof window !== 'undefined' && window);
+      return typeof win !== 'undefined' && (
+        win.__BESING_ENVIRONMENT__ === 'stable-loader' ||
+        typeof win.__BESING_AUTO_UPDATE__ === 'function' ||
+        typeof win.__BESING_RELOAD_LATEST__ === 'function' ||
+        (typeof window !== 'undefined' && (window.__BESING_ENVIRONMENT__ === 'stable-loader' || typeof window.__BESING_AUTO_UPDATE__ === 'function'))
       );
     }
 
@@ -1237,15 +1280,36 @@
 
         let autoUpdated = false;
         if (hasUpdate && isStable) {
-          if (typeof window.__BESING_AUTO_UPDATE__ === 'function') {
-            await window.__BESING_AUTO_UPDATE__(true);
-            autoUpdated = true;
-          } else if (typeof GM_setValue === 'function') {
-            const newCode = await BESUpdater.fetchText(channel.userUrl);
-            if (newCode && newCode.length > 500) {
-              GM_setValue('besing_cached_code', newCode);
-              GM_setValue('besing_cached_version', remoteVer);
-              autoUpdated = true;
+          const autoUpdateFn = (typeof window !== 'undefined' && window.__BESING_AUTO_UPDATE__) ||
+                               (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_AUTO_UPDATE__);
+          if (typeof autoUpdateFn === 'function') {
+            try {
+              const uRes = await autoUpdateFn(true);
+              if (uRes && uRes.ok !== false) autoUpdated = true;
+            } catch (e) {
+              console.warn('[BESUpdater] Auto-update hook failed:', e);
+            }
+          }
+
+          if (!autoUpdated) {
+            // Direct download & update into GM cache
+            try {
+              const newCode = await BESUpdater.fetchText(channel.userUrl);
+              if (newCode && newCode.length > 500) {
+                if (typeof GM_setValue === 'function') {
+                  GM_setValue('besing_cached_code', newCode);
+                  GM_setValue('besing_cached_version', remoteVer);
+                  GM_setValue('besing_last_check', Date.now());
+                  autoUpdated = true;
+                } else if (BESAdapter.isGM) {
+                  await BESAdapter.set('besing_cached_code', newCode);
+                  await BESAdapter.set('besing_cached_version', remoteVer);
+                  await BESAdapter.set('besing_last_check', Date.now());
+                  autoUpdated = true;
+                }
+              }
+            } catch (err) {
+              console.warn('[BESUpdater] Fallback download failed:', err);
             }
           }
         }
@@ -2190,10 +2254,10 @@
                 row.innerHTML = `
                   <div class="besing-site-rule-info">
                     <span class="besing-site-rule-name">${m.name}</span>
-                    <span class="besing-site-rule-tag" style="background:rgba(56,189,248,0.15);color:#38bdf8;">${isEnabled ? 'Site ON' : 'Site OFF'}</span>
+                    <span class="besing-site-rule-tag" style="${isEnabled ? 'background:rgba(56,189,248,0.15);color:#38bdf8;' : 'background:rgba(245,158,11,0.15);color:#fbbf24;'}">${isEnabled ? 'Site ON' : 'Excluded (OFF)'}</span>
                   </div>
                   <div class="besing-site-rule-actions">
-                    <label class="besing-switch besing-switch-sm">
+                    <label class="besing-switch besing-switch-sm" title="Toggle between Site ON and Excluded (OFF)">
                       <input type="checkbox" ${isEnabled ? 'checked' : ''}>
                       <span class="besing-slider"></span>
                     </label>
@@ -2201,12 +2265,12 @@
                   </div>
                 `;
                 row.querySelector('input').onchange = async (e) => {
-                  await this.storage.toggleSiteRule(host, scriptId, e.target.checked);
+                  await this.storage.setSiteOverride(scriptId, host, e.target.checked ? 'site' : 'site-off');
                   renderSiteRulesList();
                   this.refreshCurrentSiteModules();
                 };
                 row.querySelector('.besing-rule-remove').onclick = async () => {
-                  await this.storage.removeSiteRule(host, scriptId);
+                  await this.storage.removeSiteOverride(scriptId, host);
                   renderSiteRulesList();
                   this.refreshCurrentSiteModules();
                 };
@@ -2263,16 +2327,35 @@
           filtered.forEach(m => {
             const card = document.createElement('div');
             card.className = 'besing-ext-card';
-            const currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'on'
+            const currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'site-off' | 'on'
+
+            const overrides = this.storage.getScriptSiteOverrides(m.id);
+            let overrideBadge = '';
+            if (overrides.length > 0) {
+              const tip = overrides.map(o => `${o.host}: ${o.mode === 'site' ? 'Site ON' : 'Excluded (OFF)'}`).join(', ');
+              overrideBadge = `<span class="besing-site-override-pill" title="Site overrides: ${tip}">📍 ${overrides.length} site override${overrides.length > 1 ? 's' : ''}</span>`;
+            }
+
+            let rotatorText = 'off';
+            let rotatorTitle = 'State: OFF. Click to turn ON';
+            if (currentMode === 'on') {
+              rotatorText = 'on';
+              rotatorTitle = 'State: GLOBAL ON. Click to exclude on this site';
+            } else if (currentMode === 'site') {
+              rotatorText = 'site only';
+              rotatorTitle = `State: SITE ONLY (${currentHost}). Click to turn OFF`;
+            } else if (currentMode === 'site-off') {
+              rotatorText = 'site off';
+              rotatorTitle = `State: EXCLUDED on ${currentHost} (Active elsewhere). Click to turn OFF globally`;
+            }
 
             card.innerHTML = `
               <div class="besing-ext-info-group">
                 <div class="besing-ext-icon">${m.icon || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>'}</div>
                 <div class="besing-ext-meta">
                   <div class="besing-ext-title-row">
-                    <span class="besing-ext-name">${m.name}</span>
-                    <span class="besing-ext-ver">v${m.version || '1.0.0'}</span>
-                    ${m.category ? `<span class="besing-cat-badge">${m.category}</span>` : ''}
+                    <span class="besing-ext-name" title="${m.name} • v${m.version || '1.0.0'} • ${m.category || 'General'}">${m.name}</span>
+                    ${overrideBadge}
                   </div>
                   <p class="besing-ext-desc">${m.description || ''}</p>
                 </div>
@@ -2281,9 +2364,9 @@
                 <button type="button" class="besing-btn-script-gear" data-script-id="${m.id}" title="Configure ${m.name}">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 </button>
-                <button type="button" class="besing-rotator-toggle mode-${currentMode}" data-script-id="${m.id}" title="State: ${currentMode.toUpperCase()}. Click to cycle (OFF -> ON -> SITE ONLY)">
+                <button type="button" class="besing-rotator-toggle mode-${currentMode}" data-script-id="${m.id}" title="${rotatorTitle}">
                   <span class="besing-rotator-knob"></span>
-                  <span class="besing-rotator-text">site only</span>
+                  <span class="besing-rotator-text">${rotatorText}</span>
                 </button>
               </div>
             `;
@@ -2291,19 +2374,28 @@
             const rotatorBtn = card.querySelector('.besing-rotator-toggle');
             rotatorBtn.onclick = async (e) => {
               e.stopPropagation();
-              // Cycle order: off -> on (green) -> site (blue, "site only") -> off (grey)
               let nextMode = 'on';
               if (currentMode === 'off') {
                 nextMode = 'on';
               } else if (currentMode === 'on') {
-                nextMode = 'site';
-              } else {
+                nextMode = 'site-off';
+              } else if (currentMode === 'site-off') {
+                nextMode = 'off';
+              } else if (currentMode === 'site') {
                 nextMode = 'off';
               }
               await this.storage.setScriptMode(m.id, nextMode, currentHost);
               renderCards();
               this.refreshCurrentSiteModules();
             };
+
+            const pill = card.querySelector('.besing-site-override-pill');
+            if (pill) {
+              pill.onclick = (e) => {
+                e.stopPropagation();
+                this.openScriptConfig(m.id);
+              };
+            }
 
             const btnGear = card.querySelector('.besing-btn-script-gear');
             if (btnGear) {
@@ -2348,12 +2440,20 @@
       const currentMode = this.storage.getScriptMode(m.id, currentHost);
       const cfg = this.storage.getScriptConfig(m.id, currentHost);
 
+      const isGloballyOn = !!this.storage.enabledScripts[m.id];
       let scopeNotice = '';
       if (currentMode === 'site') {
         scopeNotice = `
           <div class="besing-config-scope site">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></svg>
             <div><strong>Site-Only Config (${currentHost}):</strong> Settings are saved exclusively for this site and bypass global settings. Switching to OFF wipes this site's custom settings.</div>
+          </div>
+        `;
+      } else if (currentMode === 'site-off') {
+        scopeNotice = `
+          <div class="besing-config-scope site-off">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+            <div><strong style="color:#fbbf24;">Excluded on ${currentHost}:</strong> Disabled specifically on this website, while remaining globally active on other sites.</div>
           </div>
         `;
       } else if (currentMode === 'on') {
@@ -2366,7 +2466,7 @@
       } else {
         scopeNotice = `
           <div class="besing-config-scope off">
-            <div>⚪ <strong>Script is currently OFF.</strong> Switch toggle to <strong>SITE</strong> or <strong>ON</strong> to activate.</div>
+            <div>⚪ <strong>Script is currently OFF.</strong> Switch toggle to <strong>${isGloballyOn ? 'ON (GLOBAL)' : 'SITE ONLY'}</strong> to activate.</div>
           </div>
         `;
       }
@@ -2550,6 +2650,64 @@
         `;
       }
 
+      const overrides = this.storage.getScriptSiteOverrides(m.id);
+      let overridesListHtml = '';
+      if (overrides.length === 0) {
+        overridesListHtml = `<div style="font-size:11px;color:#64748b;padding:4px 0;">No site-specific overrides for this script. Add a domain override below to manage without visiting.</div>`;
+      } else {
+        overridesListHtml = overrides.map(o => `
+          <div class="besing-override-item">
+            <div class="besing-override-host-group">
+              <span class="besing-override-host">${o.host}</span>
+              <span class="besing-override-tag ${o.mode === 'site' ? 'tag-site' : 'tag-site-off'}">
+                ${o.mode === 'site' ? 'Site ON' : 'Excluded (OFF)'}
+              </span>
+            </div>
+            <div class="besing-override-actions">
+              <button type="button" class="besing-btn-sub-action btn-toggle-override" data-host="${o.host}" data-mode="${o.mode}">
+                ${o.mode === 'site' ? 'Make Excluded' : 'Make Site ON'}
+              </button>
+              <button type="button" class="besing-rule-remove btn-del-override" data-host="${o.host}" title="Remove override">✕</button>
+            </div>
+          </div>
+        `).join('');
+      }
+
+      const overridesSectionHtml = `
+        <div class="besing-config-section" style="margin-top:10px;">
+          <div class="besing-section-header-row">
+            <span class="besing-section-title">Site-Specific Overrides (${overrides.length})</span>
+            <span style="font-size:10px;color:#94a3b8;">Manage across all websites</span>
+          </div>
+          <div class="besing-overrides-list" style="margin-top:6px;">
+            ${overridesListHtml}
+          </div>
+          <div class="besing-add-override-row" style="margin-top:10px;display:flex;gap:6px;align-items:center;">
+            <input type="text" class="besing-input-sm" id="besing-new-override-host" placeholder="domain (e.g. rbc.com, google.com)" style="flex:1;">
+            <select class="besing-select-sm" id="besing-new-override-mode">
+              <option value="site">Site Only (Active)</option>
+              <option value="site-off">Excluded (Disabled)</option>
+            </select>
+            <button type="button" class="besing-btn-sub-action" id="besing-btn-add-override" style="color:#38bdf8;border-color:rgba(56,189,248,0.3);font-weight:700;">+ Add</button>
+          </div>
+        </div>
+      `;
+
+      let triButtonsHtml = '';
+      if (isGloballyOn) {
+        triButtonsHtml = `
+          <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off" title="Turn OFF globally on all sites">OFF (ALL)</button>
+          <button type="button" class="besing-tri-btn ${currentMode === 'site-off' ? 'active active-site-off' : ''}" data-mode="site-off" title="Disable only on ${currentHost}">OFF (SITE)</button>
+          <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on" title="Active on all sites">ON (GLOBAL)</button>
+        `;
+      } else {
+        triButtonsHtml = `
+          <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off" title="Turn OFF completely">OFF</button>
+          <button type="button" class="besing-tri-btn ${currentMode === 'site' ? 'active active-site' : ''}" data-mode="site" title="Active only on ${currentHost}">SITE ONLY</button>
+          <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on" title="Turn ON globally across all sites">ON (GLOBAL)</button>
+        `;
+      }
+
       body.innerHTML = `
         <div class="besing-secondary-header">
           <button type="button" class="besing-btn-back" id="besing-btn-back">
@@ -2560,13 +2718,11 @@
             <div class="besing-ext-icon sm">${m.icon || ''}</div>
             <div class="besing-secondary-meta">
               <span class="besing-secondary-title">${m.name}</span>
-              <span class="besing-ext-ver">v${m.version || '1.0.0'}</span>
+              <span class="besing-ext-ver" style="font-size:10px;color:#94a3b8;">v${m.version || '1.0.0'} • ${m.category || 'General'}</span>
             </div>
           </div>
-          <div class="besing-tri-toggle" title="Toggle: OFF, SITE (${currentHost}), or ON (Global)">
-            <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off">OFF</button>
-            <button type="button" class="besing-tri-btn ${currentMode === 'site' ? 'active active-site' : ''}" data-mode="site">SITE</button>
-            <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on">ON</button>
+          <div class="besing-tri-toggle" title="Status on ${currentHost}">
+            ${triButtonsHtml}
           </div>
         </div>
 
@@ -2574,6 +2730,7 @@
 
         <div class="besing-secondary-content" style="display:flex;flex-direction:column;gap:10px;">
           ${specificControls}
+          ${overridesSectionHtml}
         </div>
       `;
 
@@ -2589,6 +2746,7 @@
       // Bind Tri-Toggle in Secondary Menu
       const btnOff = body.querySelector('[data-mode="off"]');
       const btnSite = body.querySelector('[data-mode="site"]');
+      const btnSiteOff = body.querySelector('[data-mode="site-off"]');
       const btnOn = body.querySelector('[data-mode="on"]');
 
       const handleModeChange = async (newMode) => {
@@ -2599,7 +2757,46 @@
 
       if (btnOff) btnOff.onclick = (e) => { e.stopPropagation(); handleModeChange('off'); };
       if (btnSite) btnSite.onclick = (e) => { e.stopPropagation(); handleModeChange('site'); };
+      if (btnSiteOff) btnSiteOff.onclick = (e) => { e.stopPropagation(); handleModeChange('site-off'); };
       if (btnOn) btnOn.onclick = (e) => { e.stopPropagation(); handleModeChange('on'); };
+
+      // Bind Overrides actions
+      body.querySelectorAll('.btn-toggle-override').forEach(btn => {
+        btn.onclick = async (e) => {
+          e.stopPropagation();
+          const h = btn.getAttribute('data-host');
+          const curM = btn.getAttribute('data-mode');
+          const nextM = curM === 'site' ? 'site-off' : 'site';
+          await this.storage.setSiteOverride(m.id, h, nextM);
+          this.refreshCurrentSiteModules();
+          this.renderScriptConfig(body);
+        };
+      });
+
+      body.querySelectorAll('.btn-del-override').forEach(btn => {
+        btn.onclick = async (e) => {
+          e.stopPropagation();
+          const h = btn.getAttribute('data-host');
+          await this.storage.removeSiteOverride(m.id, h);
+          this.refreshCurrentSiteModules();
+          this.renderScriptConfig(body);
+        };
+      });
+
+      const btnAddOverride = body.querySelector('#besing-btn-add-override');
+      if (btnAddOverride) {
+        btnAddOverride.onclick = async (e) => {
+          e.stopPropagation();
+          const inputH = body.querySelector('#besing-new-override-host');
+          const selectM = body.querySelector('#besing-new-override-mode');
+          const rawH = (inputH ? inputH.value : '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+          if (!rawH) return;
+          const modeVal = selectM ? selectM.value : 'site';
+          await this.storage.setSiteOverride(m.id, rawH, modeVal);
+          this.refreshCurrentSiteModules();
+          this.renderScriptConfig(body);
+        };
+      }
 
       // Bind Handlers
       if (m.id === 'text-size-control') {
@@ -2898,6 +3095,21 @@
         .besing-test-text { background: rgba(255, 255, 255, 0.04); border-radius: 6px; padding: 6px 8px; font-size: 11px; color: #38bdf8; margin-bottom: 6px; }
         .besing-test-input { width: 100%; background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; padding: 6px 8px; font-size: 11px; color: #f1f5f9; outline: none; }
         .besing-test-input:focus { border-color: #10b981; }
+        .besing-site-override-pill { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: 600; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.25); padding: 1px 6px; border-radius: 9999px; cursor: pointer; transition: all 0.15s ease; }
+        .besing-site-override-pill:hover { background: rgba(56, 189, 248, 0.22); border-color: #38bdf8; color: #fff; }
+        .besing-rotator-toggle.mode-site-off { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.4); color: #fbbf24; }
+        .besing-rotator-toggle.mode-site-off .besing-rotator-knob { left: 20px; background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, 0.6); }
+        .besing-rotator-toggle.mode-site-off:hover { border-color: #f59e0b; }
+        .besing-config-scope.site-off { background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); color: #fcd34d; }
+        .besing-tri-btn.active.active-site-off { background: rgba(245, 158, 11, 0.25); color: #fbbf24; border-color: rgba(245, 158, 11, 0.5); box-shadow: 0 0 8px rgba(245, 158, 11, 0.3); }
+        .besing-override-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; background: rgba(15, 23, 42, 0.45); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 8px; margin-bottom: 5px; }
+        .besing-override-host-group { display: flex; align-items: center; gap: 6px; overflow: hidden; }
+        .besing-override-host { font-size: 11px; font-weight: 600; color: #f1f5f9; font-family: monospace; }
+        .besing-override-tag { font-size: 9px; font-weight: 700; padding: 2px 5px; border-radius: 4px; }
+        .besing-override-tag.tag-site { background: rgba(56, 189, 248, 0.15); color: #38bdf8; }
+        .besing-override-tag.tag-site-off { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+        .besing-override-actions { display: flex; align-items: center; gap: 6px; }
+        .besing-select-sm { background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.1); color: #f1f5f9; border-radius: 6px; padding: 3px 6px; font-size: 10px; outline: none; }
       `;
       shadow.appendChild(style);
     }

@@ -1170,3 +1170,98 @@
   border-color: #10b981;
 }
 
+.besing-site-override-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  padding: 1px 6px;
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.besing-site-override-pill:hover {
+  background: rgba(56, 189, 248, 0.22);
+  border-color: #38bdf8;
+  color: #fff;
+}
+.besing-rotator-toggle.mode-site-off {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+}
+.besing-rotator-toggle.mode-site-off .besing-rotator-knob {
+  left: 20px;
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.6);
+}
+.besing-rotator-toggle.mode-site-off:hover {
+  border-color: #f59e0b;
+}
+.besing-config-scope.site-off {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  color: #fcd34d;
+}
+.besing-tri-btn.active.active-site-off {
+  background: rgba(245, 158, 11, 0.25);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.5);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
+}
+.besing-override-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  margin-bottom: 5px;
+}
+.besing-override-host-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+.besing-override-host {
+  font-size: 11px;
+  font-weight: 600;
+  color: #f1f5f9;
+  font-family: monospace;
+}
+.besing-override-tag {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.besing-override-tag.tag-site {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+}
+.besing-override-tag.tag-site-off {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+.besing-override-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.besing-select-sm {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f1f5f9;
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 10px;
+  outline: none;
+}
+

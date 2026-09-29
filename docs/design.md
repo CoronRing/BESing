@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.5.0  
+**Version:** 1.5.1  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -226,5 +226,20 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
      - **Dragging Left (`< 0`)**: Lightens the current website background (e.g., deep blue becomes soft light pastel blue).
      - **Center (`0%`)**: Neutral (100% original site background untouched).
      - **Dragging Right (`> 0`)**: Deepens and darkens the current website background (e.g., blue becomes rich navy blue and eventually deep dark).
+
+### 7.6 Site-Specific Overrides & Exclusion Isolation (v1.5.1)
+- **Universal Visibility & Management Across Domains**: Previously, configuring a site-specific rule for domain A (e.g. google.com) could only be viewed or modified while physically browsing domain A. When visiting domain B (e.g. bing.com), the script appeared simply as OFF without indicating that active overrides existed on other sites. Furthermore, disabling a script on a bank or secure site (e.g. RBC) inadvertently wiped the global enabled state, disabling it across every other website.
+- **Site-Specific Exclusion (`site-off`)**: BESing v1.5.1 adds an explicit `site-off` mode (`siteRules[host].scripts[scriptId] = false`). When a script is globally active and the user disables it on a specific site (e.g., RBC), the script is excluded only on that host, while remaining fully active across all other domains.
+- **Cross-Domain Site Override Control**: The secondary menu for each script features a dedicated "Site-Specific Overrides" card. Users can view all existing domain overrides (e.g., `google.com: Site ON`, `rbc.com: Excluded`), toggle their active states, remove them, or add new domain overrides directly by typing the domain name, without needing to navigate to that site first.
+- **Visual Override Badges**: In the main extensions list, scripts with site overrides display a subtle interactive indicator (e.g. `📍 1 site override`), which links directly to the secondary menu.
+
+### 7.7 Clean Typography & Tooltip Protocol
+- To keep the script list minimalist and clutter-free, version badges (`v1.0.0`) and category tags (`Tools`, `Accessibility`) are no longer rendered as distracting inline pills beside the script name.
+- Instead, script metadata is smoothly embedded into hover tooltips (`name • version • category`) and prominently detailed within the secondary configuration header.
+
+### 7.8 Dual-Context Stable Bootstrapper Auto-Update Hook
+- **Cross-Sandbox Bridge**: When running under the GitHub Stable Bootstrapper (`besing-stable.user.js`), userscript execution environments isolate Tampermonkey sandbox `window` from page `unsafeWindow`. BESing ensures that bootstrapper environment flags (`__BESING_ENVIRONMENT__`), auto-update hooks (`__BESING_AUTO_UPDATE__`), and reload triggers (`__BESING_RELOAD_LATEST__`) are exported across both `window` and `unsafeWindow`.
+- **Self-Healing Fallback Caching**: If the environment hook is not callable, `BESUpdater` performs a direct fetch of the latest mega-script from GitHub and caches it immediately into userscript storage (`besing_cached_code` and `besing_cached_version`), providing seamless silent updates and a 1-click "Reload Page" prompt.
+
 
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Stable Loader
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.3
+// @version      1.0.4
 // @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub with silent auto-updates.
 // @author       BESing Team
 // @license      MIT
@@ -227,18 +227,28 @@
     return null;
   }
 
-  // Expose global hooks for inner application
-  if (typeof window !== 'undefined') {
-    window.__BESING_ENVIRONMENT__ = 'stable-loader';
-    window.__BESING_AUTO_UPDATE__ = async (force = true) => {
-      const res = await downloadAndCacheFull();
-      return res ? { ok: true, version: res.version } : { ok: false };
-    };
-    window.__BESING_RELOAD_LATEST__ = async () => {
-      const res = await downloadAndCacheFull();
-      if (res && res.code) runCode(res.code);
-    };
-  }
+  // Expose global hooks for inner application on both window and unsafeWindow
+  const autoUpdateFn = async (force = true) => {
+    const res = await downloadAndCacheFull();
+    return res ? { ok: true, version: res.version } : { ok: false };
+  };
+  const reloadLatestFn = async () => {
+    const res = await downloadAndCacheFull();
+    if (res && res.code) runCode(res.code);
+  };
+
+  try {
+    if (typeof window !== 'undefined') {
+      window.__BESING_ENVIRONMENT__ = 'stable-loader';
+      window.__BESING_AUTO_UPDATE__ = autoUpdateFn;
+      window.__BESING_RELOAD_LATEST__ = reloadLatestFn;
+    }
+    if (typeof unsafeWindow !== 'undefined') {
+      unsafeWindow.__BESING_ENVIRONMENT__ = 'stable-loader';
+      unsafeWindow.__BESING_AUTO_UPDATE__ = autoUpdateFn;
+      unsafeWindow.__BESING_RELOAD_LATEST__ = reloadLatestFn;
+    }
+  } catch (e) {}
 
   // 1. Instant execution of cached version (zero latency on page load)
   const cached = (typeof GM_getValue === 'function') ? GM_getValue('besing_cached_code', null) : null;

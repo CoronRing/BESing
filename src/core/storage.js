@@ -69,13 +69,13 @@ export class BESStorage {
     await BESAdapter.set(STORAGE_KEYS.SITE_RULES, this.siteRules);
   }
 
-  // Mode: 'off' | 'site' | 'on'
+  // Mode: 'off' | 'site' | 'site-off' | 'on'
   getScriptMode(scriptId, host = this.getCurrentHost()) {
     const h = (host || '').toLowerCase().trim();
     const siteConfig = this.siteRules[h];
 
     if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {
-      return siteConfig.scripts[scriptId] ? 'site' : 'off';
+      return siteConfig.scripts[scriptId] ? 'site' : 'site-off';
     }
 
     return this.enabledScripts[scriptId] ? 'on' : 'off';
@@ -99,22 +99,78 @@ export class BESStorage {
     if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
 
     if (mode === 'on') {
+      // Global ON: active across all sites by default; remove any site-specific override for current site
       this.enabledScripts[scriptId] = true;
       delete this.siteRules[h].scripts[scriptId];
     } else if (mode === 'site') {
-      this.enabledScripts[scriptId] = false;
+      // Active on this site only
       this.siteRules[h].scripts[scriptId] = true;
-    } else {
-      // OFF: Disable and WIPE site-specific configuration for this script
-      this.enabledScripts[scriptId] = false;
-      delete this.siteRules[h].scripts[scriptId];
+    } else if (mode === 'site-off') {
+      // Explicitly disabled on this site only (e.g. RBC), global stays enabled
+      this.siteRules[h].scripts[scriptId] = false;
       if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
         delete this.siteRules[h].configs[scriptId];
+      }
+    } else {
+      // OFF: If there was a site override, clear it (and wipe its site config)
+      if (this.siteRules[h].scripts[scriptId] !== undefined) {
+        delete this.siteRules[h].scripts[scriptId];
+        if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
+          delete this.siteRules[h].configs[scriptId];
+        }
+      } else {
+        // Otherwise turn off globally
+        this.enabledScripts[scriptId] = false;
       }
     }
 
     this.cleanupSiteRule(h);
     await BESAdapter.set(STORAGE_KEYS.ENABLED_SCRIPTS, this.enabledScripts);
+    await BESAdapter.set(STORAGE_KEYS.SITE_RULES, this.siteRules);
+  }
+
+  getScriptSiteOverrides(scriptId) {
+    const list = [];
+    Object.keys(this.siteRules || {}).forEach(h => {
+      const rule = this.siteRules[h];
+      if (rule && rule.scripts && rule.scripts[scriptId] !== undefined) {
+        list.push({
+          host: h,
+          mode: rule.scripts[scriptId] ? 'site' : 'site-off',
+          enabled: !!rule.scripts[scriptId],
+          hasConfig: !!(rule.configs && rule.configs[scriptId])
+        });
+      }
+    });
+    return list;
+  }
+
+  async setSiteOverride(scriptId, host, mode) {
+    const h = (host || '').toLowerCase().trim();
+    if (!h) return;
+    if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
+    if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
+
+    if (mode === 'site' || mode === true) {
+      this.siteRules[h].scripts[scriptId] = true;
+    } else if (mode === 'site-off' || mode === false) {
+      this.siteRules[h].scripts[scriptId] = false;
+      if (this.siteRules[h].configs) delete this.siteRules[h].configs[scriptId];
+    } else {
+      delete this.siteRules[h].scripts[scriptId];
+      if (this.siteRules[h].configs) delete this.siteRules[h].configs[scriptId];
+    }
+
+    this.cleanupSiteRule(h);
+    await BESAdapter.set(STORAGE_KEYS.SITE_RULES, this.siteRules);
+  }
+
+  async removeSiteOverride(scriptId, host) {
+    const h = (host || '').toLowerCase().trim();
+    if (!h || !this.siteRules[h]) return;
+    if (this.siteRules[h].scripts) delete this.siteRules[h].scripts[scriptId];
+    if (this.siteRules[h].configs) delete this.siteRules[h].configs[scriptId];
+    this.cleanupSiteRule(h);
     await BESAdapter.set(STORAGE_KEYS.SITE_RULES, this.siteRules);
   }
 
