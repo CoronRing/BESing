@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.6.3
+// @version      1.6.4
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -416,7 +416,8 @@
           popover.appendChild(item);
         });
         document.body.appendChild(popover);
-        const closeDoc = () => { if (popover) { popover.remove(); popover = null; } document.removeEventListener('click', closeDoc); };
+        this._popover = popover;
+        const closeDoc = () => { if (popover) { popover.remove(); popover = null; } this._popover = null; document.removeEventListener('click', closeDoc); };
         setTimeout(() => document.addEventListener('click', closeDoc), 50);
       };
 
@@ -425,6 +426,7 @@
     },
 
     destroy() {
+      if (this._popover) { this._popover.remove(); this._popover = null; }
       if (this._dom) { this._dom.remove(); this._dom = null; }
       const b = document.getElementById('besing-reading-assistant-badge');
       if (b) b.remove();
@@ -603,15 +605,19 @@
           if (this._config.allowPaste) e.stopImmediatePropagation();
         } else if (type === 'contextmenu') {
           if (this._config.allowContextMenu) e.stopImmediatePropagation();
-        } else if (type === 'selectstart' || type === 'selectionchange') {
+        } else if (type === 'selectstart' || type === 'selectionchange' || type === 'dragstart') {
           if (this._config.allowSelect) e.stopImmediatePropagation();
         }
       };
 
       const handleKeydown = (e) => {
-        if (!this._config.allowCopy) return;
-        if ((e.ctrlKey || e.metaKey) && ['c', 'v', 'x', 'a', 'C', 'V', 'X', 'A'].includes(e.key)) {
-          e.stopImmediatePropagation();
+        const key = (e.key || '').toLowerCase();
+        if (e.ctrlKey || e.metaKey) {
+          if (['c', 'x', 'a'].includes(key) && this._config.allowCopy) {
+            e.stopImmediatePropagation();
+          } else if (key === 'v' && this._config.allowPaste) {
+            e.stopImmediatePropagation();
+          }
         }
       };
 
@@ -853,7 +859,8 @@
     toast(title) {
       const t = document.createElement('div');
       t.style.cssText = `position:fixed;top:24px;right:24px;background:#0f172a;color:#38bdf8;border:1px solid rgba(56,189,248,0.4);padding:10px 18px;border-radius:10px;font-family:-apple-system,sans-serif;font-size:13px;font-weight:500;box-shadow:0 10px 25px rgba(0,0,0,0.5);z-index:999999;display:flex;align-items:center;gap:8px;`;
-      t.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Copied Markdown: "${title.slice(0, 25)}..."</span>`;
+      const cleanTitle = String(title || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+      t.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Copied Markdown: "${cleanTitle.slice(0, 25)}..."</span>`;
       document.body.appendChild(t);
       setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s ease'; setTimeout(() => t.remove(), 300); }, 2000);
     },
@@ -960,22 +967,29 @@
       });
     },
 
+    safeEscape(str) {
+      if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+        return CSS.escape(str);
+      }
+      return String(str).replace(/([ #;&,.+*~':"!^$[\]()=>|/@])/g, '\\$1');
+    },
+
     computeSelector(el) {
       if (!el || el === document.body || el === document.documentElement) return '';
       if (el.id && !el.id.includes('__besing') && !/^\d/.test(el.id)) {
-        return `#${CSS.escape(el.id)}`;
+        return `#${this.safeEscape(el.id)}`;
       }
       const tag = el.tagName.toLowerCase();
       const classes = Array.from(el.classList).filter(c => !c.startsWith('besing-') && !c.includes(':'));
       if (classes.length > 0) {
-        const clsSelector = classes.slice(0, 3).map(c => `.${CSS.escape(c)}`).join('');
+        const clsSelector = classes.slice(0, 3).map(c => `.${this.safeEscape(c)}`).join('');
         if (document.querySelectorAll(clsSelector).length <= 4) {
           return `${tag}${clsSelector}`;
         }
       }
       const parent = el.parentElement;
       if (parent && parent !== document.body && parent !== document.documentElement) {
-        const parentSel = (parent.id && !parent.id.includes('__besing') && !/^\d/.test(parent.id)) ? `#${CSS.escape(parent.id)}` : parent.tagName.toLowerCase();
+        const parentSel = (parent.id && !parent.id.includes('__besing') && !/^\d/.test(parent.id)) ? `#${this.safeEscape(parent.id)}` : parent.tagName.toLowerCase();
         const index = Array.from(parent.children).indexOf(el) + 1;
         return `${parentSel} > ${tag}:nth-child(${index})`;
       }
@@ -1000,10 +1014,15 @@
 
     _zapElement(target, onZappedCallback) {
       if (!target) return;
+      const now = Date.now();
+      if (this._lastZapTime && now - this._lastZapTime < 400) return;
+      this._lastZapTime = now;
+
       const sel = this.computeSelector(target);
       if (!sel) return;
 
-      // Immediate shrink & fade animation
+      // Immediate shrink, fade, and quarantine pointer events so underlying elements are not clicked
+      target.style.pointerEvents = 'none';
       target.style.transition = 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)';
       target.style.opacity = '0';
       target.style.transform = 'scale(0.88)';
@@ -1213,6 +1232,22 @@
         e.stopImmediatePropagation();
       };
 
+      this._mouseDownHandler = (e) => {
+        if (!this._zapperActive) return;
+        if (isZapperUI(e.target, e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      };
+
+      this._mouseUpHandler = (e) => {
+        if (!this._zapperActive) return;
+        if (isZapperUI(e.target, e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      };
+
       this._keyDownHandler = (e) => {
         if (e.key === 'Escape') {
           this.stopZapper();
@@ -1235,6 +1270,8 @@
       window.addEventListener('pointerdown', this._touchStartHandler, { capture: true });
       window.addEventListener('pointermove', this._touchMoveHandler, { capture: true });
       window.addEventListener('pointerup', this._touchEndHandler, { capture: true });
+      window.addEventListener('mousedown', this._mouseDownHandler, { capture: true });
+      window.addEventListener('mouseup', this._mouseUpHandler, { capture: true });
       window.addEventListener('mousemove', this._mouseMoveHandler, { capture: true, passive: true });
       window.addEventListener('click', this._clickHandler, { capture: true });
       window.addEventListener('auxclick', this._auxHandler, { capture: true });
@@ -1271,6 +1308,14 @@
         window.removeEventListener('touchend', this._touchEndHandler, { capture: true, passive: false });
         window.removeEventListener('pointerup', this._touchEndHandler, { capture: true });
         this._touchEndHandler = null;
+      }
+      if (this._mouseDownHandler) {
+        window.removeEventListener('mousedown', this._mouseDownHandler, { capture: true });
+        this._mouseDownHandler = null;
+      }
+      if (this._mouseUpHandler) {
+        window.removeEventListener('mouseup', this._mouseUpHandler, { capture: true });
+        this._mouseUpHandler = null;
       }
       if (this._mouseMoveHandler) {
         window.removeEventListener('mousemove', this._mouseMoveHandler, { capture: true, passive: true });
@@ -1813,10 +1858,6 @@
 
       this._clickHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
-          if (isZapperUIEvent(e)) return;
-          e.preventDefault();
-          e.stopPropagation();
-          e.stopImmediatePropagation();
           return;
         }
         self._recordUserClick(e);
@@ -1921,10 +1962,6 @@
 
       this._touchHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
-          if (isZapperUIEvent(e)) return;
-          e.preventDefault();
-          e.stopPropagation();
-          e.stopImmediatePropagation();
           return;
         }
         // Neutralize touch on invisible overlays or malicious click-jack tiles
@@ -1946,10 +1983,6 @@
 
       this._auxClickHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
-          if (isZapperUIEvent(e)) return;
-          e.preventDefault();
-          e.stopPropagation();
-          e.stopImmediatePropagation();
           return;
         }
         if (e.button === 1) {
@@ -2298,7 +2331,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.6.3';
+    static CURRENT_VERSION = '1.6.4';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -2526,6 +2559,12 @@
               m.init(cfg);
               m.running = true;
             } catch (err) {}
+          } else if (shouldBeActive && m.running) {
+            try {
+              if (typeof m.onConfigChange === 'function') {
+                m.onConfigChange(cfg);
+              }
+            } catch (err) {}
           }
           return;
         }
@@ -2543,6 +2582,10 @@
             m.running = false;
           } catch (err) {
             console.error(`[BESing] Error destroying ${m.id}:`, err);
+          }
+        } else if (shouldBeActive && m.running) {
+          if (typeof m.onConfigChange === 'function') {
+            try { m.onConfigChange(cfg); } catch (e) {}
           }
         }
       });
@@ -3085,6 +3128,7 @@
 
     setupDragging(btn) {
       let lastToggleTime = 0;
+      let isTouch = false;
       const doToggle = () => {
         const now = Date.now();
         if (now - lastToggleTime < 350) return;
@@ -3096,6 +3140,7 @@
         if (e.target.closest('.besing-bubble-wrapper')) return;
         this.isDragging = true;
         this.dragMoved = false;
+        isTouch = !!e.touches;
         const pt = e.touches ? e.touches[0] : e;
         this.startX = pt.clientX;
         this.startY = pt.clientY;
@@ -3151,7 +3196,9 @@
         this.storage.setWidgetPosition({ x: Math.round(rect.left), y: Math.round(rect.top) });
         this.checkEdgeDocking(btn);
 
-        if (!this.dragMoved) {
+        if (!this.dragMoved && isTouch) {
+          this._justTouchToggled = true;
+          setTimeout(() => { this._justTouchToggled = false; }, 600);
           doToggle();
         }
       };
@@ -3159,9 +3206,11 @@
       btn.addEventListener('mousedown', onStart);
       btn.addEventListener('touchstart', onStart, { passive: true });
       btn.addEventListener('click', (e) => {
-        if (!this.dragMoved) {
-          doToggle();
+        if (this.dragMoved || this._justTouchToggled) {
+          this.dragMoved = false;
+          return;
         }
+        doToggle();
       });
     }
 
@@ -3364,6 +3413,9 @@
     renderBody() {
       const body = this.menuWrapperEl ? this.menuWrapperEl.querySelector('#besing-body') : null;
       if (!body) return;
+      const prevScroll = body.scrollTop;
+      const isSameView = this._prevRenderedView === this.currentView;
+      this._prevRenderedView = this.currentView;
       try {
         this.setSafeHTML(body, '');
 
@@ -3852,6 +3904,9 @@
       const retryBtn = body.querySelector('#besing-btn-retry-render');
       if (retryBtn) retryBtn.onclick = () => this.renderBody();
     }
+    if (isSameView && prevScroll > 0) {
+      body.scrollTop = prevScroll;
+    }
   }
 
     renderScriptConfig(body) {
@@ -4317,6 +4372,7 @@
             const currentCfg = this.storage.getScriptConfig(m.id, currentHost);
             if (typeof m.init === 'function' && !m.running) {
               m.init(currentCfg);
+              m.running = true;
             }
             if (typeof m.startZapper === 'function') {
               m.startZapper(async (sel, currentList) => {

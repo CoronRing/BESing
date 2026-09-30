@@ -100,22 +100,29 @@
       });
     },
 
+    safeEscape(str) {
+      if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+        return CSS.escape(str);
+      }
+      return String(str).replace(/([ #;&,.+*~':"!^$[\]()=>|/@])/g, '\\$1');
+    },
+
     computeSelector(el) {
       if (!el || el === document.body || el === document.documentElement) return '';
       if (el.id && !el.id.includes('__besing') && !/^\d/.test(el.id)) {
-        return `#${CSS.escape(el.id)}`;
+        return `#${this.safeEscape(el.id)}`;
       }
       const tag = el.tagName.toLowerCase();
       const classes = Array.from(el.classList).filter(c => !c.startsWith('besing-') && !c.includes(':'));
       if (classes.length > 0) {
-        const clsSelector = classes.slice(0, 3).map(c => `.${CSS.escape(c)}`).join('');
+        const clsSelector = classes.slice(0, 3).map(c => `.${this.safeEscape(c)}`).join('');
         if (document.querySelectorAll(clsSelector).length <= 4) {
           return `${tag}${clsSelector}`;
         }
       }
       const parent = el.parentElement;
       if (parent && parent !== document.body && parent !== document.documentElement) {
-        const parentSel = (parent.id && !parent.id.includes('__besing') && !/^\d/.test(parent.id)) ? `#${CSS.escape(parent.id)}` : parent.tagName.toLowerCase();
+        const parentSel = (parent.id && !parent.id.includes('__besing') && !/^\d/.test(parent.id)) ? `#${this.safeEscape(parent.id)}` : parent.tagName.toLowerCase();
         const index = Array.from(parent.children).indexOf(el) + 1;
         return `${parentSel} > ${tag}:nth-child(${index})`;
       }
@@ -140,10 +147,15 @@
 
     _zapElement(target, onZappedCallback) {
       if (!target) return;
+      const now = Date.now();
+      if (this._lastZapTime && now - this._lastZapTime < 400) return;
+      this._lastZapTime = now;
+
       const sel = this.computeSelector(target);
       if (!sel) return;
 
-      // Immediate shrink & fade animation
+      // Immediate shrink, fade, and quarantine pointer events so underlying elements are not clicked
+      target.style.pointerEvents = 'none';
       target.style.transition = 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)';
       target.style.opacity = '0';
       target.style.transform = 'scale(0.88)';
@@ -353,6 +365,22 @@
         e.stopImmediatePropagation();
       };
 
+      this._mouseDownHandler = (e) => {
+        if (!this._zapperActive) return;
+        if (isZapperUI(e.target, e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      };
+
+      this._mouseUpHandler = (e) => {
+        if (!this._zapperActive) return;
+        if (isZapperUI(e.target, e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      };
+
       this._keyDownHandler = (e) => {
         if (e.key === 'Escape') {
           this.stopZapper();
@@ -375,6 +403,8 @@
       window.addEventListener('pointerdown', this._touchStartHandler, { capture: true });
       window.addEventListener('pointermove', this._touchMoveHandler, { capture: true });
       window.addEventListener('pointerup', this._touchEndHandler, { capture: true });
+      window.addEventListener('mousedown', this._mouseDownHandler, { capture: true });
+      window.addEventListener('mouseup', this._mouseUpHandler, { capture: true });
       window.addEventListener('mousemove', this._mouseMoveHandler, { capture: true, passive: true });
       window.addEventListener('click', this._clickHandler, { capture: true });
       window.addEventListener('auxclick', this._auxHandler, { capture: true });
@@ -411,6 +441,14 @@
         window.removeEventListener('touchend', this._touchEndHandler, { capture: true, passive: false });
         window.removeEventListener('pointerup', this._touchEndHandler, { capture: true });
         this._touchEndHandler = null;
+      }
+      if (this._mouseDownHandler) {
+        window.removeEventListener('mousedown', this._mouseDownHandler, { capture: true });
+        this._mouseDownHandler = null;
+      }
+      if (this._mouseUpHandler) {
+        window.removeEventListener('mouseup', this._mouseUpHandler, { capture: true });
+        this._mouseUpHandler = null;
       }
       if (this._mouseMoveHandler) {
         window.removeEventListener('mousemove', this._mouseMoveHandler, { capture: true, passive: true });

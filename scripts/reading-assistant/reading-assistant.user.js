@@ -56,7 +56,8 @@
           popover.appendChild(item);
         });
         document.body.appendChild(popover);
-        const closeDoc = () => { if (popover) { popover.remove(); popover = null; } document.removeEventListener('click', closeDoc); };
+        this._popover = popover;
+        const closeDoc = () => { if (popover) { popover.remove(); popover = null; } this._popover = null; document.removeEventListener('click', closeDoc); };
         setTimeout(() => document.addEventListener('click', closeDoc), 50);
       };
 
@@ -65,6 +66,7 @@
     },
 
     destroy() {
+      if (this._popover) { this._popover.remove(); this._popover = null; }
       if (this._dom) { this._dom.remove(); this._dom = null; }
       const b = document.getElementById('besing-reading-assistant-badge');
       if (b) b.remove();

@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -64,50 +64,14 @@ META_SCRIPT_CONTENT = f"""// ==UserScript==
 
 def extract_module_body(script_path: Path):
     content = script_path.read_text(encoding="utf-8")
-    match = re.search(r'const\s+[A-Za-z0-9_]+\s*=\s*\{', content)
-    if not match:
-        return None
-    start_idx = match.end() - 1
-    depth = 0
-    in_str = False
-    str_char = ''
-    in_single_comment = False
-    in_multi_comment = False
-    i = start_idx
-    while i < len(content):
-        ch = content[i]
-        next_ch = content[i + 1] if i + 1 < len(content) else ''
-
-        if in_single_comment:
-            if ch == '\n':
-                in_single_comment = False
-        elif in_multi_comment:
-            if ch == '*' and next_ch == '/':
-                in_multi_comment = False
-                i += 1
-        elif in_str:
-            if ch == '\\':
-                i += 2
-                continue
-            if ch == str_char:
-                in_str = False
-        else:
-            if ch == '/' and next_ch == '/':
-                in_single_comment = True
-                i += 1
-            elif ch == '/' and next_ch == '*':
-                in_multi_comment = True
-                i += 1
-            elif ch in ('"', "'", '`'):
-                in_str = True
-                str_char = ch
-            elif ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    return content[start_idx : i + 1]
-        i += 1
+    m = re.search(r'const\s+[A-Za-z0-9_]+\s*=\s*(\{[\s\S]*?\n  \});\s*(?:\n\s*if|\n\s*window|\Z)', content)
+    if m:
+        return m.group(1)
+    
+    # Fallback to general boundary match if formatting differs
+    m2 = re.search(r'const\s+[A-Za-z0-9_]+\s*=\s*(\{[\s\S]*?\n\s*\});\s*(?:\n\s*if|\n\s*window|\Z)', content)
+    if m2:
+        return m2.group(1)
     return None
 
 def build():
@@ -723,6 +687,12 @@ def build():
               m.init(cfg);
               m.running = true;
             }} catch (err) {{}}
+          }} else if (shouldBeActive && m.running) {{
+            try {{
+              if (typeof m.onConfigChange === 'function') {{
+                m.onConfigChange(cfg);
+              }}
+            }} catch (err) {{}}
           }}
           return;
         }}
@@ -740,6 +710,10 @@ def build():
             m.running = false;
           }} catch (err) {{
             console.error(`[BESing] Error destroying ${{m.id}}:`, err);
+          }}
+        }} else if (shouldBeActive && m.running) {{
+          if (typeof m.onConfigChange === 'function') {{
+            try {{ m.onConfigChange(cfg); }} catch (e) {{}}
           }}
         }}
       }});
@@ -1282,6 +1256,7 @@ def build():
 
     setupDragging(btn) {{
       let lastToggleTime = 0;
+      let isTouch = false;
       const doToggle = () => {{
         const now = Date.now();
         if (now - lastToggleTime < 350) return;
@@ -1293,6 +1268,7 @@ def build():
         if (e.target.closest('.besing-bubble-wrapper')) return;
         this.isDragging = true;
         this.dragMoved = false;
+        isTouch = !!e.touches;
         const pt = e.touches ? e.touches[0] : e;
         this.startX = pt.clientX;
         this.startY = pt.clientY;
@@ -1348,7 +1324,9 @@ def build():
         this.storage.setWidgetPosition({{ x: Math.round(rect.left), y: Math.round(rect.top) }});
         this.checkEdgeDocking(btn);
 
-        if (!this.dragMoved) {{
+        if (!this.dragMoved && isTouch) {{
+          this._justTouchToggled = true;
+          setTimeout(() => {{ this._justTouchToggled = false; }}, 600);
           doToggle();
         }}
       }};
@@ -1356,9 +1334,11 @@ def build():
       btn.addEventListener('mousedown', onStart);
       btn.addEventListener('touchstart', onStart, {{ passive: true }});
       btn.addEventListener('click', (e) => {{
-        if (!this.dragMoved) {{
-          doToggle();
+        if (this.dragMoved || this._justTouchToggled) {{
+          this.dragMoved = false;
+          return;
         }}
+        doToggle();
       }});
     }}
 
@@ -1561,6 +1541,9 @@ def build():
     renderBody() {{
       const body = this.menuWrapperEl ? this.menuWrapperEl.querySelector('#besing-body') : null;
       if (!body) return;
+      const prevScroll = body.scrollTop;
+      const isSameView = this._prevRenderedView === this.currentView;
+      this._prevRenderedView = this.currentView;
       try {{
         this.setSafeHTML(body, '');
 
@@ -2049,6 +2032,9 @@ def build():
       const retryBtn = body.querySelector('#besing-btn-retry-render');
       if (retryBtn) retryBtn.onclick = () => this.renderBody();
     }}
+    if (isSameView && prevScroll > 0) {{
+      body.scrollTop = prevScroll;
+    }}
   }}
 
     renderScriptConfig(body) {{
@@ -2514,6 +2500,7 @@ def build():
             const currentCfg = this.storage.getScriptConfig(m.id, currentHost);
             if (typeof m.init === 'function' && !m.running) {{
               m.init(currentCfg);
+              m.running = true;
             }}
             if (typeof m.startZapper === 'function') {{
               m.startZapper(async (sel, currentList) => {{

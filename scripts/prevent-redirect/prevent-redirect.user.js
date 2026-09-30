@@ -514,10 +514,6 @@
 
       this._clickHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
-          if (isZapperUIEvent(e)) return;
-          e.preventDefault();
-          e.stopPropagation();
-          e.stopImmediatePropagation();
           return;
         }
         self._recordUserClick(e);
@@ -622,10 +618,6 @@
 
       this._touchHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
-          if (isZapperUIEvent(e)) return;
-          e.preventDefault();
-          e.stopPropagation();
-          e.stopImmediatePropagation();
           return;
         }
         // Neutralize touch on invisible overlays or malicious click-jack tiles
@@ -647,10 +639,6 @@
 
       this._auxClickHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
-          if (isZapperUIEvent(e)) return;
-          e.preventDefault();
-          e.stopPropagation();
-          e.stopImmediatePropagation();
           return;
         }
         if (e.button === 1) {

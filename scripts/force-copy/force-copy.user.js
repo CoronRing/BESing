@@ -79,15 +79,19 @@
           if (this._config.allowPaste) e.stopImmediatePropagation();
         } else if (type === 'contextmenu') {
           if (this._config.allowContextMenu) e.stopImmediatePropagation();
-        } else if (type === 'selectstart' || type === 'selectionchange') {
+        } else if (type === 'selectstart' || type === 'selectionchange' || type === 'dragstart') {
           if (this._config.allowSelect) e.stopImmediatePropagation();
         }
       };
 
       const handleKeydown = (e) => {
-        if (!this._config.allowCopy) return;
-        if ((e.ctrlKey || e.metaKey) && ['c', 'v', 'x', 'a', 'C', 'V', 'X', 'A'].includes(e.key)) {
-          e.stopImmediatePropagation();
+        const key = (e.key || '').toLowerCase();
+        if (e.ctrlKey || e.metaKey) {
+          if (['c', 'x', 'a'].includes(key) && this._config.allowCopy) {
+            e.stopImmediatePropagation();
+          } else if (key === 'v' && this._config.allowPaste) {
+            e.stopImmediatePropagation();
+          }
         }
       };
 
