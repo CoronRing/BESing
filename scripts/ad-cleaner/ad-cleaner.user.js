@@ -208,14 +208,17 @@
 
       const exitBtn = hud.querySelector('#besing-zapper-exit-btn');
       if (exitBtn) {
-        exitBtn.onclick = (e) => {
-          e.stopPropagation();
+        const doExit = (e) => {
+          if (e) {
+            e.stopPropagation();
+            if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+            if (e.preventDefault) e.preventDefault();
+          }
           this.stopZapper();
         };
-        exitBtn.ontouchend = (e) => {
-          e.stopPropagation();
-          this.stopZapper();
-        };
+        exitBtn.onclick = doExit;
+        exitBtn.ontouchend = doExit;
+        exitBtn.onpointerup = doExit;
       }
 
       // 2. Create Target Highlight Box
@@ -233,9 +236,18 @@
 
       document.body.style.cursor = 'crosshair';
 
-      const isZapperUI = (el) => {
-        if (!el) return false;
-        return !!(el.closest('#besing-zapper-hud') || el.closest('#besing-zapper-highlight') || el.closest('#__besing_root__'));
+      const isZapperUI = (el, e) => {
+        if (e && e.composedPath && typeof e.composedPath === 'function') {
+          const path = e.composedPath();
+          for (let i = 0; i < path.length; i++) {
+            const node = path[i];
+            if (!node) continue;
+            if (node.id === 'besing-zapper-hud' || node.id === 'besing-zapper-highlight' || node.id === '__besing_root__') return true;
+            if (node.tagName && node.tagName.toLowerCase() === 'besing-host') return true;
+          }
+        }
+        if (!el || !el.closest) return false;
+        return !!(el.closest('#besing-zapper-hud') || el.closest('#besing-zapper-highlight') || el.closest('#__besing_root__') || el.closest('besing-host'));
       };
 
       const getPoint = (e) => {
@@ -260,7 +272,7 @@
       // 4. Mobile Touch Start: Quarantine event, prevent ad redirect, highlight element
       this._touchStartHandler = (e) => {
         if (!this._zapperActive) return;
-        if (isZapperUI(e.target)) return;
+        if (isZapperUI(e.target, e)) return;
 
         e.preventDefault();
         e.stopPropagation();
@@ -268,7 +280,7 @@
 
         const pt = getPoint(e);
         const el = document.elementFromPoint(pt.clientX, pt.clientY);
-        if (el && !isZapperUI(el)) {
+        if (el && !isZapperUI(el, e)) {
           this._currentHoveredTarget = el;
           this._updateHighlightBox(el);
         }
@@ -277,7 +289,7 @@
       // 5. Mobile Touch Move: Follow finger
       this._touchMoveHandler = (e) => {
         if (!this._zapperActive) return;
-        if (isZapperUI(e.target)) return;
+        if (isZapperUI(e.target, e)) return;
 
         e.preventDefault();
         e.stopPropagation();
@@ -285,7 +297,7 @@
 
         const pt = getPoint(e);
         const el = document.elementFromPoint(pt.clientX, pt.clientY);
-        if (el && !isZapperUI(el)) {
+        if (el && !isZapperUI(el, e)) {
           this._currentHoveredTarget = el;
           this._updateHighlightBox(el);
         }
@@ -294,7 +306,7 @@
       // 6. Mobile Touch End: Zap target immediately on release
       this._touchEndHandler = (e) => {
         if (!this._zapperActive) return;
-        if (isZapperUI(e.target)) return;
+        if (isZapperUI(e.target, e)) return;
 
         e.preventDefault();
         e.stopPropagation();
@@ -304,7 +316,7 @@
         let target = this._currentHoveredTarget;
         if (!target && pt) {
           const el = document.elementFromPoint(pt.clientX, pt.clientY);
-          if (el && !isZapperUI(el)) {
+          if (el && !isZapperUI(el, e)) {
             target = el;
           }
         }
@@ -319,14 +331,14 @@
       // 7. Click Handler: Desktop click zap & synthetic click isolation
       this._clickHandler = (e) => {
         if (!this._zapperActive) return;
-        if (isZapperUI(e.target)) return;
+        if (isZapperUI(e.target, e)) return;
 
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
 
         const target = this._currentHoveredTarget || document.elementFromPoint(e.clientX, e.clientY);
-        if (target && !isZapperUI(target)) {
+        if (target && !isZapperUI(target, e)) {
           this._zapElement(target, onZappedCallback);
           this._currentHoveredTarget = null;
           if (this._highlightEl) this._highlightEl.style.display = 'none';
@@ -335,7 +347,7 @@
 
       this._auxHandler = (e) => {
         if (!this._zapperActive) return;
-        if (isZapperUI(e.target)) return;
+        if (isZapperUI(e.target, e)) return;
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();

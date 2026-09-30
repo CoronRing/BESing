@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.6.2"
+VERSION = "1.6.3"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -1719,16 +1719,35 @@ def build():
             const group = document.createElement('div');
             group.className = 'besing-site-group';
 
+            let ruleCount = 0;
+            if (rule.disableAll) ruleCount++;
+            if (rule.scripts) ruleCount += Object.keys(rule.scripts).length;
+            if (rule.configs) {{
+              Object.keys(rule.configs).forEach(sid => {{
+                if (!rule.scripts || rule.scripts[sid] === undefined) ruleCount++;
+              }});
+            }}
+
             const groupHeader = document.createElement('div');
             groupHeader.className = 'besing-site-group-header';
             this.setSafeHTML(groupHeader, `
               <div class="besing-site-group-title">
+                <svg class="besing-site-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
                 <span>${{host}}</span>
+                <span class="besing-site-rule-count">${{ruleCount}} configured</span>
               </div>
-              <button class="besing-btn-del-site" title="Remove all rules for ${{host}}">Remove Site</button>
+              <button type="button" class="besing-btn-del-site" title="Remove all rules for ${{host}}">Remove Site</button>
             `);
-            groupHeader.querySelector('.besing-btn-del-site').onclick = async () => {{
+
+            // Collapsible dropdown toggle: click header to expand/collapse rules
+            groupHeader.onclick = (e) => {{
+              if (e.target.closest('.besing-btn-del-site')) return;
+              group.classList.toggle('collapsed');
+            }};
+
+            groupHeader.querySelector('.besing-btn-del-site').onclick = async (e) => {{
+              e.stopPropagation();
               await this.storage.removeSiteRule(host, 'all');
               renderSiteRulesList();
               this.refreshCurrentSiteModules();
@@ -1759,7 +1778,8 @@ def build():
                 renderSiteRulesList();
                 this.refreshCurrentSiteModules();
               }};
-              row.querySelector('.besing-rule-remove').onclick = async () => {{
+              row.querySelector('.besing-rule-remove').onclick = async (e) => {{
+                e.stopPropagation();
                 await this.storage.removeSiteRule(host, 'disableAll');
                 renderSiteRulesList();
                 this.refreshCurrentSiteModules();
@@ -1791,13 +1811,52 @@ def build():
                   renderSiteRulesList();
                   this.refreshCurrentSiteModules();
                 }};
-                row.querySelector('.besing-rule-remove').onclick = async () => {{
+                row.querySelector('.besing-rule-remove').onclick = async (e) => {{
+                  e.stopPropagation();
                   await this.storage.removeSiteOverride(scriptId, host);
                   renderSiteRulesList();
                   this.refreshCurrentSiteModules();
                 }};
                 rulesList.appendChild(row);
               }});
+            }}
+
+            if (rule.configs) {{
+              Object.keys(rule.configs).forEach(scriptId => {{
+                if (rule.scripts && rule.scripts[scriptId] !== undefined) return;
+                const m = this.modules.find(mod => mod.id === scriptId) || {{ name: scriptId }};
+                const row = document.createElement('div');
+                row.className = 'besing-site-rule-row';
+                this.setSafeHTML(row, `
+                  <div class="besing-site-rule-info">
+                    <span class="besing-site-rule-name">${{m.name}}</span>
+                    <span class="besing-site-rule-tag" style="background:rgba(167,139,250,0.15);color:#a78bfa;">Custom Settings</span>
+                  </div>
+                  <div class="besing-site-rule-actions">
+                    <button class="besing-rule-remove" title="Reset site settings">✕</button>
+                  </div>
+                `);
+                row.querySelector('.besing-rule-remove').onclick = async (e) => {{
+                  e.stopPropagation();
+                  delete rule.configs[scriptId];
+                  this.storage.cleanupSiteRule(host);
+                  await BESAdapter.set('site_rules', this.storage.siteRules);
+                  renderSiteRulesList();
+                  this.refreshCurrentSiteModules();
+                }};
+                rulesList.appendChild(row);
+              }});
+            }}
+
+            if (ruleCount === 0) {{
+              const emptyRow = document.createElement('div');
+              emptyRow.className = 'besing-site-rule-row';
+              emptyRow.style.color = '#64748b';
+              emptyRow.style.fontSize = '11px';
+              emptyRow.style.padding = '6px 0';
+              emptyRow.style.fontStyle = 'italic';
+              emptyRow.textContent = 'No active rules configured for this site.';
+              rulesList.appendChild(emptyRow);
             }}
 
             group.appendChild(rulesList);
@@ -1839,6 +1898,7 @@ def build():
         const extContainer = body.querySelector('#besing-ext-container');
 
         const renderCards = () => {{
+          const prevScroll = body ? body.scrollTop : 0;
           this.setSafeHTML(extContainer, '');
           const q = this.searchQuery;
           const currentHost = this.storage.getCurrentHost();
@@ -1860,6 +1920,7 @@ def build():
             empty.className = 'besing-empty-state';
             empty.textContent = q ? 'No scripts match your search.' : 'No scripts found.';
             extContainer.appendChild(empty);
+            if (body && prevScroll > 0) body.scrollTop = prevScroll;
             return;
           }}
 
@@ -1867,14 +1928,7 @@ def build():
             const card = document.createElement('div');
             card.className = 'besing-ext-card';
             card.setAttribute('data-id', m.id);
-            const currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'site-off' | 'on'
-
-            const overrides = this.storage.getScriptSiteOverrides(m.id);
-            let overrideBadge = '';
-            if (overrides.length > 0) {{
-              const tip = overrides.map(o => `${{o.host}}: ${{o.mode === 'site' ? 'Site ON' : 'Excluded (OFF)'}}`).join(', ');
-              overrideBadge = `<span class="besing-site-override-pill" title="Site overrides: ${{tip}}">📍 ${{overrides.length}} site override${{overrides.length > 1 ? 's' : ''}}</span>`;
-            }}
+            let currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'site-off' | 'on'
 
             let rotatorText = 'off';
             let rotatorTitle = 'State: OFF. Click to turn ON globally';
@@ -1895,7 +1949,6 @@ def build():
                 <div class="besing-ext-meta">
                   <div class="besing-ext-title-row">
                     <span class="besing-ext-name" title="${{m.name}} • v${{m.version || '1.0.0'}} • ${{m.category || 'General'}}">${{m.name}}</span>
-                    ${{overrideBadge}}
                   </div>
                   <p class="besing-ext-desc">${{m.description || ''}}</p>
                 </div>
@@ -1924,18 +1977,29 @@ def build():
               }} else if (currentMode === 'site-off') {{
                 nextMode = 'off';
               }}
+              currentMode = nextMode;
               await this.storage.setScriptMode(m.id, nextMode, currentHost);
-              renderCards();
+
+              // Update toggle state in-place to prevent resetting scroll position to top
+              rotatorBtn.className = `besing-rotator-toggle mode-${{nextMode}}`;
+              let rText = 'off';
+              let rTitle = 'State: OFF. Click to turn ON globally';
+              if (nextMode === 'on') {{
+                rText = 'on';
+                rTitle = 'State: GLOBAL ON. Click to activate on THIS SITE ONLY';
+              }} else if (nextMode === 'site') {{
+                rText = 'site on';
+                rTitle = `State: SITE ON (${{currentHost}}). Click to turn OFF globally`;
+              }} else if (nextMode === 'site-off') {{
+                rText = 'site off';
+                rTitle = `State: EXCLUDED on ${{currentHost}}. Click to turn OFF globally`;
+              }}
+              rotatorBtn.title = rTitle;
+              const textSpan = rotatorBtn.querySelector('.besing-rotator-text');
+              if (textSpan) textSpan.textContent = rText;
+
               this.refreshCurrentSiteModules();
             }};
-
-            const pill = card.querySelector('.besing-site-override-pill');
-            if (pill) {{
-              pill.onclick = (e) => {{
-                e.stopPropagation();
-                this.openScriptConfig(m.id);
-              }};
-            }}
 
             const btnGear = card.querySelector('.besing-btn-script-gear');
             if (btnGear) {{
@@ -1956,6 +2020,11 @@ def build():
             }}
 
             extContainer.appendChild(card);
+          }});
+
+          if (body && prevScroll > 0) body.scrollTop = prevScroll;
+          requestAnimationFrame(() => {{
+            if (body && prevScroll > 0) body.scrollTop = prevScroll;
           }});
         }};
 
@@ -2592,7 +2661,13 @@ def build():
         .besing-site-rules-wrap {{ display: flex; flex-direction: column; gap: 8px; }}
         .besing-site-rules-list {{ display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }}
         .besing-site-group {{ background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; overflow: hidden; }}
-        .besing-site-group-header {{ padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: space-between; }}
+        .besing-site-group-header {{ padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: space-between; cursor: pointer; user-select: none; transition: background 0.15s ease; }}
+        .besing-site-group-header:hover {{ background: rgba(255, 255, 255, 0.06); }}
+        .besing-site-chevron {{ transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); color: #94a3b8; flex-shrink: 0; }}
+        .besing-site-group.collapsed .besing-site-chevron {{ transform: rotate(-90deg); }}
+        .besing-site-group.collapsed .besing-site-subrules {{ display: none; }}
+        .besing-site-group.collapsed .besing-site-group-header {{ border-bottom: none; }}
+        .besing-site-rule-count {{ font-size: 10px; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.25); padding: 1px 6px; border-radius: 999px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
         .besing-site-group-title {{ display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: #f1f5f9; font-family: monospace; }}
         .besing-btn-del-site {{ background: transparent; border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px; cursor: pointer; transition: all 0.15s ease; }}
         .besing-btn-del-site:hover {{ background: rgba(239, 68, 68, 0.2); border-color: #ef4444; }}

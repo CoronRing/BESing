@@ -492,8 +492,29 @@
       } catch (e) {}
 
       // 12. Click and touch tracking to distinguish user navigation from background hijacks
+      const isZapperUIEvent = (e) => {
+        if (!e) return false;
+        if (e.composedPath && typeof e.composedPath === 'function') {
+          const path = e.composedPath();
+          for (let i = 0; i < path.length; i++) {
+            const node = path[i];
+            if (!node) continue;
+            if (node.id === 'besing-zapper-hud' || node.id === 'besing-zapper-highlight' || node.id === '__besing_root__') return true;
+            if (node.tagName && node.tagName.toLowerCase() === 'besing-host') return true;
+          }
+        }
+        const t = e.target;
+        if (t && t.closest) {
+          if (t.closest('#besing-zapper-hud') || t.closest('#besing-zapper-highlight') || t.closest('besing-host') || t.closest('#__besing_root__')) {
+            return true;
+          }
+        }
+        return false;
+      };
+
       this._clickHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
+          if (isZapperUIEvent(e)) return;
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
@@ -601,6 +622,7 @@
 
       this._touchHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
+          if (isZapperUIEvent(e)) return;
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
@@ -625,6 +647,7 @@
 
       this._auxClickHandler = function (e) {
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
+          if (isZapperUIEvent(e)) return;
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
