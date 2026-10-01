@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.6.4"
+VERSION = "1.6.5"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -127,9 +127,53 @@ def build():
       }}
       if (this.isExt) {{
         return new Promise(resolve => {{
-          chrome.storage.local.get([key], res => {{
-            resolve(res[key] !== undefined ? res[key] : defaultValue);
-          }});
+          let resolved = false;
+          // Guard against suspended background context / hung IPC on mobile
+          const timer = setTimeout(() => {{
+            if (!resolved) {{
+              resolved = true;
+              try {{
+                const item = window.localStorage.getItem('besing_' + key);
+                resolve(item ? JSON.parse(item) : defaultValue);
+              }} catch (e) {{
+                resolve(defaultValue);
+              }}
+            }}
+          }}, 800);
+
+          try {{
+            chrome.storage.local.get([key], res => {{
+              if (!resolved) {{
+                resolved = true;
+                clearTimeout(timer);
+                if (chrome.runtime && chrome.runtime.lastError) {{
+                  try {{
+                    const item = window.localStorage.getItem('besing_' + key);
+                    resolve(item ? JSON.parse(item) : defaultValue);
+                  }} catch (e) {{
+                    resolve(defaultValue);
+                  }}
+                }} else {{
+                  const val = (res && res[key] !== undefined) ? res[key] : defaultValue;
+                  try {{
+                    window.localStorage.setItem('besing_' + key, JSON.stringify(val));
+                  }} catch (e) {{}}
+                  resolve(val);
+                }}
+              }}
+            }});
+          }} catch (err) {{
+            if (!resolved) {{
+              resolved = true;
+              clearTimeout(timer);
+              try {{
+                const item = window.localStorage.getItem('besing_' + key);
+                resolve(item ? JSON.parse(item) : defaultValue);
+              }} catch (e) {{
+                resolve(defaultValue);
+              }}
+            }}
+          }}
         }});
       }}
       try {{
@@ -145,8 +189,15 @@ def build():
         try {{ GM_setValue(key, value); return true; }} catch (e) {{ return false; }}
       }}
       if (this.isExt) {{
+        try {{
+          window.localStorage.setItem('besing_' + key, JSON.stringify(value));
+        }} catch (e) {{}}
         return new Promise(resolve => {{
-          chrome.storage.local.set({{ [key]: value }}, () => resolve(true));
+          try {{
+            chrome.storage.local.set({{ [key]: value }}, () => resolve(!chrome.runtime?.lastError));
+          }} catch (e) {{
+            resolve(false);
+          }}
         }});
       }}
       try {{
@@ -181,11 +232,18 @@ def build():
     }}
 
     async init() {{
-      this.siteRules = await BESAdapter.get('site_rules', {{}});
-      if (!this.siteRules || typeof this.siteRules !== 'object') this.siteRules = {{}};
+      const [siteRules, legacyBlocked, enabledScripts, scriptConfigs, widgetPos, globalSettings] = await Promise.all([
+        BESAdapter.get('site_rules', {{}}),
+        BESAdapter.get('blocked_sites', []),
+        BESAdapter.get('enabled_scripts', {{}}),
+        BESAdapter.get('script_configs', {{}}),
+        BESAdapter.get('widget_position', null),
+        BESAdapter.get('global_settings', {{}})
+      ]);
+
+      this.siteRules = (siteRules && typeof siteRules === 'object') ? siteRules : {{}};
 
       // Migrate legacy blocked_sites array if present
-      const legacyBlocked = await BESAdapter.get('blocked_sites', []);
       if (Array.isArray(legacyBlocked)) {{
         for (const item of legacyBlocked) {{
           const host = (item.host || '').toLowerCase().trim();
@@ -196,18 +254,14 @@ def build():
         }}
       }}
 
-      this.enabledScripts = await BESAdapter.get('enabled_scripts', {{}});
-      if (!this.enabledScripts || typeof this.enabledScripts !== 'object') this.enabledScripts = {{}};
+      this.enabledScripts = (enabledScripts && typeof enabledScripts === 'object') ? enabledScripts : {{}};
       if (this.enabledScripts['prevent-redirect'] === undefined) {{
         this.enabledScripts['prevent-redirect'] = true;
       }}
 
-      this.scriptConfigs = await BESAdapter.get('script_configs', {{}});
-      if (!this.scriptConfigs || typeof this.scriptConfigs !== 'object') this.scriptConfigs = {{}};
-
-      this.widgetPos = await BESAdapter.get('widget_position', null);
-      const s = await BESAdapter.get('global_settings', {{}});
-      this.settings = {{ ...this.settings, ...s }};
+      this.scriptConfigs = (scriptConfigs && typeof scriptConfigs === 'object') ? scriptConfigs : {{}};
+      this.widgetPos = widgetPos;
+      this.settings = {{ ...this.settings, ...(globalSettings || {{}}) }};
     }}
 
     getCurrentHost() {{
@@ -726,14 +780,16 @@ def build():
           await this.updater.checkForUpdates(false).catch(() => {{}});
         }}, 3000);
       }} else {{
-        const lastCheck = await BESAdapter.get('last_update_check_time', 0);
-        const ONE_DAY = 24 * 60 * 60 * 1000;
-        if (Date.now() - (lastCheck || 0) > ONE_DAY) {{
-          setTimeout(async () => {{
-            await this.updater.checkForUpdates(false).catch(() => {{}});
-            await BESAdapter.set('last_update_check_time', Date.now());
-          }}, 4000);
-        }}
+        setTimeout(async () => {{
+          try {{
+            const lastCheck = await BESAdapter.get('last_update_check_time', 0);
+            const ONE_DAY = 24 * 60 * 60 * 1000;
+            if (Date.now() - (lastCheck || 0) > ONE_DAY) {{
+              await this.updater.checkForUpdates(false).catch(() => {{}});
+              await BESAdapter.set('last_update_check_time', Date.now());
+            }}
+          }} catch (e) {{}}
+        }}, 4000);
       }}
 
       // Hotkey: Alt + Shift + B
@@ -2303,6 +2359,80 @@ def build():
             </div>
           </div>
         `;
+      }} else if (m.id === 'pagestream') {{
+        const whenToLoad = cfg.whenToLoad || 'bottom';
+        const preloadPages = cfg.preloadPages !== undefined ? Number(cfg.preloadPages) : 1;
+        const enableHistory = cfg.enableHistory !== false;
+        const streamMode = cfg.mode || 'auto';
+        const customNextSelector = cfg.customNextSelector || '';
+        const customPageSelector = cfg.customPageSelector || '';
+
+        specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">When to Load Next Page</span>
+              <span class="besing-shortcut-badge" id="badge-when-load">${{whenToLoad === 'start' ? 'Start (15%)' : (whenToLoad === 'half point' ? 'Half Point (50%)' : 'Bottom (90%)')}}</span>
+            </div>
+            <div class="besing-segmented-group" id="group-when-load" style="margin-top:8px;">
+              <button type="button" class="besing-segmented-btn ${{whenToLoad === 'start' ? 'active' : ''}}" data-when="start">Start</button>
+              <button type="button" class="besing-segmented-btn ${{whenToLoad === 'half point' ? 'active' : ''}}" data-when="half point">Half Point (50%)</button>
+              <button type="button" class="besing-segmented-btn ${{whenToLoad === 'bottom' ? 'active' : ''}}" data-when="bottom">Bottom (90%)</button>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.3;">
+              Controls scroll trigger threshold. Bottom triggers at 90% mark to avoid reading stall before the page end.
+            </p>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-toggle-row">
+              <div>
+                <div class="besing-toggle-title">Preload Next Pages</div>
+                <div class="besing-toggle-desc">Fetches upcoming page in background for zero-lag instant splicing</div>
+              </div>
+              <div class="besing-stepper-row">
+                <button type="button" class="besing-stepper-btn" id="btn-preload-minus">−</button>
+                <span class="besing-stepper-val" id="val-preload-pages">${{preloadPages}}</span>
+                <button type="button" class="besing-stepper-btn" id="btn-preload-plus">+</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-toggle-row">
+              <div>
+                <div class="besing-toggle-title">Browser History Sync</div>
+                <div class="besing-toggle-desc">Pushes visited pages into history & updates address bar URL while scrolling</div>
+              </div>
+              <label class="besing-switch besing-switch-sm">
+                <input type="checkbox" id="chk-stream-history" ${{enableHistory ? 'checked' : ''}}>
+                <span class="besing-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Streaming Engine Mode</span>
+            </div>
+            <div class="besing-segmented-group" id="group-stream-mode" style="margin-top:8px;">
+              <button type="button" class="besing-segmented-btn ${{streamMode === 'auto' ? 'active' : ''}}" data-mode="auto">Smart Auto</button>
+              <button type="button" class="besing-segmented-btn ${{streamMode === 'splice' ? 'active' : ''}}" data-mode="splice">Fetch & Splice</button>
+              <button type="button" class="besing-segmented-btn ${{streamMode === 'click' ? 'active' : ''}}" data-mode="click">Auto Click</button>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row" style="margin-bottom:6px;">
+              <span class="besing-section-title">Custom Selector Overrides</span>
+              <span style="font-size:10px;color:#64748b;">Optional</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+              <input type="text" class="besing-test-input" id="input-custom-next" placeholder="Next link selector (e.g. a.next, #next_page)" value="${{customNextSelector}}">
+              <input type="text" class="besing-test-input" id="input-custom-page" placeholder="Content container selector (e.g. #content, article)" value="${{customPageSelector}}">
+              <button type="button" class="besing-btn-sub-action" id="btn-save-selectors" style="align-self:flex-end;">Save Custom Selectors</button>
+            </div>
+          </div>
+        `;
       }} else {{
         specificControls = `
           <div class="besing-config-section">
@@ -2537,6 +2667,75 @@ def build():
             }}
           }};
         }});
+      }} else if (m.id === 'pagestream') {{
+        // "When to load" 3-state buttons
+        const groupWhen = body.querySelector('#group-when-load');
+        const badgeWhen = body.querySelector('#badge-when-load');
+        if (groupWhen) {{
+          groupWhen.querySelectorAll('.besing-segmented-btn').forEach(btn => {{
+            btn.onclick = async () => {{
+              const whenVal = btn.getAttribute('data-when');
+              groupWhen.querySelectorAll('.besing-segmented-btn').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              if (badgeWhen) {{
+                badgeWhen.textContent = whenVal === 'start' ? 'Start (15%)' : (whenVal === 'half point' ? 'Half Point (50%)' : 'Bottom (90%)');
+              }}
+              await this.applyScriptConfig(m.id, {{ whenToLoad: whenVal }});
+            }};
+          }});
+        }}
+
+        // Preload stepper
+        const btnPreMinus = body.querySelector('#btn-preload-minus');
+        const btnPrePlus = body.querySelector('#btn-preload-plus');
+        const valPreload = body.querySelector('#val-preload-pages');
+        const updatePreload = async (newVal) => {{
+          const clamped = Math.max(0, Math.min(5, newVal));
+          if (valPreload) valPreload.textContent = clamped;
+          await this.applyScriptConfig(m.id, {{ preloadPages: clamped }});
+        }};
+        if (btnPreMinus && valPreload) {{
+          btnPreMinus.onclick = () => updatePreload(Number(valPreload.textContent) - 1);
+        }}
+        if (btnPrePlus && valPreload) {{
+          btnPrePlus.onclick = () => updatePreload(Number(valPreload.textContent) + 1);
+        }}
+
+        // History sync checkbox
+        const chkHistory = body.querySelector('#chk-stream-history');
+        if (chkHistory) {{
+          chkHistory.onchange = async () => {{
+            await this.applyScriptConfig(m.id, {{ enableHistory: chkHistory.checked }});
+          }};
+        }}
+
+        // Streaming mode buttons
+        const groupMode = body.querySelector('#group-stream-mode');
+        if (groupMode) {{
+          groupMode.querySelectorAll('.besing-segmented-btn').forEach(btn => {{
+            btn.onclick = async () => {{
+              const modeVal = btn.getAttribute('data-mode');
+              groupMode.querySelectorAll('.besing-segmented-btn').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              await this.applyScriptConfig(m.id, {{ mode: modeVal }});
+            }};
+          }});
+        }}
+
+        // Custom selectors
+        const btnSaveSelectors = body.querySelector('#btn-save-selectors');
+        const inNext = body.querySelector('#input-custom-next');
+        const inPage = body.querySelector('#input-custom-page');
+        if (btnSaveSelectors && inNext && inPage) {{
+          btnSaveSelectors.onclick = async () => {{
+            await this.applyScriptConfig(m.id, {{
+              customNextSelector: inNext.value.trim(),
+              customPageSelector: inPage.value.trim()
+            }});
+            btnSaveSelectors.textContent = 'Saved!';
+            setTimeout(() => {{ btnSaveSelectors.textContent = 'Save Custom Selectors'; }}, 1500);
+          }};
+        }}
       }}
     }}
 
@@ -2769,6 +2968,12 @@ def build():
         .besing-btn-restore-zapped {{ background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 11px; font-weight: 700; width: 22px; height: 22px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease; flex-shrink: 0; }}
         .besing-btn-restore-zapped:hover {{ background: #ef4444; color: #fff; }}
         .besing-zapped-empty {{ font-size: 11px; color: #64748b; text-align: center; padding: 12px 6px; font-style: italic; }}
+        .besing-segmented-group {{ display: flex; gap: 4px; background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 3px; }}
+        .besing-segmented-btn {{ flex: 1; padding: 6px 8px; border: none; border-radius: 6px; background: transparent; color: #94a3b8; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.15s ease; text-align: center; }}
+        .besing-segmented-btn:hover {{ color: #f1f5f9; background: rgba(255, 255, 255, 0.04); }}
+        .besing-segmented-btn.active {{ background: linear-gradient(135deg, #0284c7, #0369a1); color: #fff; box-shadow: 0 2px 8px rgba(2, 132, 199, 0.35); }}
+        .besing-stepper-row {{ display: flex; align-items: center; gap: 6px; }}
+        .besing-stepper-val {{ font-size: 13px; font-weight: 700; color: #38bdf8; min-width: 22px; text-align: center; font-family: monospace; }}
       `;
       shadow.appendChild(style);
     }}
@@ -2792,13 +2997,28 @@ def build():
   // 1. Synchronously arm security shields at document-start before yielding to event loop
   app.initPreemptiveShields();
 
-  // 2. Initialize storage and load remaining active modules
-  app.init();
+  // 2. Initialize storage and load remaining active modules with resilient fallback
+  app.init().catch(err => {{
+    console.error('[BESing] Storage init error:', err);
+  }}).finally(() => {{
+    app.ensureMounted();
+  }});
+
   if (document.readyState === 'loading') {{
     document.addEventListener('DOMContentLoaded', () => {{
       app.ensureMounted();
     }});
+  }} else {{
+    app.ensureMounted();
   }}
+
+  window.addEventListener('load', () => {{
+    app.ensureMounted();
+  }});
+
+  setTimeout(() => {{
+    app.ensureMounted();
+  }}, 1000);
 }})();
 """
 

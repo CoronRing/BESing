@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BESing - Browser Extension Script Manager",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "description": "Universal script manager bridging userscripts and extensions with draggable UI, auto-install, and site controls.",
   "permissions": [
     "storage",
@@ -14,7 +14,7 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ],
   "action": {

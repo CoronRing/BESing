@@ -94,5 +94,17 @@
     "githubPath": "scripts/prevent-redirect/prevent-redirect.user.js",
     "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/prevent-redirect/prevent-redirect.user.js",
     "localUrl": "http://127.0.0.1:8765/scripts/prevent-redirect/prevent-redirect.user.js"
+  },
+  {
+    "id": "pagestream",
+    "name": "PageStream",
+    "version": "1.0.0",
+    "description": "Continuous page streaming via smart pagination detection and automated clicks for infinite scrolling.",
+    "category": "Productivity",
+    "author": "BESing Team",
+    "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><polyline points=\"7 13 12 18 17 13\"></polyline><polyline points=\"7 6 12 11 17 6\"></polyline></svg>",
+    "githubPath": "scripts/pagestream/pagestream.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/pagestream/pagestream.user.js",
+    "localUrl": "http://127.0.0.1:8765/scripts/pagestream/pagestream.user.js"
   }
 ]

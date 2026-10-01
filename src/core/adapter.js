@@ -29,13 +29,53 @@ export const BESAdapter = (() => {
 
       if (isExtension) {
         return new Promise((resolve) => {
-          chrome.storage.local.get([key], (result) => {
-            if (chrome.runtime.lastError || result[key] === undefined) {
-              resolve(defaultValue);
-            } else {
-              resolve(result[key]);
+          let resolved = false;
+          // Guard against suspended background context / hung IPC on mobile
+          const timer = setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              try {
+                const item = window.localStorage.getItem(STORAGE_PREFIX + key);
+                resolve(item ? JSON.parse(item) : defaultValue);
+              } catch (e) {
+                resolve(defaultValue);
+              }
             }
-          });
+          }, 800);
+
+          try {
+            chrome.storage.local.get([key], (result) => {
+              if (!resolved) {
+                resolved = true;
+                clearTimeout(timer);
+                if (chrome.runtime && chrome.runtime.lastError) {
+                  try {
+                    const item = window.localStorage.getItem(STORAGE_PREFIX + key);
+                    resolve(item ? JSON.parse(item) : defaultValue);
+                  } catch (e) {
+                    resolve(defaultValue);
+                  }
+                } else {
+                  const val = (result && result[key] !== undefined) ? result[key] : defaultValue;
+                  try {
+                    window.localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(val));
+                  } catch (e) {}
+                  resolve(val);
+                }
+              }
+            });
+          } catch (e) {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timer);
+              try {
+                const item = window.localStorage.getItem(STORAGE_PREFIX + key);
+                resolve(item ? JSON.parse(item) : defaultValue);
+              } catch (err) {
+                resolve(defaultValue);
+              }
+            }
+          }
         });
       }
 
@@ -64,10 +104,17 @@ export const BESAdapter = (() => {
       }
 
       if (isExtension) {
+        try {
+          window.localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value));
+        } catch (e) {}
         return new Promise((resolve) => {
-          chrome.storage.local.set({ [key]: value }, () => {
-            resolve(!chrome.runtime.lastError);
-          });
+          try {
+            chrome.storage.local.set({ [key]: value }, () => {
+              resolve(!chrome.runtime?.lastError);
+            });
+          } catch (e) {
+            resolve(false);
+          }
         });
       }
 
