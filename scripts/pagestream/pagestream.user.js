@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PageStream
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.0
-// @description  Continuous page streaming via smart pagination detection and automated clicks for infinite scrolling.
+// @version      1.1.0
+// @description  Continuous page streaming via smart pagination detection and automated clicks for infinite scrolling with rate limiting and IP flood protection.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -16,7 +16,7 @@
   const PageStream = {
     id: 'pagestream',
     name: 'PageStream',
-    version: '1.0.0',
+    version: '1.1.0',
     description: 'Auto-stream infinite pages by automated click or URL fetch splicing. Supports intelligent pagination detection, history sync, and customizable preload.',
     category: 'Productivity',
 
@@ -44,7 +44,15 @@
     _popstateHandler: null,
     _styleEl: null,
     _isLoading: false,
+    _isPreloading: false,
+    _preloadTimer: null,
+    _lastStreamTime: 0,
+    _lastFetchTime: 0,
+    _minStreamInterval: 2500, // Minimum 2.5s between page loads
+    _minFetchInterval: 1500,  // Minimum 1.5s between network fetches
     _hasEnded: false,
+    _consecutiveErrors: 0,
+    _maxPagesPerSession: 50,  // Circuit breaker: max 50 streamed pages per session
     _rule: null,
 
     // Built-in site rules (Pagetual format compatible)
@@ -114,7 +122,12 @@
       this._pushedUrls = new Set([this._initialUrl]);
       this._pageCache = [];
       this._isLoading = false;
+      this._isPreloading = false;
+      this._preloadTimer = null;
+      this._lastStreamTime = 0;
+      this._lastFetchTime = 0;
       this._hasEnded = false;
+      this._consecutiveErrors = 0;
 
       this._injectStyles();
       this._matchRule();
@@ -122,11 +135,9 @@
       this._setupScrollListener();
       this._setupHistoryObserver();
 
-      // Trigger initial preload if configured
+      // Trigger initial preload if configured (polite 2500ms delay to allow initial page to settle)
       if (this._config.preloadPages > 0) {
-        setTimeout(() => {
-          this._checkAndPreload();
-        }, 1200);
+        this._schedulePreload(2500);
       }
 
       console.log(`[PageStream] Initialized (When: ${this._config.whenToLoad}, Preload: ${this._config.preloadPages}, History: ${this._config.enableHistory})`);
@@ -136,6 +147,10 @@
       if (!this._active) return;
       this._active = false;
 
+      if (this._preloadTimer) {
+        clearTimeout(this._preloadTimer);
+        this._preloadTimer = null;
+      }
       if (this._scrollHandler) {
         window.removeEventListener('scroll', this._scrollHandler);
         this._scrollHandler = null;
@@ -174,7 +189,7 @@
       // If rule overrides changed, re-detect next link
       this._setupNextLink();
       if (this._config.preloadPages > 0 && this._pageCache.length === 0) {
-        this._checkAndPreload();
+        this._schedulePreload(2000);
       }
     },
 
@@ -224,18 +239,21 @@
       }
     },
 
-    _extractHref(el) {
+    _extractHref(el, baseUrl = window.location.href) {
       if (!el) return null;
-      if (el.tagName && el.tagName.toLowerCase() === 'a' && el.href) {
-        return el.href;
+      let rawHref = null;
+      if (el.getAttribute) {
+        rawHref = el.getAttribute('href') || el.getAttribute('data-href') || el.getAttribute('data-url');
       }
-      const anchor = el.querySelector ? el.querySelector('a[href]') : null;
-      if (anchor && anchor.href) return anchor.href;
-      const dataHref = el.getAttribute ? (el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('href')) : null;
-      if (dataHref) {
-        try { return new URL(dataHref, window.location.href).href; } catch (e) { return dataHref; }
+      if (!rawHref && el.href) {
+        rawHref = el.href;
       }
-      return null;
+      if (!rawHref || rawHref === '#' || rawHref.startsWith('javascript:')) return null;
+      try {
+        return new URL(rawHref, baseUrl).href;
+      } catch (e) {
+        return null;
+      }
     },
 
     _queryBySelector(selectorStr, root = document) {
@@ -377,28 +395,89 @@
     _checkScrollTrigger() {
       if (!this._active || this._isLoading || this._hasEnded) return;
 
-      const scrollY = window.scrollY || window.pageYOffset || document.documentElement.scrollTop;
-      const innerHeight = window.innerHeight;
-      const scrollHeight = Math.max(
-        document.body.scrollHeight,
-        document.documentElement.scrollHeight,
-        document.body.offsetHeight,
-        document.documentElement.offsetHeight
-      );
+      // Rate limit check: do not evaluate trigger if within cooldown period
+      const now = Date.now();
+      if (now - this._lastStreamTime < this._minStreamInterval) return;
 
-      const scrollPos = scrollY + innerHeight;
-      const thresholdMode = this._config.whenToLoad; // 'start', 'half point', 'bottom'
+      // Circuit breaker check
+      if (this._curPageNum >= this._maxPagesPerSession) {
+        if (!this._hasEnded) {
+          console.warn(`[PageStream] Reached maximum safe page limit (${this._maxPagesPerSession}). Halting automatic streaming.`);
+          this._showToast(`PageStream: Reached safety limit (${this._maxPagesPerSession} pages). Streaming paused.`);
+          this._hasEnded = true;
+        }
+        return;
+      }
+
+      const innerHeight = window.innerHeight;
+      const scrollY = window.scrollY || window.pageYOffset || document.documentElement.scrollTop;
+      const thresholdMode = this._config.whenToLoad; // 'start' (15%), 'half point' (50%), 'bottom' (90%)
 
       let shouldTrigger = false;
-      if (thresholdMode === 'start') {
-        // Trigger at 15% mark or after scrolling 150px
-        shouldTrigger = (scrollPos >= scrollHeight * 0.15) || (scrollY > 150) || (scrollHeight <= innerHeight * 1.2);
-      } else if (thresholdMode === 'half point') {
-        // Trigger at 50% mark
-        shouldTrigger = scrollPos >= (scrollHeight * 0.50);
+
+      if (this._curPageNum === 1) {
+        // Page 1: measure progress through the original document
+        const scrollHeight = Math.max(
+          document.body.scrollHeight,
+          document.documentElement.scrollHeight,
+          document.body.offsetHeight,
+          document.documentElement.offsetHeight
+        );
+        const scrollBottom = scrollY + innerHeight;
+        const progress = scrollHeight > 0 ? (scrollBottom / scrollHeight) : 0;
+
+        if (thresholdMode === 'start') {
+          // Trigger at 15% mark or if page is short, but require user to have actually scrolled a bit (>= 80px)
+          shouldTrigger = (progress >= 0.15 && scrollY >= 80) || (scrollHeight <= innerHeight * 1.15 && scrollY >= 30);
+        } else if (thresholdMode === 'half point') {
+          // Trigger at 50% mark
+          shouldTrigger = progress >= 0.50;
+        } else {
+          // 'bottom': Trigger at 90% mark
+          shouldTrigger = progress >= 0.90;
+        }
       } else {
-        // 'bottom': Trigger at 90% mark (not 100%, to eliminate loading stall)
-        shouldTrigger = scrollPos >= (scrollHeight * 0.90);
+        // Page N >= 2: measure progress strictly through the LATEST streamed block
+        const latestBlock = document.querySelector(`.pagestream-streamed-block[data-pagestream-page="${this._curPageNum}"]`);
+        if (!latestBlock) {
+          // Fallback if latestBlock DOM element was removed or not found
+          const scrollHeight = Math.max(
+            document.body.scrollHeight,
+            document.documentElement.scrollHeight
+          );
+          const scrollBottom = scrollY + innerHeight;
+          const progress = scrollHeight > 0 ? (scrollBottom / scrollHeight) : 0;
+          if (thresholdMode === 'start') {
+            shouldTrigger = progress >= 0.85;
+          } else if (thresholdMode === 'half point') {
+            shouldTrigger = progress >= 0.90;
+          } else {
+            shouldTrigger = progress >= 0.95;
+          }
+        } else {
+          const rect = latestBlock.getBoundingClientRect();
+          const blockHeight = rect.height || latestBlock.offsetHeight || 1;
+          // How much of the latest block has entered the viewport
+          const scrolledIntoBlock = innerHeight - rect.top;
+
+          // If the top of the block has not entered the viewport, user is still reading previous page!
+          if (scrolledIntoBlock <= 0) {
+            return;
+          }
+
+          const progress = scrolledIntoBlock / blockHeight;
+
+          if (thresholdMode === 'start') {
+            // Trigger when user scrolls 15% into this new block
+            shouldTrigger = progress >= 0.15;
+          } else if (thresholdMode === 'half point') {
+            // Trigger when user scrolls 50% into this new block
+            shouldTrigger = progress >= 0.50;
+          } else {
+            // 'bottom': Trigger when user scrolls 90% into this new block
+            shouldTrigger = progress >= 0.90;
+          }
+        }
       }
 
       if (shouldTrigger) {
@@ -409,16 +488,20 @@
     // 3. Page Streaming Execution (Fetch/Splice or Click)
     async _streamNextPage() {
       if (this._isLoading || this._hasEnded || !this._active) return;
+
+      const now = Date.now();
+      if (now - this._lastStreamTime < this._minStreamInterval) return;
+
       this._isLoading = true;
+      this._lastStreamTime = now;
 
       try {
         // 1. Check if we already have preloaded page ready
         if (this._pageCache.length > 0) {
           const cached = this._pageCache.shift();
           this._insertPage(cached);
-          this._isLoading = false;
-          // Trigger next preload in background
-          this._checkAndPreload();
+          // Preload next page politely after 3000ms delay
+          this._schedulePreload(3000);
           return;
         }
 
@@ -454,6 +537,7 @@
 
     async _executeAutoClick(btn) {
       console.log('[PageStream] Automating click on next button:', btn);
+      this._lastStreamTime = Date.now();
       const preCount = document.querySelectorAll('*').length;
       try {
         btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -464,7 +548,7 @@
       }
 
       // Wait for DOM mutation or new content
-      await new Promise(r => setTimeout(r, 800));
+      await new Promise(r => setTimeout(r, 1200));
       const postCount = document.querySelectorAll('*').length;
       if (postCount > preCount) {
         this._curPageNum++;
@@ -475,10 +559,10 @@
 
     async _fetchAndSplice(url) {
       if (this._loadedUrls.has(url)) {
+        console.log(`[PageStream] URL already loaded or cyclic: ${url}`);
         this._hasEnded = true;
         return;
       }
-      this._loadedUrls.add(url);
 
       console.log(`[PageStream] Fetching next page: ${url}`);
       const pageData = await this._loadRemotePage(url);
@@ -487,13 +571,22 @@
         return;
       }
 
+      this._loadedUrls.add(url);
       this._insertPage(pageData);
 
-      // Background preload next page if configured
-      this._checkAndPreload();
+      // Background preload next page if configured (scheduled with a 3500ms delay to be polite to the host)
+      this._schedulePreload(3500);
     },
 
     async _loadRemotePage(url) {
+      // Minimum fetch interval throttle
+      const now = Date.now();
+      const timeSinceLastFetch = now - this._lastFetchTime;
+      if (timeSinceLastFetch < this._minFetchInterval) {
+        await new Promise(r => setTimeout(r, this._minFetchInterval - timeSinceLastFetch));
+      }
+      this._lastFetchTime = Date.now();
+
       try {
         const resp = await fetch(url, {
           headers: {
@@ -502,14 +595,44 @@
           credentials: 'include'
         });
 
-        if (!resp.ok) return null;
+        // HTTP Rate limit and Block protection
+        if (resp.status === 429) {
+          console.error('[PageStream] HTTP 429 Too Many Requests detected. Halting PageStream to prevent IP ban.');
+          this._hasEnded = true;
+          this._showToast('PageStream: Server rate limit reached (HTTP 429). Streaming stopped to protect your IP.');
+          return null;
+        }
+
+        if (resp.status === 403) {
+          console.error('[PageStream] HTTP 403 Forbidden detected. Halting PageStream.');
+          this._hasEnded = true;
+          this._showToast('PageStream: Access forbidden (HTTP 403). Streaming stopped.');
+          return null;
+        }
+
+        if (!resp.ok) {
+          console.warn(`[PageStream] Remote page returned HTTP ${resp.status}`);
+          this._consecutiveErrors++;
+          if (this._consecutiveErrors >= 2) {
+            this._hasEnded = true;
+            this._showToast(`PageStream: Repeated server errors (HTTP ${resp.status}). Streaming stopped.`);
+          }
+          return null;
+        }
+
+        // Successful response - reset error counter
+        this._consecutiveErrors = 0;
+
         const text = await resp.text();
         const parser = new DOMParser();
         const doc = parser.parseFromString(text, 'text/html');
 
         const title = (doc.querySelector('title') ? doc.querySelector('title').innerText : '') || `Page ${this._curPageNum + 1}`;
         const mainContent = this._findMainContentElement(doc);
-        if (!mainContent) return null;
+        if (!mainContent) {
+          console.warn('[PageStream] Could not detect main content container in remote document.');
+          return null;
+        }
 
         // Clean up unwanted elements inside cloned content
         if (this._rule && this._rule.filter) {
@@ -531,7 +654,7 @@
           nextEl = this._smartDetectNextLink(doc);
         }
 
-        const nextUrl = this._extractHref(nextEl);
+        const nextUrl = this._extractHref(nextEl, url);
 
         return {
           pageNum: this._curPageNum + 1,
@@ -543,6 +666,10 @@
         };
       } catch (e) {
         console.warn('[PageStream] Failed to load remote page:', e);
+        this._consecutiveErrors++;
+        if (this._consecutiveErrors >= 2) {
+          this._hasEnded = true;
+        }
         return null;
       }
     },
@@ -552,7 +679,13 @@
       this._curPageNum = pageNum;
       this._currentNextUrl = nextUrl;
 
-      // 1. Create clean divider (NO TaiChi icon!)
+      if (!nextUrl || this._loadedUrls.has(nextUrl) || nextUrl === window.location.href) {
+        console.log('[PageStream] No further unique next pages detected.');
+        this._currentNextUrl = null;
+        this._hasEnded = true;
+      }
+
+      // 1. Create clean divider (Cyber-Pet badge, NO TaiChi icon)
       const divider = this._createDivider(pageNum, url, title);
 
       // 2. Wrap content node in streamed container
@@ -563,15 +696,23 @@
       streamedWrapper.setAttribute('data-pagestream-title', title);
       streamedWrapper.appendChild(contentNode);
 
-      // 3. Find target insertion point
-      const currentMain = this._findMainContentElement(document);
-      if (currentMain && currentMain.parentNode) {
-        // Insert after main content container
-        currentMain.parentNode.insertBefore(divider, currentMain.nextSibling);
-        currentMain.parentNode.insertBefore(streamedWrapper, divider.nextSibling);
+      // 3. Find insertion target: ALWAYS after the latest streamed block if one exists!
+      const existingBlocks = document.querySelectorAll('.pagestream-streamed-block');
+      const lastBlock = existingBlocks.length > 0 ? existingBlocks[existingBlocks.length - 1] : null;
+
+      if (lastBlock && lastBlock.parentNode) {
+        lastBlock.parentNode.insertBefore(divider, lastBlock.nextSibling);
+        lastBlock.parentNode.insertBefore(streamedWrapper, divider.nextSibling);
       } else {
-        document.body.appendChild(divider);
-        document.body.appendChild(streamedWrapper);
+        const currentMain = this._findMainContentElement(document);
+        if (currentMain && currentMain.parentNode) {
+          // Insert after main content container
+          currentMain.parentNode.insertBefore(divider, currentMain.nextSibling);
+          currentMain.parentNode.insertBefore(streamedWrapper, divider.nextSibling);
+        } else {
+          document.body.appendChild(divider);
+          document.body.appendChild(streamedWrapper);
+        }
       }
 
       // 4. Hide / remove original pagination or replace target from previous page
@@ -612,21 +753,41 @@
     },
 
     // 4. Preload Engine (Requirement 2)
+    _schedulePreload(delay = 3000) {
+      if (this._preloadTimer) {
+        clearTimeout(this._preloadTimer);
+        this._preloadTimer = null;
+      }
+      if (!this._active || this._hasEnded || this._config.preloadPages <= 0) return;
+
+      this._preloadTimer = setTimeout(() => {
+        this._preloadTimer = null;
+        this._checkAndPreload();
+      }, delay);
+    },
+
     async _checkAndPreload() {
       const preloadCount = this._config.preloadPages;
-      if (preloadCount <= 0 || !this._active || this._hasEnded) return;
+      if (preloadCount <= 0 || !this._active || this._hasEnded || this._isPreloading || this._isLoading) return;
 
       if (this._pageCache.length < preloadCount && this._currentNextUrl) {
         const targetUrl = this._currentNextUrl;
         if (this._loadedUrls.has(targetUrl)) return;
 
+        this._isPreloading = true;
         console.log(`[PageStream] Preloading background page: ${targetUrl}`);
-        const preData = await this._loadRemotePage(targetUrl);
-        if (preData) {
-          this._loadedUrls.add(targetUrl);
-          this._pageCache.push(preData);
-          this._currentNextUrl = preData.nextUrl;
-          console.log(`[PageStream] Background preloaded page ${preData.pageNum} ready in cache.`);
+        try {
+          const preData = await this._loadRemotePage(targetUrl);
+          if (preData) {
+            this._loadedUrls.add(targetUrl);
+            this._pageCache.push(preData);
+            this._currentNextUrl = preData.nextUrl;
+            console.log(`[PageStream] Background preloaded page ${preData.pageNum} ready in cache.`);
+          }
+        } catch (e) {
+          console.warn('[PageStream] Preload failed:', e);
+        } finally {
+          this._isPreloading = false;
         }
       }
     },
@@ -701,6 +862,25 @@
         .replace(/"/g, '&quot;');
     },
 
+    _showToast(msg) {
+      try {
+        let toast = document.getElementById('pagestream-status-toast');
+        if (!toast) {
+          toast = document.createElement('div');
+          toast.id = 'pagestream-status-toast';
+          toast.className = 'pagestream-status-toast';
+          (document.body || document.documentElement).appendChild(toast);
+        }
+        toast.textContent = msg;
+        toast.classList.add('visible');
+        setTimeout(() => {
+          if (toast && toast.parentNode) {
+            toast.classList.remove('visible');
+          }
+        }, 4500);
+      } catch (e) {}
+    },
+
     // 6. Visual Styles (Divider, Frosted Glass, No TaiChi)
     _injectStyles() {
       if (document.getElementById('pagestream-injected-styles')) return;
@@ -767,6 +947,31 @@
           width: 100% !important;
           box-sizing: border-box !important;
           animation: pagestreamFadeIn 0.35s ease-out !important;
+        }
+        .pagestream-status-toast {
+          position: fixed !important;
+          bottom: 24px !important;
+          left: 50% !important;
+          transform: translateX(-50%) translateY(20px) !important;
+          background: rgba(15, 23, 42, 0.94) !important;
+          backdrop-filter: blur(10px) !important;
+          -webkit-backdrop-filter: blur(10px) !important;
+          color: #f87171 !important;
+          border: 1px solid rgba(248, 113, 113, 0.4) !important;
+          border-radius: 9999px !important;
+          padding: 8px 18px !important;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+          font-size: 13px !important;
+          font-weight: 600 !important;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+          z-index: 2147483647 !important;
+          pointer-events: none !important;
+          opacity: 0 !important;
+          transition: opacity 0.3s ease, transform 0.3s ease !important;
+        }
+        .pagestream-status-toast.visible {
+          opacity: 1 !important;
+          transform: translateX(-50%) translateY(0) !important;
         }
         @keyframes pagestreamFadeIn {
           from { opacity: 0; transform: translateY(10px); }
