@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.6.6  
+**Version:** 1.6.7  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -327,7 +327,14 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Debounced Preload Engine with Concurrency Lock**: Background preloads are decoupled from immediate page insertion and debounced by 3000ms (`_schedulePreload(3000)`). A dedicated `_isPreloading` lock prevents concurrent preloads and suppresses preloading while user-initiated stream loading is in flight.
 - **HTTP 429 Too Many Requests & HTTP 403 Forbidden Shielding**: When `_loadRemotePage()` encounters HTTP 429 or 403, PageStream immediately halts streaming permanently for the session (`this._hasEnded = true`) and displays a non-intrusive floating status toast (`PageStream: Server rate limit reached (HTTP 429). Streaming stopped to protect your IP.`). For repeated 5xx server errors, streaming halts after two consecutive failures.
 - **Strict Chronological DOM Insertion Ordering**: Fixed an insertion order flaw where new pages were previously inserted after the initial main container. In v1.6.6, new pages are inserted immediately after the last existing `.pagestream-streamed-block`, guaranteeing that Page 2, Page 3, and Page 4 appear in strictly ascending chronological reading order.
-- **Session Safety Circuit Breaker**: PageStream includes a built-in safety ceiling of 50 pages per session (`_maxPagesPerSession: 50`). If an unbounded list or catalog is streamed continuously, PageStream automatically pauses to prevent run-away bandwidth consumption.
-
-
-
+### 7.22 Text Size Enhancer Autosizing Fix, Multi-Mode Scaling & Text Color Adjust (v1.6.7)
+- **Root Cause Analysis of the "Only Scaling Title" Bug**: On mobile Chromium browsers (Edge and Chrome for Android) and responsive desktop themes, applying CSS `document.documentElement.style.zoom` previously caused headings (`<h1>`, `<h2>`) to scale upwards while reading paragraphs (`<p>`, `#content`, `.chaptercontent`, `article`) remained clamped at their standard size or shrank. This occurred due to Chromium's internal mobile Text Autosizer (Font Inflation algorithm). Whenever mobile viewport metadata or CSS reset rules (`-webkit-text-size-adjust: 100%`) are active, the layout engine detects body paragraphs and artificially forces their computed font size down to match the screen width, while headings are classified as titles and allowed to scale with zoom. Furthermore, many online reading and novel sites assign fixed pixel sizes with high specificity or `!important` to chapter containers (`#content`, `.showtxt`, `.read-content`), which resisted standard zoom inheritance.
+- **Three-Tier Scaling Mode Architecture (`text-size-control`)**: In v1.6.7, Text Size Enhancer introduces a versatile mode switcher:
+  1. **Smart Hybrid (`hybrid`, Default)**: Combines page zoom (`document.documentElement.style.zoom = scale`) with explicit mobile font autosizing overrides (`-webkit-text-size-adjust: ${percent}% !important; text-size-adjust: ${percent}% !important;`) across `html`, `body`, and all reading containers (`p`, `li`, `#content`, `.chaptercontent`, `.showtxt`, `.read-content`, `article`). This prevents mobile browsers from clamping paragraph sizes and ensures both titles and chapter text scale harmoniously. The BESing floating widget and HUDs are counter-zoomed (`zoom: ${1 / scale}`) to maintain crisp, 1x native interaction.
+  2. **Text Only (`text-only`)**: Completely leaves the page layout, viewport width, and documentElement zoom untouched (`zoom: ''`), directly scaling the font size and line height of all reading paragraphs and headings (`calc(max(1.05rem, 16px) * scale) !important`). This is ideal for fixed-width websites where page zoom creates horizontal scrollbars or breaks navigation bars.
+  3. **Page Zoom (`zoom`)**: Classic layout and element zoom for full-page magnification.
+- **Text Color Adjust & High-Contrast Presets (`color-change`)**: To ensure comfortable readability when users switch background tones (Eye Protect, Old Paper, Dark Mode, or Custom tones), `color-change` introduces a comprehensive Text Color Adjust system:
+  1. **Curated Presets**: Quick-select presets including Pure White (`#ffffff`), Deep Black (`#0f172a`), Charcoal (`#334155`), Soft Gray (`#94a3b8`), Warm Cream (`#fef3c7`), and Original (Site Default).
+  2. **Custom Text Color Picker**: Integrated HTML5 color picker and hex text input for precise color customization.
+  3. **Form Field & Widget Isolation**: The injected text color style uses strict CSS pseudo-selectors to exclude form controls (`:not(input):not(textarea):not(select):not(button)`) and completely protects the BESing Shadow DOM host and floating widgets (`body *:not(#__besing_root__):not(#__besing_root__ *):not([id^="besing"]):not([class*="besing"])`). Search inputs, textareas, buttons, and BESing UI components retain their native styling without contrast clashing.
+  4. **One-Click Master Reset**: A unified reset button restores site brightness to 0%, background tint to Original, and text color to Site Default simultaneously.

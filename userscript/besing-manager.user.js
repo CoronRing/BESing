@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.6.6
+// @version      1.6.7
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -528,13 +528,13 @@
       const mod = {
     id: 'text-size-control',
     name: 'Text Size Enhancer',
-    version: '1.0.0',
-    description: 'Enlarges text and page zoom (125%, 150%, 200%+) so small website fonts become easily readable.',
+    version: '1.1.0',
+    description: 'Enlarges text and page zoom (125%, 150%, 200%+) so small website fonts and novel paragraphs become easily readable.',
     category: 'Accessibility',
     _styleNode: null,
     _config: {
       fontSizePercent: 125,
-      mode: 'zoom'
+      mode: 'hybrid' // 'hybrid' | 'text-only' | 'zoom'
     },
 
     init(cfg) {
@@ -555,11 +555,8 @@
     applySize() {
       const percent = Math.max(70, Math.min(400, Number(this._config.fontSizePercent) || 125));
       const scale = percent / 100;
+      const mode = this._config.mode || 'hybrid';
 
-      // Apply zoom to documentElement for full layout and text scaling
-      document.documentElement.style.zoom = scale;
-
-      // Counter-zoom BESing root so manager and widget remain crisp 1x size
       if (!this._styleNode) {
         const style = document.createElement('style');
         style.id = 'besing-text-size-style';
@@ -568,11 +565,75 @@
       }
 
       const counterScale = (1 / scale).toFixed(4);
-      this._styleNode.textContent = `
-        #__besing_root__ {
-          zoom: ${counterScale} !important;
-        }
-      `;
+
+      if (percent === 100) {
+        document.documentElement.style.zoom = '';
+        this._styleNode.textContent = '';
+        return;
+      }
+
+      if (mode === 'text-only') {
+        // Mode 1: Text-Only - keeps page layout width intact, enlarges all reading text & paragraphs
+        document.documentElement.style.zoom = '';
+        this._styleNode.textContent = `
+          html, body {
+            -webkit-text-size-adjust: ${percent}% !important;
+            text-size-adjust: ${percent}% !important;
+          }
+          p, li, dt, dd, blockquote,
+          #content, #content p, #txtContent, #txtContent p,
+          .chaptercontent, .chaptercontent p, .showtxt, .showtxt p,
+          .read-content, .read-content p, article, article p,
+          .entry-content, .entry-content p, .post-content, .post-content p,
+          .article-content, .article-content p, .novel-content, .novel-content p {
+            font-size: calc(max(1.05rem, 16px) * ${scale}) !important;
+            line-height: 1.7 !important;
+          }
+          h1 { font-size: calc(max(1.75rem, 24px) * ${scale}) !important; }
+          h2 { font-size: calc(max(1.4rem, 20px) * ${scale}) !important; }
+          h3 { font-size: calc(max(1.2rem, 18px) * ${scale}) !important; }
+          #__besing_root__, #besing-zapper-hud, #pagestream-status-toast {
+            -webkit-text-size-adjust: 100% !important;
+            text-size-adjust: 100% !important;
+          }
+        `;
+      } else if (mode === 'zoom') {
+        // Mode 2: Standard Page Zoom
+        document.documentElement.style.zoom = scale;
+        this._styleNode.textContent = `
+          html, body {
+            -webkit-text-size-adjust: ${percent}% !important;
+            text-size-adjust: ${percent}% !important;
+          }
+          #__besing_root__, #besing-zapper-hud, #pagestream-status-toast {
+            zoom: ${counterScale} !important;
+            -webkit-text-size-adjust: 100% !important;
+            text-size-adjust: 100% !important;
+          }
+        `;
+      } else {
+        // Mode 3: Smart Hybrid (Default) - Page zoom + guaranteed paragraph scaling
+        document.documentElement.style.zoom = scale;
+        this._styleNode.textContent = `
+          html, body {
+            -webkit-text-size-adjust: ${percent}% !important;
+            text-size-adjust: ${percent}% !important;
+          }
+          /* Ensure novel reading containers and paragraphs expand even when mobile browsers clamp them */
+          #content, #content p, #txtContent, #txtContent p,
+          .chaptercontent, .chaptercontent p, .showtxt, .showtxt p,
+          .read-content, .read-content p, article p, .novel-content,
+          .entry-content p, .post-content p, .article-content p, p {
+            -webkit-text-size-adjust: ${percent}% !important;
+            text-size-adjust: ${percent}% !important;
+          }
+          #__besing_root__, #besing-zapper-hud, #pagestream-status-toast {
+            zoom: ${counterScale} !important;
+            -webkit-text-size-adjust: 100% !important;
+            text-size-adjust: 100% !important;
+          }
+        `;
+      }
     },
 
     destroy() {
@@ -732,17 +793,20 @@
       const mod = {
     id: 'color-change',
     name: 'Page Color & Brightness',
-    version: '1.1.0',
-    description: 'Adjusts background color presets (Eye Protect, Old Paper, Dark) and site background brightness.',
+    version: '1.2.0',
+    description: 'Adjusts background color presets (Eye Protect, Old Paper, Dark), site background brightness, and high-contrast text colors.',
     category: 'Visual',
     _prevBodyBg: null,
     _prevHtmlBg: null,
     _presetOverlay: null,
     _brightnessOverlay: null,
+    _textColorStyle: null,
     _config: {
       brightness: 0, // -100 (lighten) to +100 (deepen / darken)
       preset: 'eye-protect', // 'none' | 'eye-protect' | 'old-paper' | 'dark' | 'soft-sepia' | 'cool-mint' | 'custom'
-      customColor: '#cce8cf'
+      customColor: '#cce8cf',
+      textColor: 'default', // 'default' | 'white' | 'black' | 'charcoal' | 'gray' | 'amber' | 'custom'
+      customTextColor: '#ffffff'
     },
 
     PRESETS: {
@@ -752,6 +816,15 @@
       'dark': { name: 'Dark Mode', color: '#18181b', overlay: 'rgba(24, 24, 27, 0.65)' },
       'soft-sepia': { name: 'Soft Sepia', color: '#eee4cd', overlay: 'rgba(238, 228, 205, 0.42)' },
       'cool-mint': { name: 'Cool Mint', color: '#e0f2fe', overlay: 'rgba(224, 242, 254, 0.42)' }
+    },
+
+    TEXT_COLORS: {
+      'default': { name: 'Original', color: 'transparent', text: null, border: '#475569' },
+      'white': { name: 'Pure White', color: '#ffffff', text: '#ffffff', border: '#f8fafc' },
+      'black': { name: 'Deep Black', color: '#0f172a', text: '#0f172a', border: '#0f172a' },
+      'charcoal': { name: 'Charcoal', color: '#334155', text: '#334155', border: '#64748b' },
+      'gray': { name: 'Soft Gray', color: '#94a3b8', text: '#94a3b8', border: '#94a3b8' },
+      'amber': { name: 'Warm Cream', color: '#fef3c7', text: '#fef3c7', border: '#fde68a' }
     },
 
     init(cfg) {
@@ -821,7 +894,7 @@
         presetOverlayColor = this.PRESETS[presetKey].overlay;
       }
 
-      // Apply Preset
+      // Apply Background Preset
       if (presetKey !== 'none') {
         if (document.documentElement) document.documentElement.style.backgroundColor = presetColor;
         if (document.body) document.body.style.backgroundColor = presetColor;
@@ -837,24 +910,62 @@
         }
       }
 
-      // Apply Brightness Dragger on top of site's current background
-      // Dragging left (< 0): makes it lighter (e.g., blue -> light blue)
-      // Dragging right (> 0): makes it deep and eventually dark (e.g., blue -> deep navy -> dark)
+      // Apply Brightness Dragger
       const bVal = Math.max(-100, Math.min(100, Number(this._config.brightness) || 0));
       if (this._brightnessOverlay) {
         if (bVal < 0) {
-          // Lighter: white overlay with soft screen / mix blend
           const factor = Math.min(0.88, (Math.abs(bVal) / 100) * 0.95).toFixed(3);
           this._brightnessOverlay.style.backgroundColor = `rgba(255, 255, 255, ${factor})`;
           this._brightnessOverlay.style.mixBlendMode = 'screen';
         } else if (bVal > 0) {
-          // Deeper / Darker: black overlay with multiply / darkening blend
           const factor = Math.min(0.92, (bVal / 100) * 0.96).toFixed(3);
           this._brightnessOverlay.style.backgroundColor = `rgba(0, 0, 0, ${factor})`;
           this._brightnessOverlay.style.mixBlendMode = 'multiply';
         } else {
           this._brightnessOverlay.style.backgroundColor = 'transparent';
         }
+      }
+
+      // Apply Text Color Adjust
+      const tKey = this._config.textColor || 'default';
+      let resolvedTextColor = null;
+      if (tKey === 'custom') {
+        resolvedTextColor = this._config.customTextColor || '#ffffff';
+      } else if (this.TEXT_COLORS[tKey] && tKey !== 'default') {
+        resolvedTextColor = this.TEXT_COLORS[tKey].text;
+      }
+
+      if (resolvedTextColor) {
+        if (!this._textColorStyle) {
+          const s = document.createElement('style');
+          s.id = 'besing-text-color-style';
+          (document.head || document.documentElement).appendChild(s);
+          this._textColorStyle = s;
+        }
+        this._textColorStyle.textContent = `
+          /* Apply high-contrast text color while strictly protecting BESing UI components and form fields */
+          body *:not(#__besing_root__):not(#__besing_root__ *):not([id^="besing"]):not([class*="besing"]):not(input):not(textarea):not(select):not(button),
+          p:not(#__besing_root__ *), span:not(#__besing_root__ *),
+          a:not(#__besing_root__ *), li:not(#__besing_root__ *),
+          h1:not(#__besing_root__ *), h2:not(#__besing_root__ *), h3:not(#__besing_root__ *),
+          h4:not(#__besing_root__ *), h5:not(#__besing_root__ *), h6:not(#__besing_root__ *),
+          article:not(#__besing_root__ *), section:not(#__besing_root__ *), blockquote:not(#__besing_root__ *),
+          #content:not(#__besing_root__ *), #content *:not(#__besing_root__ *):not(input):not(textarea):not(button),
+          #txtContent:not(#__besing_root__ *), #txtContent *:not(#__besing_root__ *):not(input):not(textarea):not(button),
+          .chaptercontent:not(#__besing_root__ *), .chaptercontent *:not(#__besing_root__ *):not(input):not(textarea):not(button),
+          .showtxt:not(#__besing_root__ *), .showtxt *:not(#__besing_root__ *):not(input):not(textarea):not(button),
+          .read-content:not(#__besing_root__ *), .read-content *:not(#__besing_root__ *):not(input):not(textarea):not(button),
+          .entry-content:not(#__besing_root__ *), .entry-content *:not(#__besing_root__ *):not(input):not(textarea):not(button) {
+            color: ${resolvedTextColor} !important;
+          }
+        `;
+      } else {
+        if (this._textColorStyle) {
+          this._textColorStyle.remove();
+          this._textColorStyle = null;
+        }
+        const s = document.getElementById('besing-text-color-style');
+        if (s) s.remove();
       }
     },
 
@@ -873,10 +984,16 @@
         this._brightnessOverlay.remove();
         this._brightnessOverlay = null;
       }
+      if (this._textColorStyle) {
+        this._textColorStyle.remove();
+        this._textColorStyle = null;
+      }
       const p1 = document.getElementById('besing-bg-preset-overlay');
       if (p1) p1.remove();
       const p2 = document.getElementById('besing-bg-brightness-overlay');
       if (p2) p2.remove();
+      const p3 = document.getElementById('besing-text-color-style');
+      if (p3) p3.remove();
     }
   };
       mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"5\"/><path d=\"M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42\"/></svg>";
@@ -3362,7 +3479,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.6.6';
+    static CURRENT_VERSION = '1.6.7';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -4989,6 +5106,7 @@
 
       if (m.id === 'text-size-control') {
         const curZoom = Math.max(70, Math.min(400, Number(cfg.fontSizePercent) || 125));
+        const curMode = cfg.mode || 'hybrid';
         const presets = [100, 115, 125, 150, 175, 200, 250, 300];
         const presetsHtml = presets.map(p => `
           <button type="button" class="besing-zoom-pill ${curZoom === p ? 'active' : ''}" data-zoom="${p}">${p}%</button>
@@ -5012,6 +5130,13 @@
               ${presetsHtml}
             </div>
 
+            <div class="besing-section-title" style="margin-top:10px;">Scaling Mode</div>
+            <div class="besing-segmented-group" id="group-text-size-mode" style="margin-top:4px;">
+              <button type="button" class="besing-segmented-btn ${curMode === 'hybrid' ? 'active' : ''}" data-mode="hybrid" title="Page zoom with paragraph unlock (Recommended)">⚡ Smart Hybrid</button>
+              <button type="button" class="besing-segmented-btn ${curMode === 'text-only' ? 'active' : ''}" data-mode="text-only" title="Scales paragraphs and headings directly without altering page width">📖 Text Only</button>
+              <button type="button" class="besing-segmented-btn ${curMode === 'zoom' ? 'active' : ''}" data-mode="zoom" title="Full layout and element zoom">🔍 Page Zoom</button>
+            </div>
+
             <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;">
               <button type="button" class="besing-btn-sub-action" id="btn-reset-zoom">Reset to 100%</button>
               <span style="font-size:10px;color:#64748b;">Counter-zoomed widget stays crisp</span>
@@ -5022,6 +5147,8 @@
         const curBrightness = Math.max(-100, Math.min(100, Number(cfg.brightness) || 0));
         const curPreset = cfg.preset || 'eye-protect';
         const customColor = cfg.customColor || '#cce8cf';
+        const curTextColor = cfg.textColor || 'default';
+        const customTextColor = cfg.customTextColor || '#ffffff';
 
         const presets = [
           { key: 'none', name: 'Original', color: 'transparent', border: '#475569' },
@@ -5032,8 +5159,24 @@
           { key: 'cool-mint', name: 'Cool Mint', color: '#e0f2fe', border: '#7dd3fc' }
         ];
 
+        const textPresets = [
+          { key: 'default', name: 'Original', color: 'transparent', border: '#475569' },
+          { key: 'white', name: 'Pure White', color: '#ffffff', border: '#f8fafc' },
+          { key: 'black', name: 'Deep Black', color: '#0f172a', border: '#0f172a' },
+          { key: 'charcoal', name: 'Charcoal', color: '#334155', border: '#64748b' },
+          { key: 'gray', name: 'Soft Gray', color: '#94a3b8', border: '#94a3b8' },
+          { key: 'amber', name: 'Warm Cream', color: '#fef3c7', border: '#fde68a' }
+        ];
+
         const presetsHtml = presets.map(p => `
-          <button type="button" class="besing-preset-card ${curPreset === p.key ? 'active' : ''}" data-preset="${p.key}">
+          <button type="button" class="besing-preset-card besing-bg-preset-card ${curPreset === p.key ? 'active' : ''}" data-preset="${p.key}">
+            <span class="besing-preset-swatch" style="background:${p.color};border-color:${p.border}"></span>
+            <span class="besing-preset-label">${p.name}</span>
+          </button>
+        `).join('');
+
+        const textPresetsHtml = textPresets.map(p => `
+          <button type="button" class="besing-preset-card besing-text-preset-card ${curTextColor === p.key ? 'active' : ''}" data-text-color="${p.key}">
             <span class="besing-preset-swatch" style="background:${p.color};border-color:${p.border}"></span>
             <span class="besing-preset-label">${p.name}</span>
           </button>
@@ -5042,6 +5185,13 @@
         let bLabel = '🎯 Normal (Original Site BG)';
         if (curBrightness < 0) bLabel = `☀️ Lighter (+${Math.abs(curBrightness)}%)`;
         else if (curBrightness > 0) bLabel = `🌙 Deep Dark (+${curBrightness}%)`;
+
+        let curTextColorName = 'Original';
+        if (curTextColor === 'custom') curTextColorName = `Custom (${customTextColor})`;
+        else {
+          const found = textPresets.find(p => p.key === curTextColor);
+          if (found) curTextColorName = found.name;
+        }
 
         specificControls = `
           <div class="besing-config-section">
@@ -5074,11 +5224,31 @@
               <label class="besing-custom-color-label">Custom Tone:</label>
               <input type="color" id="custom-color-picker" value="${customColor}">
               <input type="text" id="custom-color-hex" class="besing-input-sm" value="${customColor}">
-              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-color">Apply Custom</button>
+              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-color">Apply Custom Tone</button>
+            </div>
+          </div>
+
+          <div class="besing-config-section" style="margin-top:10px;">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Text Color Presets</span>
+              <span class="besing-brightness-badge" id="text-color-badge">${curTextColorName}</span>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;line-height:1.35;margin-bottom:6px;">
+              Forces high-contrast text color across reading content, novel chapters, paragraphs, and headings to maintain clarity against custom background tones.
+            </p>
+            <div class="besing-preset-grid">
+              ${textPresetsHtml}
+            </div>
+
+            <div class="besing-custom-color-row">
+              <label class="besing-custom-color-label">Custom Text:</label>
+              <input type="color" id="custom-text-color-picker" value="${customTextColor}">
+              <input type="text" id="custom-text-color-hex" class="besing-input-sm" value="${customTextColor}">
+              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-text">Apply Text Color</button>
             </div>
 
             <div style="margin-top:10px;display:flex;justify-content:flex-end;">
-              <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset to Defaults</button>
+              <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset All Colors & Brightness</button>
             </div>
           </div>
         `;
@@ -5394,12 +5564,28 @@
         body.querySelectorAll('.besing-zoom-pill').forEach(btn => {
           btn.onclick = () => updateZoom(Number(btn.getAttribute('data-zoom')));
         });
+
+        const groupTextMode = body.querySelector('#group-text-size-mode');
+        if (groupTextMode) {
+          groupTextMode.querySelectorAll('.besing-segmented-btn').forEach(btn => {
+            btn.onclick = async () => {
+              const modeVal = btn.getAttribute('data-mode');
+              groupTextMode.querySelectorAll('.besing-segmented-btn').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              await this.applyScriptConfig(m.id, { mode: modeVal });
+            };
+          });
+        }
       } else if (m.id === 'color-change') {
         const bRange = body.querySelector('#brightness-range');
         const bBadge = body.querySelector('#brightness-badge');
         const customPicker = body.querySelector('#custom-color-picker');
         const customHex = body.querySelector('#custom-color-hex');
         const btnApplyCustom = body.querySelector('#btn-apply-custom-color');
+        const tBadge = body.querySelector('#text-color-badge');
+        const customTextPicker = body.querySelector('#custom-text-color-picker');
+        const customTextHex = body.querySelector('#custom-text-color-hex');
+        const btnApplyCustomText = body.querySelector('#btn-apply-custom-text');
         const btnResetBg = body.querySelector('#btn-reset-bg');
 
         const updateBrightness = async (val) => {
@@ -5416,10 +5602,10 @@
           bRange.oninput = (e) => updateBrightness(e.target.value);
         }
 
-        body.querySelectorAll('.besing-preset-card').forEach(card => {
+        body.querySelectorAll('.besing-bg-preset-card').forEach(card => {
           card.onclick = async () => {
             const pKey = card.getAttribute('data-preset');
-            body.querySelectorAll('.besing-preset-card').forEach(c => c.classList.remove('active'));
+            body.querySelectorAll('.besing-bg-preset-card').forEach(c => c.classList.remove('active'));
             card.classList.add('active');
             await this.applyScriptConfig(m.id, { preset: pKey });
           };
@@ -5432,8 +5618,35 @@
           if (btnApplyCustom) {
             btnApplyCustom.onclick = async () => {
               const col = customHex.value.trim() || '#cce8cf';
-              body.querySelectorAll('.besing-preset-card').forEach(c => c.classList.remove('active'));
+              body.querySelectorAll('.besing-bg-preset-card').forEach(c => c.classList.remove('active'));
               await this.applyScriptConfig(m.id, { preset: 'custom', customColor: col });
+            };
+          }
+        }
+
+        body.querySelectorAll('.besing-text-preset-card').forEach(card => {
+          card.onclick = async () => {
+            const tKey = card.getAttribute('data-text-color');
+            body.querySelectorAll('.besing-text-preset-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            if (tBadge) {
+              const names = { default: 'Original', white: 'Pure White', black: 'Deep Black', charcoal: 'Charcoal', gray: 'Soft Gray', amber: 'Warm Cream' };
+              tBadge.textContent = names[tKey] || tKey;
+            }
+            await this.applyScriptConfig(m.id, { textColor: tKey });
+          };
+        });
+
+        if (customTextPicker && customTextHex) {
+          customTextPicker.oninput = (e) => {
+            customTextHex.value = e.target.value;
+          };
+          if (btnApplyCustomText) {
+            btnApplyCustomText.onclick = async () => {
+              const col = customTextHex.value.trim() || '#ffffff';
+              body.querySelectorAll('.besing-text-preset-card').forEach(c => c.classList.remove('active'));
+              if (tBadge) tBadge.textContent = `Custom (${col})`;
+              await this.applyScriptConfig(m.id, { textColor: 'custom', customTextColor: col });
             };
           }
         }
@@ -5442,10 +5655,14 @@
           btnResetBg.onclick = async () => {
             if (bRange) bRange.value = 0;
             updateBrightness(0);
-            body.querySelectorAll('.besing-preset-card').forEach(c => {
+            body.querySelectorAll('.besing-bg-preset-card').forEach(c => {
               c.classList.toggle('active', c.getAttribute('data-preset') === 'none');
             });
-            await this.applyScriptConfig(m.id, { brightness: 0, preset: 'none' });
+            body.querySelectorAll('.besing-text-preset-card').forEach(c => {
+              c.classList.toggle('active', c.getAttribute('data-text-color') === 'default');
+            });
+            if (tBadge) tBadge.textContent = 'Original';
+            await this.applyScriptConfig(m.id, { brightness: 0, preset: 'none', textColor: 'default' });
           };
         }
       } else if (m.id === 'force-copy') {

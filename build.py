@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.6.6"
+VERSION = "1.6.7"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -2140,6 +2140,7 @@ def build():
 
       if (m.id === 'text-size-control') {{
         const curZoom = Math.max(70, Math.min(400, Number(cfg.fontSizePercent) || 125));
+        const curMode = cfg.mode || 'hybrid';
         const presets = [100, 115, 125, 150, 175, 200, 250, 300];
         const presetsHtml = presets.map(p => `
           <button type="button" class="besing-zoom-pill ${{curZoom === p ? 'active' : ''}}" data-zoom="${{p}}">${{p}}%</button>
@@ -2163,6 +2164,13 @@ def build():
               ${{presetsHtml}}
             </div>
 
+            <div class="besing-section-title" style="margin-top:10px;">Scaling Mode</div>
+            <div class="besing-segmented-group" id="group-text-size-mode" style="margin-top:4px;">
+              <button type="button" class="besing-segmented-btn ${{curMode === 'hybrid' ? 'active' : ''}}" data-mode="hybrid" title="Page zoom with paragraph unlock (Recommended)">⚡ Smart Hybrid</button>
+              <button type="button" class="besing-segmented-btn ${{curMode === 'text-only' ? 'active' : ''}}" data-mode="text-only" title="Scales paragraphs and headings directly without altering page width">📖 Text Only</button>
+              <button type="button" class="besing-segmented-btn ${{curMode === 'zoom' ? 'active' : ''}}" data-mode="zoom" title="Full layout and element zoom">🔍 Page Zoom</button>
+            </div>
+
             <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;">
               <button type="button" class="besing-btn-sub-action" id="btn-reset-zoom">Reset to 100%</button>
               <span style="font-size:10px;color:#64748b;">Counter-zoomed widget stays crisp</span>
@@ -2173,6 +2181,8 @@ def build():
         const curBrightness = Math.max(-100, Math.min(100, Number(cfg.brightness) || 0));
         const curPreset = cfg.preset || 'eye-protect';
         const customColor = cfg.customColor || '#cce8cf';
+        const curTextColor = cfg.textColor || 'default';
+        const customTextColor = cfg.customTextColor || '#ffffff';
 
         const presets = [
           {{ key: 'none', name: 'Original', color: 'transparent', border: '#475569' }},
@@ -2183,8 +2193,24 @@ def build():
           {{ key: 'cool-mint', name: 'Cool Mint', color: '#e0f2fe', border: '#7dd3fc' }}
         ];
 
+        const textPresets = [
+          {{ key: 'default', name: 'Original', color: 'transparent', border: '#475569' }},
+          {{ key: 'white', name: 'Pure White', color: '#ffffff', border: '#f8fafc' }},
+          {{ key: 'black', name: 'Deep Black', color: '#0f172a', border: '#0f172a' }},
+          {{ key: 'charcoal', name: 'Charcoal', color: '#334155', border: '#64748b' }},
+          {{ key: 'gray', name: 'Soft Gray', color: '#94a3b8', border: '#94a3b8' }},
+          {{ key: 'amber', name: 'Warm Cream', color: '#fef3c7', border: '#fde68a' }}
+        ];
+
         const presetsHtml = presets.map(p => `
-          <button type="button" class="besing-preset-card ${{curPreset === p.key ? 'active' : ''}}" data-preset="${{p.key}}">
+          <button type="button" class="besing-preset-card besing-bg-preset-card ${{curPreset === p.key ? 'active' : ''}}" data-preset="${{p.key}}">
+            <span class="besing-preset-swatch" style="background:${{p.color}};border-color:${{p.border}}"></span>
+            <span class="besing-preset-label">${{p.name}}</span>
+          </button>
+        `).join('');
+
+        const textPresetsHtml = textPresets.map(p => `
+          <button type="button" class="besing-preset-card besing-text-preset-card ${{curTextColor === p.key ? 'active' : ''}}" data-text-color="${{p.key}}">
             <span class="besing-preset-swatch" style="background:${{p.color}};border-color:${{p.border}}"></span>
             <span class="besing-preset-label">${{p.name}}</span>
           </button>
@@ -2193,6 +2219,13 @@ def build():
         let bLabel = '🎯 Normal (Original Site BG)';
         if (curBrightness < 0) bLabel = `☀️ Lighter (+${{Math.abs(curBrightness)}}%)`;
         else if (curBrightness > 0) bLabel = `🌙 Deep Dark (+${{curBrightness}}%)`;
+
+        let curTextColorName = 'Original';
+        if (curTextColor === 'custom') curTextColorName = `Custom (${{customTextColor}})`;
+        else {{
+          const found = textPresets.find(p => p.key === curTextColor);
+          if (found) curTextColorName = found.name;
+        }}
 
         specificControls = `
           <div class="besing-config-section">
@@ -2225,11 +2258,31 @@ def build():
               <label class="besing-custom-color-label">Custom Tone:</label>
               <input type="color" id="custom-color-picker" value="${{customColor}}">
               <input type="text" id="custom-color-hex" class="besing-input-sm" value="${{customColor}}">
-              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-color">Apply Custom</button>
+              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-color">Apply Custom Tone</button>
+            </div>
+          </div>
+
+          <div class="besing-config-section" style="margin-top:10px;">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Text Color Presets</span>
+              <span class="besing-brightness-badge" id="text-color-badge">${{curTextColorName}}</span>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;line-height:1.35;margin-bottom:6px;">
+              Forces high-contrast text color across reading content, novel chapters, paragraphs, and headings to maintain clarity against custom background tones.
+            </p>
+            <div class="besing-preset-grid">
+              ${{textPresetsHtml}}
+            </div>
+
+            <div class="besing-custom-color-row">
+              <label class="besing-custom-color-label">Custom Text:</label>
+              <input type="color" id="custom-text-color-picker" value="${{customTextColor}}">
+              <input type="text" id="custom-text-color-hex" class="besing-input-sm" value="${{customTextColor}}">
+              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-text">Apply Text Color</button>
             </div>
 
             <div style="margin-top:10px;display:flex;justify-content:flex-end;">
-              <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset to Defaults</button>
+              <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset All Colors & Brightness</button>
             </div>
           </div>
         `;
@@ -2545,12 +2598,28 @@ def build():
         body.querySelectorAll('.besing-zoom-pill').forEach(btn => {{
           btn.onclick = () => updateZoom(Number(btn.getAttribute('data-zoom')));
         }});
+
+        const groupTextMode = body.querySelector('#group-text-size-mode');
+        if (groupTextMode) {{
+          groupTextMode.querySelectorAll('.besing-segmented-btn').forEach(btn => {{
+            btn.onclick = async () => {{
+              const modeVal = btn.getAttribute('data-mode');
+              groupTextMode.querySelectorAll('.besing-segmented-btn').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              await this.applyScriptConfig(m.id, {{ mode: modeVal }});
+            }};
+          }});
+        }}
       }} else if (m.id === 'color-change') {{
         const bRange = body.querySelector('#brightness-range');
         const bBadge = body.querySelector('#brightness-badge');
         const customPicker = body.querySelector('#custom-color-picker');
         const customHex = body.querySelector('#custom-color-hex');
         const btnApplyCustom = body.querySelector('#btn-apply-custom-color');
+        const tBadge = body.querySelector('#text-color-badge');
+        const customTextPicker = body.querySelector('#custom-text-color-picker');
+        const customTextHex = body.querySelector('#custom-text-color-hex');
+        const btnApplyCustomText = body.querySelector('#btn-apply-custom-text');
         const btnResetBg = body.querySelector('#btn-reset-bg');
 
         const updateBrightness = async (val) => {{
@@ -2567,10 +2636,10 @@ def build():
           bRange.oninput = (e) => updateBrightness(e.target.value);
         }}
 
-        body.querySelectorAll('.besing-preset-card').forEach(card => {{
+        body.querySelectorAll('.besing-bg-preset-card').forEach(card => {{
           card.onclick = async () => {{
             const pKey = card.getAttribute('data-preset');
-            body.querySelectorAll('.besing-preset-card').forEach(c => c.classList.remove('active'));
+            body.querySelectorAll('.besing-bg-preset-card').forEach(c => c.classList.remove('active'));
             card.classList.add('active');
             await this.applyScriptConfig(m.id, {{ preset: pKey }});
           }};
@@ -2583,8 +2652,35 @@ def build():
           if (btnApplyCustom) {{
             btnApplyCustom.onclick = async () => {{
               const col = customHex.value.trim() || '#cce8cf';
-              body.querySelectorAll('.besing-preset-card').forEach(c => c.classList.remove('active'));
+              body.querySelectorAll('.besing-bg-preset-card').forEach(c => c.classList.remove('active'));
               await this.applyScriptConfig(m.id, {{ preset: 'custom', customColor: col }});
+            }};
+          }}
+        }}
+
+        body.querySelectorAll('.besing-text-preset-card').forEach(card => {{
+          card.onclick = async () => {{
+            const tKey = card.getAttribute('data-text-color');
+            body.querySelectorAll('.besing-text-preset-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            if (tBadge) {{
+              const names = {{ default: 'Original', white: 'Pure White', black: 'Deep Black', charcoal: 'Charcoal', gray: 'Soft Gray', amber: 'Warm Cream' }};
+              tBadge.textContent = names[tKey] || tKey;
+            }}
+            await this.applyScriptConfig(m.id, {{ textColor: tKey }});
+          }};
+        }});
+
+        if (customTextPicker && customTextHex) {{
+          customTextPicker.oninput = (e) => {{
+            customTextHex.value = e.target.value;
+          }};
+          if (btnApplyCustomText) {{
+            btnApplyCustomText.onclick = async () => {{
+              const col = customTextHex.value.trim() || '#ffffff';
+              body.querySelectorAll('.besing-text-preset-card').forEach(c => c.classList.remove('active'));
+              if (tBadge) tBadge.textContent = `Custom (${{col}})`;
+              await this.applyScriptConfig(m.id, {{ textColor: 'custom', customTextColor: col }});
             }};
           }}
         }}
@@ -2593,10 +2689,14 @@ def build():
           btnResetBg.onclick = async () => {{
             if (bRange) bRange.value = 0;
             updateBrightness(0);
-            body.querySelectorAll('.besing-preset-card').forEach(c => {{
+            body.querySelectorAll('.besing-bg-preset-card').forEach(c => {{
               c.classList.toggle('active', c.getAttribute('data-preset') === 'none');
             }});
-            await this.applyScriptConfig(m.id, {{ brightness: 0, preset: 'none' }});
+            body.querySelectorAll('.besing-text-preset-card').forEach(c => {{
+              c.classList.toggle('active', c.getAttribute('data-text-color') === 'default');
+            }});
+            if (tBadge) tBadge.textContent = 'Original';
+            await this.applyScriptConfig(m.id, {{ brightness: 0, preset: 'none', textColor: 'default' }});
           }};
         }}
       }} else if (m.id === 'force-copy') {{

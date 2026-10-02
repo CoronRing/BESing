@@ -26,8 +26,8 @@
   {
     "id": "text-size-control",
     "name": "Text Size Enhancer",
-    "version": "1.0.0",
-    "description": "Enlarges text and page zoom (125%, 150%, 200%+) with secondary menu and site-isolated settings.",
+    "version": "1.1.0",
+    "description": "Scales text & page zoom (125%, 150%, 200%+) with smart paragraph unlock & text-only mode for novel/article reading.",
     "category": "Accessibility",
     "author": "BESing Team",
     "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M4 7V4h16v3M9 20h6M12 4v16\"/></svg>",
@@ -50,8 +50,8 @@
   {
     "id": "color-change",
     "name": "Page Color & Brightness",
-    "version": "1.1.0",
-    "description": "Background presets (Eye Protect, Old Paper, Dark) & live brightness dragger on top of site background.",
+    "version": "1.2.0",
+    "description": "Background presets, live brightness dragger, and customizable text color presets (White, Black, Charcoal, Cream).",
     "category": "Visual",
     "author": "BESing Team",
     "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"5\"/><path d=\"M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42\"/></svg>",
