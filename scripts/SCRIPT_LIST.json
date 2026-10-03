@@ -106,5 +106,17 @@
     "githubPath": "scripts/pagestream/pagestream.user.js",
     "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/pagestream/pagestream.user.js",
     "localUrl": "http://127.0.0.1:8765/scripts/pagestream/pagestream.user.js"
+  },
+  {
+    "id": "rest-reminder",
+    "name": "Rest Reminder",
+    "version": "1.0.0",
+    "description": "Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.",
+    "category": "Productivity",
+    "author": "BESing Team",
+    "icon": "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"10\"></circle><polyline points=\"12 6 12 12 16 14\"></polyline></svg>",
+    "githubPath": "scripts/rest-reminder/rest-reminder.user.js",
+    "rawUrl": "https://raw.githubusercontent.com/CoronRing/BESing/master/scripts/rest-reminder/rest-reminder.user.js",
+    "localUrl": "http://127.0.0.1:8765/scripts/rest-reminder/rest-reminder.user.js"
   }
 ]

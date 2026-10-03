@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.6.8  
+**Version:** 1.6.9  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -352,3 +352,22 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Visual Viewport Clamping & Layout Readiness Guards**: Coordinate clamping and edge docking now utilize `window.visualViewport` with an explicit layout readiness check (`vpW > 200 && vpH > 200`), preventing early rendering passes or virtual keyboard appearances on iPadOS from collapsing widget positions to (0, 0).
 - **Comprehensive Lifecycle Event Recovery & Emergency 3-Finger Tap Gesture**: The boot sequence attaches listeners for `pageshow`, `visibilitychange`, and `orientationchange` to guarantee instant remounting whenever an iPadOS tab wakes from sleep or rotates. In addition, an emergency 3-finger touch gesture (`touchstart` with 3 touches) immediately triggers `pullUpIcon()`, restoring lost widgets to the visible viewport with a pulsing alert.
 
+### 7.24 Rest Reminder with Repeating Chat Bubble & Custom Timer Controls (v1.6.9)
+- **Vision and Architecture**: Prolonged screen time and continuous reading sessions lead to visual fatigue and posture strain. The Rest Reminder module (`scripts/rest-reminder/rest-reminder.user.js`) provides an unobtrusive, friendly wellness reminder anchored directly to the BESing pet widget. Rather than jarring system-level modal popups or disruptive audio alerts, the reminder manifests as an interactive **anchored chat bubble** emerging from the pet icon.
+- **Anchored Speech Bubble Design (`.besing-rest-chat-box`)**:
+  - The chat box is dynamically computed and positioned relative to the floating trigger's viewport coordinates (`widgetEl.getBoundingClientRect()`), ensuring responsive alignment on both desktop widescreen displays and compact mobile screens.
+  - If the widget is positioned with sufficient headroom (`rect.top > 160px`), the chat bubble renders above the widget (`top = rect.top - 145px`) with a downward-pointing arrow tail (`.tail-down`). If positioned near the top of the viewport (`rect.top <= 160px`), it renders beneath the widget (`top = rect.bottom + 12px`) with an upward-pointing arrow tail (`.tail-up`).
+  - Horizontal placement is securely clamped between `12px` and `window.innerWidth - boxWidth - 12px`, with the directional tail horizontally centered on the pet launcher.
+  - If the widget is tucked into the screen edge in a folded state (`.folded-left`, `.folded-right`, etc.) when the alarm fires, the script automatically un-folds the widget into full visibility and triggers an attention-grabbing gentle pulse ring (`.besing-pet-pulse-alert`).
+- **Strict Non-Dismissal Persistence Constraint**:
+  - In strict compliance with the requirement that the reminder must not disappear unless explicitly acknowledged, the chat bubble disables all auto-dismiss timeouts and outside-click dismiss listeners.
+  - Clicks elsewhere on the page, scroll movements, or tab focus shifts leave the bubble open. Only clicking one of the two explicit action buttons can dismiss it:
+    1. **Repeat (Primary Action, `.besing-btn-primary`)**: Immediately resets the timer for the configured interval (e.g. "Repeat (20m)"), schedules the next alarm in `localStorage`, removes the pulse alert, and dismisses the chat bubble. No rest duration timing or manual resumption is required.
+    2. **Off (`.besing-btn-secondary`)**: Clears the active alarm from storage, disables the `rest-reminder` script toggle via `appMgr.storage.toggleScript('rest-reminder', false)`, and dismisses the chat bubble.
+- **Interval Presets and Custom Time Selector**:
+  - The script manager settings panel provides three quick-select preset buttons: **20 min** (recommended standard), **45 min**, and **60 min**.
+  - A numerical custom stepper input allows users to set any interval between 1 and 720 minutes with increment (`+`) and decrement (`-`) buttons or direct keyboard entry.
+  - A dedicated **Test Chat Bubble Now** action button allows users to immediately preview the chat bubble and verify its positioning without waiting for the timer to expire.
+- **Cross-Tab & Sleep-Wake Resilience**:
+  - The active alarm timestamp is persisted across all browser tabs via `localStorage` key `besing_rest_reminder_alarm`. When multiple tabs are open, the alarm state remains synchronized.
+  - A periodic check interval (every 15 seconds) combined with `visibilitychange` and `pageshow` listeners guarantees that if a laptop lid is closed or a mobile device is put to sleep, the reminder evaluates immediately upon wake if the scheduled timestamp has elapsed.

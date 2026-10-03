@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.6.8"
+VERSION = "1.6.9"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -2602,6 +2602,49 @@ def build():
             </div>
           </div>
         `;
+      }} else if (m.id === 'rest-reminder') {{
+        const intervalMinutes = cfg.intervalMinutes !== undefined ? Number(cfg.intervalMinutes) : 20;
+        const activePreset = cfg.activePreset || (intervalMinutes === 20 ? '20' : (intervalMinutes === 45 ? '45' : (intervalMinutes === 60 ? '60' : 'custom')));
+        const customMinutes = cfg.customMinutes !== undefined ? Number(cfg.customMinutes) : 30;
+
+        specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Reminder Interval</span>
+              <span class="besing-shortcut-badge" id="badge-reminder-interval">${{intervalMinutes}} min</span>
+            </div>
+            <div class="besing-segmented-group" id="group-reminder-preset" style="margin-top:8px;">
+              <button type="button" class="besing-segmented-btn ${{activePreset === '20' ? 'active' : ''}}" data-preset="20">20m (Default)</button>
+              <button type="button" class="besing-segmented-btn ${{activePreset === '45' ? 'active' : ''}}" data-preset="45">45m</button>
+              <button type="button" class="besing-segmented-btn ${{activePreset === '60' ? 'active' : ''}}" data-preset="60">60m</button>
+              <button type="button" class="besing-segmented-btn ${{activePreset === 'custom' ? 'active' : ''}}" data-preset="custom">Custom</button>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.3;">
+              When the time is up, a chat bubble pops up on the icon with Repeat and Off buttons. It remains until you choose an action.
+            </p>
+          </div>
+
+          <div class="besing-config-section" id="section-custom-minutes" style="${{activePreset === 'custom' ? 'display:block;' : 'display:none;'}}">
+            <div class="besing-toggle-row">
+              <div>
+                <div class="besing-toggle-title">Custom Duration (Minutes)</div>
+                <div class="besing-toggle-desc">Set repeating rest interval (1–240 minutes)</div>
+              </div>
+              <div class="besing-stepper-row">
+                <button type="button" class="besing-stepper-btn" id="btn-custom-minus">−</button>
+                <input type="number" class="besing-test-input" id="input-custom-min" min="1" max="240" value="${{customMinutes}}" style="width:58px;padding:3px 6px;text-align:center;font-weight:700;font-family:monospace;color:#38bdf8;">
+                <button type="button" class="besing-stepper-btn" id="btn-custom-plus">+</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <button type="button" class="besing-btn-zapper-launch" id="btn-test-reminder" style="background:linear-gradient(135deg, rgba(56,189,248,0.2), rgba(99,102,241,0.25));border-color:rgba(56,189,248,0.4);color:#38bdf8;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+              <span>Test Chat Bubble Now</span>
+            </button>
+          </div>
+        `;
       }} else {{
         specificControls = `
           <div class="besing-config-section">
@@ -2952,6 +2995,76 @@ def build():
             setTimeout(() => {{ btnSaveSelectors.textContent = 'Save Custom Selectors'; }}, 1500);
           }};
         }}
+      }} else if (m.id === 'rest-reminder') {{
+        const groupPreset = body.querySelector('#group-reminder-preset');
+        const badgeInterval = body.querySelector('#badge-reminder-interval');
+        const secCustom = body.querySelector('#section-custom-minutes');
+        const inCustomMin = body.querySelector('#input-custom-min');
+        const btnMinus = body.querySelector('#btn-custom-minus');
+        const btnPlus = body.querySelector('#btn-custom-plus');
+        const btnTest = body.querySelector('#btn-test-reminder');
+
+        const updateInterval = async (preset, minutes) => {{
+          const clamped = Math.max(1, Math.min(240, Number(minutes) || 20));
+          if (badgeInterval) badgeInterval.textContent = `${{clamped}} min`;
+          if (inCustomMin && preset === 'custom') inCustomMin.value = clamped;
+          if (secCustom) secCustom.style.display = preset === 'custom' ? 'block' : 'none';
+
+          await this.applyScriptConfig(m.id, {{
+            activePreset: preset,
+            intervalMinutes: clamped,
+            customMinutes: preset === 'custom' ? clamped : (Number(inCustomMin?.value) || 30)
+          }});
+        }};
+
+        if (groupPreset) {{
+          groupPreset.querySelectorAll('.besing-segmented-btn').forEach(btn => {{
+            btn.onclick = async () => {{
+              const pVal = btn.getAttribute('data-preset');
+              groupPreset.querySelectorAll('.besing-segmented-btn').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              if (pVal === 'custom') {{
+                const custVal = Number(inCustomMin?.value) || 30;
+                await updateInterval('custom', custVal);
+              }} else {{
+                await updateInterval(pVal, Number(pVal));
+              }}
+            }};
+          }});
+        }}
+
+        if (btnMinus && inCustomMin) {{
+          btnMinus.onclick = async () => {{
+            const nextVal = Math.max(1, (Number(inCustomMin.value) || 30) - 5);
+            inCustomMin.value = nextVal;
+            await updateInterval('custom', nextVal);
+          }};
+        }}
+
+        if (btnPlus && inCustomMin) {{
+          btnPlus.onclick = async () => {{
+            const nextVal = Math.min(240, (Number(inCustomMin.value) || 30) + 5);
+            inCustomMin.value = nextVal;
+            await updateInterval('custom', nextVal);
+          }};
+        }}
+
+        if (inCustomMin) {{
+          inCustomMin.onchange = async () => {{
+            const val = Math.max(1, Math.min(240, Number(inCustomMin.value) || 20));
+            inCustomMin.value = val;
+            await updateInterval('custom', val);
+          }};
+        }}
+
+        if (btnTest) {{
+          btnTest.onclick = () => {{
+            this.closeModal();
+            if (typeof m.showReminderChatBox === 'function') {{
+              m.showReminderChatBox();
+            }}
+          }};
+        }}
       }}
     }}
 
@@ -3190,6 +3303,26 @@ def build():
         .besing-segmented-btn.active {{ background: linear-gradient(135deg, #0284c7, #0369a1); color: #fff; box-shadow: 0 2px 8px rgba(2, 132, 199, 0.35); }}
         .besing-stepper-row {{ display: flex; align-items: center; gap: 6px; }}
         .besing-stepper-val {{ font-size: 13px; font-weight: 700; color: #38bdf8; min-width: 22px; text-align: center; font-family: monospace; }}
+
+        /* Rest Reminder Chat Box */
+        .besing-rest-chat-box {{ position: fixed; z-index: 2147483647; width: 270px; background: linear-gradient(145deg, rgba(15, 23, 42, 0.98) 0%, rgba(30, 27, 75, 0.98) 100%); border: 1.5px solid rgba(129, 140, 248, 0.5); border-radius: 16px; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65), 0 0 25px rgba(99, 102, 241, 0.35); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); padding: 14px 16px; color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; pointer-events: auto !important; animation: besingRestPop 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275); user-select: none; }}
+        @keyframes besingRestPop {{ 0% {{ opacity: 0; transform: scale(0.85) translateY(8px); }} 100% {{ opacity: 1; transform: scale(1) translateY(0); }} }}
+        .besing-rest-arrow {{ position: absolute; width: 12px; height: 12px; background: #121829; border: 1.5px solid rgba(129, 140, 248, 0.5); transform: rotate(45deg); z-index: -1; }}
+        .besing-rest-arrow.arrow-bottom {{ bottom: -7px; border-top: none; border-left: none; }}
+        .besing-rest-arrow.arrow-top {{ top: -7px; border-bottom: none; border-right: none; }}
+        .besing-rest-header {{ display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }}
+        .besing-rest-avatar {{ font-size: 16px; display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; background: rgba(99, 102, 241, 0.2); border-radius: 50%; border: 1px solid rgba(129, 140, 248, 0.4); }}
+        .besing-rest-title {{ font-size: 13px; font-weight: 700; color: #c7d2fe; flex: 1; }}
+        .besing-rest-badge {{ font-size: 10px; font-weight: 700; color: #38bdf8; background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); padding: 1px 6px; border-radius: 8px; }}
+        .besing-rest-msg {{ font-size: 12px; color: #cbd5e1; line-height: 1.45; margin-bottom: 12px; }}
+        .besing-rest-msg strong {{ color: #38bdf8; font-weight: 700; }}
+        .besing-rest-actions {{ display: flex; align-items: center; gap: 8px; }}
+        .besing-rest-btn-repeat {{ flex: 1; background: linear-gradient(135deg, #0284c7, #2563eb); color: #ffffff; border: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 700; cursor: pointer; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35); transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease; display: flex; align-items: center; justify-content: center; gap: 6px; }}
+        .besing-rest-btn-repeat:hover {{ background: linear-gradient(135deg, #0369a1, #1d4ed8); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37, 99, 235, 0.45); }}
+        .besing-rest-btn-repeat:active {{ transform: scale(0.97); }}
+        .besing-rest-btn-off {{ background: rgba(239, 68, 68, 0.12); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.35); border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease; }}
+        .besing-rest-btn-off:hover {{ background: rgba(239, 68, 68, 0.22); border-color: rgba(239, 68, 68, 0.55); transform: translateY(-1px); }}
+        .besing-rest-btn-off:active {{ transform: scale(0.97); }}
       `;
       shadow.appendChild(style);
     }}

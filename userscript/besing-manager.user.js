@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.6.8
+// @version      1.6.9
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -3559,12 +3559,278 @@
       mod.author = "BESing Team";
       mod.category = "Productivity";
       return mod;
+    })(),
+
+    // Module: Rest Reminder
+    (() => {
+      const mod = {
+    id: 'rest-reminder',
+    name: 'Rest Reminder',
+    version: '1.0.0',
+    description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
+    category: 'Productivity',
+    _config: null,
+    _timer: null,
+    _checkInterval: null,
+    _chatBoxEl: null,
+    _targetAlarmTime: 0,
+    _boundReposition: null,
+
+    init(config = {}) {
+      this.destroy();
+      this._config = config || {};
+      this._scheduleNextReminder();
+      this._startPeriodicChecker();
+    },
+
+    onConfigChange(newConfig) {
+      const prevInterval = this._getIntervalMinutes();
+      this._config = newConfig || {};
+      const newInterval = this._getIntervalMinutes();
+      if (prevInterval !== newInterval) {
+        this._scheduleNextReminder(true);
+      }
+    },
+
+    destroy() {
+      this._clearTimers();
+      this.dismissChatBox();
+    },
+
+    _getIntervalMinutes() {
+      const cfg = this._config || {};
+      const val = Number(cfg.intervalMinutes);
+      if (!isNaN(val) && val >= 1 && val <= 240) {
+        return val;
+      }
+      return 20; // Default 20 minutes
+    },
+
+    _scheduleNextReminder(forceNewCycle = false) {
+      this._clearTimers();
+      const intervalMinutes = this._getIntervalMinutes();
+      const intervalMs = intervalMinutes * 60 * 1000;
+      const now = Date.now();
+
+      let targetTime = 0;
+      if (!forceNewCycle) {
+        try {
+          const stored = window.localStorage.getItem('besing_rest_reminder_alarm');
+          if (stored) targetTime = Number(stored);
+        } catch (e) {}
+      }
+
+      // If targetTime is empty, invalid, or expired beyond 2 hours, compute fresh target
+      if (!targetTime || isNaN(targetTime) || targetTime < now - (2 * 60 * 60 * 1000)) {
+        targetTime = now + intervalMs;
+        try {
+          window.localStorage.setItem('besing_rest_reminder_alarm', String(targetTime));
+        } catch (e) {}
+      }
+
+      this._targetAlarmTime = targetTime;
+
+      if (now >= targetTime) {
+        // Alarm already due! Show chat box right away
+        this.showReminderChatBox();
+      } else {
+        const delay = Math.max(500, targetTime - now);
+        this._timer = setTimeout(() => {
+          this.showReminderChatBox();
+        }, delay);
+      }
+    },
+
+    _startPeriodicChecker() {
+      if (this._checkInterval) clearInterval(this._checkInterval);
+      // Periodically verify in case tab was backgrounded or clock shifted
+      this._checkInterval = setInterval(() => {
+        if (!this._chatBoxEl && this._targetAlarmTime && Date.now() >= this._targetAlarmTime) {
+          this.showReminderChatBox();
+        }
+      }, 15000);
+    },
+
+    _clearTimers() {
+      if (this._timer) {
+        clearTimeout(this._timer);
+        this._timer = null;
+      }
+      if (this._checkInterval) {
+        clearInterval(this._checkInterval);
+        this._checkInterval = null;
+      }
+    },
+
+    showReminderChatBox() {
+      if (this._chatBoxEl) return; // Already visible
+
+      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+
+      if (appMgr && typeof appMgr.ensureMounted === 'function') {
+        appMgr.ensureMounted();
+        if (appMgr.widgetEl) {
+          // Un-dock if folded so user sees the full pet icon and speech bubble
+          appMgr.widgetEl.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
+        }
+      }
+
+      const interval = this._getIntervalMinutes();
+
+      // 1. Create chat box element
+      const box = document.createElement('div');
+      box.className = 'besing-rest-chat-box';
+      box.id = 'besing-rest-chat-box';
+
+      box.innerHTML = `
+        <div class="besing-rest-arrow" id="besing-rest-arrow"></div>
+        <div class="besing-rest-header">
+          <span class="besing-rest-avatar">🐾</span>
+          <span class="besing-rest-title">Time to Rest!</span>
+          <span class="besing-rest-badge">${interval}m</span>
+        </div>
+        <div class="besing-rest-msg">
+          You've been active for <strong>${interval} minutes</strong>! Look away from the screen, blink, and stretch.
+        </div>
+        <div class="besing-rest-actions">
+          <button type="button" class="besing-rest-btn-repeat" id="besing-rest-btn-repeat">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+            <span>Repeat (${interval}m)</span>
+          </button>
+          <button type="button" class="besing-rest-btn-off" id="besing-rest-btn-off">
+            Off
+          </button>
+        </div>
+      `;
+
+      // 2. Insert into shadow DOM if available, otherwise document.body
+      const targetContainer = (appMgr && appMgr.shadow) ? appMgr.shadow : (document.body || document.documentElement);
+      targetContainer.appendChild(box);
+      this._chatBoxEl = box;
+
+      this._repositionChatBox();
+
+      // 3. Highlight pet icon with alert pulse while chat box is open
+      if (appMgr && appMgr.widgetEl) {
+        appMgr.widgetEl.classList.add('besing-pulse-alert');
+      }
+
+      // 4. Bind Repeat button (Primary action)
+      const btnRepeat = box.querySelector('#besing-rest-btn-repeat');
+      if (btnRepeat) {
+        btnRepeat.onclick = (e) => {
+          e.stopPropagation();
+          this.dismissChatBox();
+          this._scheduleNextReminder(true); // force new cycle
+        };
+      }
+
+      // 5. Bind Off button
+      const btnOff = box.querySelector('#besing-rest-btn-off');
+      if (btnOff) {
+        btnOff.onclick = (e) => {
+          e.stopPropagation();
+          this.dismissChatBox();
+          this._disableReminder();
+        };
+      }
+
+      // 6. Track resize & reposition
+      this._boundReposition = () => this._repositionChatBox();
+      window.addEventListener('resize', this._boundReposition);
+      window.addEventListener('scroll', this._boundReposition, { passive: true });
+    },
+
+    dismissChatBox() {
+      if (this._chatBoxEl) {
+        if (this._chatBoxEl.parentNode) {
+          this._chatBoxEl.parentNode.removeChild(this._chatBoxEl);
+        }
+        this._chatBoxEl = null;
+      }
+      if (this._boundReposition) {
+        window.removeEventListener('resize', this._boundReposition);
+        window.removeEventListener('scroll', this._boundReposition);
+        this._boundReposition = null;
+      }
+      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      if (appMgr && appMgr.widgetEl) {
+        appMgr.widgetEl.classList.remove('besing-pulse-alert');
+      }
+    },
+
+    _repositionChatBox() {
+      if (!this._chatBoxEl) return;
+      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      const widget = appMgr && appMgr.widgetEl;
+      const box = this._chatBoxEl;
+      const arrow = box.querySelector('#besing-rest-arrow');
+
+      const vpW = window.visualViewport?.width || window.innerWidth || 800;
+      const vpH = window.visualViewport?.height || window.innerHeight || 600;
+      const boxW = Math.min(270, vpW - 24);
+
+      let targetX = vpW - boxW - 20;
+      let targetY = vpH - 180;
+      let isAbove = true;
+
+      if (widget) {
+        const rect = widget.getBoundingClientRect();
+        const widgetCenterX = rect.left + rect.width / 2;
+
+        targetX = Math.max(12, Math.min(vpW - boxW - 12, widgetCenterX - boxW / 2));
+
+        if (rect.top > 160) {
+          targetY = rect.top - 145;
+          isAbove = true;
+        } else {
+          targetY = rect.bottom + 12;
+          isAbove = false;
+        }
+
+        if (arrow) {
+          arrow.className = isAbove ? 'besing-rest-arrow arrow-bottom' : 'besing-rest-arrow arrow-top';
+          const arrowLeft = Math.max(16, Math.min(boxW - 28, widgetCenterX - targetX - 6));
+          arrow.style.left = `${arrowLeft}px`;
+        }
+      }
+
+      box.style.left = `${Math.round(targetX)}px`;
+      box.style.top = `${Math.round(targetY)}px`;
+    },
+
+    _disableReminder() {
+      this.destroy();
+      try {
+        window.localStorage.removeItem('besing_rest_reminder_alarm');
+      } catch (e) {}
+      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      if (appMgr && appMgr.storage && typeof appMgr.storage.setScriptMode === 'function') {
+        const host = appMgr.storage.getCurrentHost();
+        appMgr.storage.setScriptMode(this.id, 'off', host);
+        if (typeof appMgr.refreshCurrentSiteModules === 'function') {
+          appMgr.refreshCurrentSiteModules();
+        }
+        if (typeof appMgr.renderBody === 'function') {
+          appMgr.renderBody();
+        }
+      }
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"10\"></circle><polyline points=\"12 6 12 12 16 14\"></polyline></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Productivity";
+      return mod;
     })()
   ];
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.6.8';
+    static CURRENT_VERSION = '1.6.9';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -5568,6 +5834,49 @@
             </div>
           </div>
         `;
+      } else if (m.id === 'rest-reminder') {
+        const intervalMinutes = cfg.intervalMinutes !== undefined ? Number(cfg.intervalMinutes) : 20;
+        const activePreset = cfg.activePreset || (intervalMinutes === 20 ? '20' : (intervalMinutes === 45 ? '45' : (intervalMinutes === 60 ? '60' : 'custom')));
+        const customMinutes = cfg.customMinutes !== undefined ? Number(cfg.customMinutes) : 30;
+
+        specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Reminder Interval</span>
+              <span class="besing-shortcut-badge" id="badge-reminder-interval">${intervalMinutes} min</span>
+            </div>
+            <div class="besing-segmented-group" id="group-reminder-preset" style="margin-top:8px;">
+              <button type="button" class="besing-segmented-btn ${activePreset === '20' ? 'active' : ''}" data-preset="20">20m (Default)</button>
+              <button type="button" class="besing-segmented-btn ${activePreset === '45' ? 'active' : ''}" data-preset="45">45m</button>
+              <button type="button" class="besing-segmented-btn ${activePreset === '60' ? 'active' : ''}" data-preset="60">60m</button>
+              <button type="button" class="besing-segmented-btn ${activePreset === 'custom' ? 'active' : ''}" data-preset="custom">Custom</button>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.3;">
+              When the time is up, a chat bubble pops up on the icon with Repeat and Off buttons. It remains until you choose an action.
+            </p>
+          </div>
+
+          <div class="besing-config-section" id="section-custom-minutes" style="${activePreset === 'custom' ? 'display:block;' : 'display:none;'}">
+            <div class="besing-toggle-row">
+              <div>
+                <div class="besing-toggle-title">Custom Duration (Minutes)</div>
+                <div class="besing-toggle-desc">Set repeating rest interval (1–240 minutes)</div>
+              </div>
+              <div class="besing-stepper-row">
+                <button type="button" class="besing-stepper-btn" id="btn-custom-minus">−</button>
+                <input type="number" class="besing-test-input" id="input-custom-min" min="1" max="240" value="${customMinutes}" style="width:58px;padding:3px 6px;text-align:center;font-weight:700;font-family:monospace;color:#38bdf8;">
+                <button type="button" class="besing-stepper-btn" id="btn-custom-plus">+</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <button type="button" class="besing-btn-zapper-launch" id="btn-test-reminder" style="background:linear-gradient(135deg, rgba(56,189,248,0.2), rgba(99,102,241,0.25));border-color:rgba(56,189,248,0.4);color:#38bdf8;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+              <span>Test Chat Bubble Now</span>
+            </button>
+          </div>
+        `;
       } else {
         specificControls = `
           <div class="besing-config-section">
@@ -5918,6 +6227,76 @@
             setTimeout(() => { btnSaveSelectors.textContent = 'Save Custom Selectors'; }, 1500);
           };
         }
+      } else if (m.id === 'rest-reminder') {
+        const groupPreset = body.querySelector('#group-reminder-preset');
+        const badgeInterval = body.querySelector('#badge-reminder-interval');
+        const secCustom = body.querySelector('#section-custom-minutes');
+        const inCustomMin = body.querySelector('#input-custom-min');
+        const btnMinus = body.querySelector('#btn-custom-minus');
+        const btnPlus = body.querySelector('#btn-custom-plus');
+        const btnTest = body.querySelector('#btn-test-reminder');
+
+        const updateInterval = async (preset, minutes) => {
+          const clamped = Math.max(1, Math.min(240, Number(minutes) || 20));
+          if (badgeInterval) badgeInterval.textContent = `${clamped} min`;
+          if (inCustomMin && preset === 'custom') inCustomMin.value = clamped;
+          if (secCustom) secCustom.style.display = preset === 'custom' ? 'block' : 'none';
+
+          await this.applyScriptConfig(m.id, {
+            activePreset: preset,
+            intervalMinutes: clamped,
+            customMinutes: preset === 'custom' ? clamped : (Number(inCustomMin?.value) || 30)
+          });
+        };
+
+        if (groupPreset) {
+          groupPreset.querySelectorAll('.besing-segmented-btn').forEach(btn => {
+            btn.onclick = async () => {
+              const pVal = btn.getAttribute('data-preset');
+              groupPreset.querySelectorAll('.besing-segmented-btn').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              if (pVal === 'custom') {
+                const custVal = Number(inCustomMin?.value) || 30;
+                await updateInterval('custom', custVal);
+              } else {
+                await updateInterval(pVal, Number(pVal));
+              }
+            };
+          });
+        }
+
+        if (btnMinus && inCustomMin) {
+          btnMinus.onclick = async () => {
+            const nextVal = Math.max(1, (Number(inCustomMin.value) || 30) - 5);
+            inCustomMin.value = nextVal;
+            await updateInterval('custom', nextVal);
+          };
+        }
+
+        if (btnPlus && inCustomMin) {
+          btnPlus.onclick = async () => {
+            const nextVal = Math.min(240, (Number(inCustomMin.value) || 30) + 5);
+            inCustomMin.value = nextVal;
+            await updateInterval('custom', nextVal);
+          };
+        }
+
+        if (inCustomMin) {
+          inCustomMin.onchange = async () => {
+            const val = Math.max(1, Math.min(240, Number(inCustomMin.value) || 20));
+            inCustomMin.value = val;
+            await updateInterval('custom', val);
+          };
+        }
+
+        if (btnTest) {
+          btnTest.onclick = () => {
+            this.closeModal();
+            if (typeof m.showReminderChatBox === 'function') {
+              m.showReminderChatBox();
+            }
+          };
+        }
       }
     }
 
@@ -6156,6 +6535,26 @@
         .besing-segmented-btn.active { background: linear-gradient(135deg, #0284c7, #0369a1); color: #fff; box-shadow: 0 2px 8px rgba(2, 132, 199, 0.35); }
         .besing-stepper-row { display: flex; align-items: center; gap: 6px; }
         .besing-stepper-val { font-size: 13px; font-weight: 700; color: #38bdf8; min-width: 22px; text-align: center; font-family: monospace; }
+
+        /* Rest Reminder Chat Box */
+        .besing-rest-chat-box { position: fixed; z-index: 2147483647; width: 270px; background: linear-gradient(145deg, rgba(15, 23, 42, 0.98) 0%, rgba(30, 27, 75, 0.98) 100%); border: 1.5px solid rgba(129, 140, 248, 0.5); border-radius: 16px; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65), 0 0 25px rgba(99, 102, 241, 0.35); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); padding: 14px 16px; color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; pointer-events: auto !important; animation: besingRestPop 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275); user-select: none; }
+        @keyframes besingRestPop { 0% { opacity: 0; transform: scale(0.85) translateY(8px); } 100% { opacity: 1; transform: scale(1) translateY(0); } }
+        .besing-rest-arrow { position: absolute; width: 12px; height: 12px; background: #121829; border: 1.5px solid rgba(129, 140, 248, 0.5); transform: rotate(45deg); z-index: -1; }
+        .besing-rest-arrow.arrow-bottom { bottom: -7px; border-top: none; border-left: none; }
+        .besing-rest-arrow.arrow-top { top: -7px; border-bottom: none; border-right: none; }
+        .besing-rest-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .besing-rest-avatar { font-size: 16px; display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; background: rgba(99, 102, 241, 0.2); border-radius: 50%; border: 1px solid rgba(129, 140, 248, 0.4); }
+        .besing-rest-title { font-size: 13px; font-weight: 700; color: #c7d2fe; flex: 1; }
+        .besing-rest-badge { font-size: 10px; font-weight: 700; color: #38bdf8; background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); padding: 1px 6px; border-radius: 8px; }
+        .besing-rest-msg { font-size: 12px; color: #cbd5e1; line-height: 1.45; margin-bottom: 12px; }
+        .besing-rest-msg strong { color: #38bdf8; font-weight: 700; }
+        .besing-rest-actions { display: flex; align-items: center; gap: 8px; }
+        .besing-rest-btn-repeat { flex: 1; background: linear-gradient(135deg, #0284c7, #2563eb); color: #ffffff; border: none; border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 700; cursor: pointer; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35); transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease; display: flex; align-items: center; justify-content: center; gap: 6px; }
+        .besing-rest-btn-repeat:hover { background: linear-gradient(135deg, #0369a1, #1d4ed8); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37, 99, 235, 0.45); }
+        .besing-rest-btn-repeat:active { transform: scale(0.97); }
+        .besing-rest-btn-off { background: rgba(239, 68, 68, 0.12); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.35); border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease; }
+        .besing-rest-btn-off:hover { background: rgba(239, 68, 68, 0.22); border-color: rgba(239, 68, 68, 0.55); transform: translateY(-1px); }
+        .besing-rest-btn-off:active { transform: scale(0.97); }
       `;
       shadow.appendChild(style);
     }
