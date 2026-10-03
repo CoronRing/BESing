@@ -29,9 +29,14 @@
   'use strict';
 
   // If BESing Packed is already running or registered, skip running stable bootstrapper to avoid collision
+  const getAliveInstance = () => {
+    const inst = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                 (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+    if (inst && inst.host && inst.host.isConnected && inst.host.ownerDocument === document) return inst;
+    return null;
+  };
   const isPackedRunning = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name && GM_info.script.name.includes('Packed')) ||
-    (typeof window !== 'undefined' && window.__BESING_INSTANCE__ && window.__BESING_INSTANCE__.isPacked) ||
-    (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__ && unsafeWindow.__BESING_INSTANCE__.isPacked);
+    (!!getAliveInstance() && getAliveInstance().isPacked);
   if (isPackedRunning) {
     console.warn('[BESing Stable] BESing Packed is already active. Skipping stable bootstrapper execution to prevent duplicate widgets.');
     return;

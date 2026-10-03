@@ -71,47 +71,45 @@ svg:not(:root) {
 
 /* Corner / Edge Folding Behavior (4-Direction & Corner Support) */
 .besing-trigger.folded-left {
-  transform: translateX(-20px) !important;
-  clip-path: inset(-12px -12px -12px 20px) !important;
+  transform: translateX(-24px) !important;
   opacity: 0.88;
 }
 
-/* Scrollbar-safe right folding: clips translated portion so it never overlaps or blocks native scrollbar */
+/* Edge folding: tucks cleanly into the margin without clip-path WebKit bugs */
 .besing-trigger.folded-right {
-  transform: translateX(20px) !important;
-  clip-path: inset(-12px 20px -12px -12px) !important;
+  transform: translateX(24px) !important;
   opacity: 0.88;
 }
 
 .besing-trigger.folded-top {
-  transform: translateY(-20px) !important;
-  clip-path: inset(20px -12px -12px -12px) !important;
+  transform: translateY(-24px) !important;
   opacity: 0.88;
 }
 
 .besing-trigger.folded-bottom {
-  transform: translateY(20px) !important;
-  clip-path: inset(-12px -12px 20px -12px) !important;
+  transform: translateY(24px) !important;
   opacity: 0.88;
 }
 
 /* Corner Folds */
 .besing-trigger.folded-top.folded-left {
-  transform: translate(-20px, -20px) !important;
+  transform: translate(-24px, -24px) !important;
+  opacity: 0.88;
 }
 
 .besing-trigger.folded-top.folded-right {
-  transform: translate(20px, -20px) !important;
-  clip-path: inset(-12px 20px -12px -12px) !important;
+  transform: translate(24px, -24px) !important;
+  opacity: 0.88;
 }
 
 .besing-trigger.folded-bottom.folded-left {
-  transform: translate(-20px, 20px) !important;
+  transform: translate(-24px, 24px) !important;
+  opacity: 0.88;
 }
 
 .besing-trigger.folded-bottom.folded-right {
-  transform: translate(20px, 20px) !important;
-  clip-path: inset(-12px 20px -12px -12px) !important;
+  transform: translate(24px, 24px) !important;
+  opacity: 0.88;
 }
 
 /* Smooth expansion on hover */
@@ -120,7 +118,6 @@ svg:not(:root) {
 .besing-trigger.folded-top:hover,
 .besing-trigger.folded-bottom:hover {
   transform: translate(0, 0) scale(1.08) !important;
-  clip-path: none !important;
   opacity: 1 !important;
 }
 

@@ -14,16 +14,29 @@ const STORAGE_KEYS = {
 
 export class BESStorage {
   constructor() {
-    this.siteRules = {};
-    this.enabledScripts = {};
-    this.scriptConfigs = {};
-    this.widgetPos = null;
+    const readLocal = (k, def) => {
+      try {
+        const item = window.localStorage.getItem('besing_' + k);
+        return (item !== null && item !== undefined) ? JSON.parse(item) : def;
+      } catch (e) {
+        return def;
+      }
+    };
+
+    this.siteRules = readLocal(STORAGE_KEYS.SITE_RULES, {});
+    this.enabledScripts = readLocal(STORAGE_KEYS.ENABLED_SCRIPTS, { 'prevent-redirect': true });
+    if (this.enabledScripts['prevent-redirect'] === undefined) {
+      this.enabledScripts['prevent-redirect'] = true;
+    }
+    this.scriptConfigs = readLocal(STORAGE_KEYS.SCRIPT_CONFIGS, {});
+    this.widgetPos = readLocal(STORAGE_KEYS.WIDGET_POS, null);
     this.settings = {
       theme: 'cyber-pet',
       agentUrl: 'http://127.0.0.1:8765/api/sync',
       authToken: '',
       updateChannel: 'github',
-      autoCheckUpdates: true
+      autoCheckUpdates: true,
+      ...readLocal(STORAGE_KEYS.SETTINGS, {})
     };
     this._isInitialized = false;
   }
@@ -31,21 +44,24 @@ export class BESStorage {
   async init() {
     if (this._isInitialized) return;
 
-    this.siteRules = await BESAdapter.get(STORAGE_KEYS.SITE_RULES, {});
-    if (!this.siteRules || typeof this.siteRules !== 'object') this.siteRules = {};
+    const data = await BESAdapter.getAll({
+      [STORAGE_KEYS.SITE_RULES]: this.siteRules || {},
+      [STORAGE_KEYS.ENABLED_SCRIPTS]: this.enabledScripts || {},
+      [STORAGE_KEYS.SCRIPT_CONFIGS]: this.scriptConfigs || {},
+      [STORAGE_KEYS.WIDGET_POS]: this.widgetPos,
+      [STORAGE_KEYS.SETTINGS]: this.settings || {}
+    });
 
-    this.enabledScripts = await BESAdapter.get(STORAGE_KEYS.ENABLED_SCRIPTS, {});
-    if (!this.enabledScripts || typeof this.enabledScripts !== 'object') this.enabledScripts = {};
+    this.siteRules = (data[STORAGE_KEYS.SITE_RULES] && typeof data[STORAGE_KEYS.SITE_RULES] === 'object') ? data[STORAGE_KEYS.SITE_RULES] : {};
+    this.enabledScripts = (data[STORAGE_KEYS.ENABLED_SCRIPTS] && typeof data[STORAGE_KEYS.ENABLED_SCRIPTS] === 'object') ? data[STORAGE_KEYS.ENABLED_SCRIPTS] : {};
     if (this.enabledScripts['prevent-redirect'] === undefined) {
       this.enabledScripts['prevent-redirect'] = true;
     }
-
-    this.scriptConfigs = await BESAdapter.get(STORAGE_KEYS.SCRIPT_CONFIGS, {});
-    if (!this.scriptConfigs || typeof this.scriptConfigs !== 'object') this.scriptConfigs = {};
-
-    this.widgetPos = await BESAdapter.get(STORAGE_KEYS.WIDGET_POS, null);
-    const s = await BESAdapter.get(STORAGE_KEYS.SETTINGS, {});
-    this.settings = { ...this.settings, ...s };
+    this.scriptConfigs = (data[STORAGE_KEYS.SCRIPT_CONFIGS] && typeof data[STORAGE_KEYS.SCRIPT_CONFIGS] === 'object') ? data[STORAGE_KEYS.SCRIPT_CONFIGS] : {};
+    if (data[STORAGE_KEYS.WIDGET_POS]) {
+      this.widgetPos = data[STORAGE_KEYS.WIDGET_POS];
+    }
+    this.settings = { ...this.settings, ...(data[STORAGE_KEYS.SETTINGS] || {}) };
 
     this._isInitialized = true;
   }

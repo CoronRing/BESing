@@ -247,11 +247,11 @@ export class BESManager {
       .besing-trigger { position: fixed; width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border: 1.5px solid rgba(129, 140, 248, 0.45); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 18px rgba(99, 102, 241, 0.3); display: flex; align-items: center; justify-content: center; color: #c7d2fe; cursor: grab; user-select: none; touch-action: none; z-index: 2147483647; pointer-events: auto; transition: transform 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.2s ease, border-color 0.2s ease, opacity 0.2s ease; }
       .besing-trigger:hover { transform: scale(1.1); border-color: rgba(165, 180, 252, 0.85); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 26px rgba(99, 102, 241, 0.55); }
       .besing-trigger:active { cursor: grabbing; transform: scale(0.95); }
-      .besing-trigger.folded-right { transform: translateX(20px) !important; clip-path: inset(-12px 20px -12px -12px) !important; opacity: 0.88; }
-      .besing-trigger.folded-left { transform: translateX(-20px) !important; clip-path: inset(-12px -12px -12px 20px) !important; opacity: 0.88; }
-      .besing-trigger.folded-top { transform: translateY(-20px) !important; clip-path: inset(20px -12px -12px -12px) !important; opacity: 0.88; }
-      .besing-trigger.folded-bottom { transform: translateY(20px) !important; clip-path: inset(-12px -12px 20px -12px) !important; opacity: 0.88; }
-      .besing-trigger.folded-right:hover, .besing-trigger.folded-left:hover, .besing-trigger.folded-top:hover, .besing-trigger.folded-bottom:hover { transform: translate(0, 0) scale(1.08) !important; clip-path: none !important; opacity: 1 !important; }
+      .besing-trigger.folded-right { transform: translateX(24px) !important; opacity: 0.88; }
+      .besing-trigger.folded-left { transform: translateX(-24px) !important; opacity: 0.88; }
+      .besing-trigger.folded-top { transform: translateY(-24px) !important; opacity: 0.88; }
+      .besing-trigger.folded-bottom { transform: translateY(24px) !important; opacity: 0.88; }
+      .besing-trigger.folded-right:hover, .besing-trigger.folded-left:hover, .besing-trigger.folded-top:hover, .besing-trigger.folded-bottom:hover { transform: translate(0, 0) scale(1.08) !important; opacity: 1 !important; }
       .besing-trigger.folded-right::before { content: ""; position: absolute; left: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; }
       .besing-trigger.folded-left::after { content: ""; position: absolute; right: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; }
       .besing-badge-count { position: absolute; top: -2px; right: -2px; background: linear-gradient(135deg, #06b6d4, #3b82f6); color: #fff; font-size: 10px; font-weight: 700; height: 18px; min-width: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #0f172a; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }

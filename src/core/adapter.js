@@ -90,6 +90,79 @@ export const BESAdapter = (() => {
     },
 
     /**
+     * Batch retrieve multiple keys from persistent storage.
+     */
+    async getAll(defaults = {}) {
+      const keys = Object.keys(defaults);
+      const result = { ...defaults };
+
+      // Pre-fill from localStorage synchronously
+      for (const k of keys) {
+        try {
+          const item = window.localStorage.getItem(STORAGE_PREFIX + k);
+          if (item !== null && item !== undefined) {
+            result[k] = JSON.parse(item);
+          }
+        } catch (e) {}
+      }
+
+      if (isGM) {
+        for (const k of keys) {
+          try {
+            const val = GM_getValue(k, undefined);
+            if (val !== undefined) result[k] = val;
+          } catch (e) {}
+        }
+        return result;
+      }
+
+      if (isExtension) {
+        return new Promise((resolve) => {
+          let resolved = false;
+          // Guard against suspended background context / hung IPC on mobile
+          const timer = setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              resolve(result);
+            }
+          }, 350);
+
+          try {
+            chrome.storage.local.get(keys, (res) => {
+              if (!resolved) {
+                resolved = true;
+                clearTimeout(timer);
+                if (chrome.runtime && chrome.runtime.lastError) {
+                  resolve(result);
+                } else if (res && typeof res === 'object') {
+                  for (const k of keys) {
+                    if (res[k] !== undefined) {
+                      result[k] = res[k];
+                      try {
+                        window.localStorage.setItem(STORAGE_PREFIX + k, JSON.stringify(res[k]));
+                      } catch (e) {}
+                    }
+                  }
+                  resolve(result);
+                } else {
+                  resolve(result);
+                }
+              }
+            });
+          } catch (err) {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timer);
+              resolve(result);
+            }
+          }
+        });
+      }
+
+      return result;
+    },
+
+    /**
      * Store a value in persistent storage.
      */
     async set(key, value) {
