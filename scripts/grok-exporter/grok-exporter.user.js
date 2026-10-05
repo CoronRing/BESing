@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Exporter
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.1
-// @description  Copy or download the full Grok conversation on the current page as Markdown, including messages Grok has not rendered yet.
+// @version      1.1.0
+// @description  Copy or download the full Grok conversation on the current page as plain text or Markdown, including messages Grok has not rendered yet.
 // @author       BESing Team
 // @license      MIT
 // @match        https://grok.com/*
@@ -16,8 +16,8 @@
   const GrokExporter = {
     id: 'grok-exporter',
     name: 'Grok Exporter',
-    version: '1.0.1',
-    description: 'Copy or download the full Grok conversation on the current page as Markdown, including messages Grok has not rendered yet.',
+    version: '1.1.0',
+    description: 'Copy or download the full Grok conversation on the current page as plain text or Markdown, including messages Grok has not rendered yet.',
     category: 'Tools',
     _config: null,
     _toolbarEl: null,
@@ -88,8 +88,11 @@
           // ClipboardItem accepts a promise, which keeps the click's user activation
           // alive while the conversation is still being fetched.
           if (typeof ClipboardItem === 'function' && navigator.clipboard && navigator.clipboard.write) {
+            // The HTML flavor carries explicit <br> breaks for rich-text targets that would
+            // otherwise collapse plain line breaks.
             const item = new ClipboardItem({
-              'text/plain': exportPromise.then(r => new Blob([r.markdown], { type: 'text/plain' }))
+              'text/plain': exportPromise.then(r => new Blob([r.content], { type: 'text/plain' })),
+              'text/html': exportPromise.then(r => new Blob([this._toClipboardHtml(r.content)], { type: 'text/html' }))
             });
             await navigator.clipboard.write([item]);
             result = await exportPromise;
@@ -98,9 +101,9 @@
           }
         } catch (clipErr) {
           result = await exportPromise;
-          await this._fallbackCopy(result.markdown);
+          await this._fallbackCopy(result.content);
         }
-        this.toast(`Copied ${result.messageCount} messages (${this._formatCount(result.markdown.length)} chars)${this._noteSuffix(result)}`, 'ok');
+        this.toast(`Copied ${result.messageCount} messages (${this._formatCount(result.content.length)} chars)${this._noteSuffix(result)}`, 'ok');
         return result;
       } catch (err) {
         this.toast(`Copy failed: ${err && err.message ? err.message : err}`, 'error');
@@ -114,11 +117,11 @@
       if (!this._beginAction()) return null;
       try {
         const result = await this.exportConversation(cfg);
-        const blob = new Blob([result.markdown], { type: 'text/markdown;charset=utf-8' });
+        const blob = new Blob([result.content], { type: `${result.mimeType};charset=utf-8` });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = this._buildFilename(result.title);
+        a.download = this._buildFilename(result.title, result.extension);
         a.style.display = 'none';
         (document.body || document.documentElement).appendChild(a);
         a.click();
@@ -135,8 +138,8 @@
     },
 
     /**
-     * Builds the Markdown export for the conversation on the current page.
-     * Resolves to { markdown, title, messageCount, branchCount, source }.
+     * Builds the export for the conversation on the current page, as plain text or Markdown.
+     * Resolves to { content, format, extension, mimeType, title, messageCount, branchCount, source }.
      */
     async exportConversation(cfg = this._config) {
       const options = this._resolveOptions(cfg);
@@ -166,8 +169,20 @@
       }
 
       const title = await this._fetchTitle(conversationId);
-      const markdown = this._toMarkdown({ title, messages, options, source });
-      return { markdown, title, messageCount: messages.length, branchCount, source };
+      const isMarkdown = options.format === 'markdown';
+      const content = isMarkdown
+        ? this._toMarkdown({ title, messages, options, source })
+        : this._toPlainText({ title, messages, options, source });
+      return {
+        content,
+        format: options.format,
+        extension: isMarkdown ? 'md' : 'txt',
+        mimeType: isMarkdown ? 'text/markdown' : 'text/plain',
+        title,
+        messageCount: messages.length,
+        branchCount,
+        source
+      };
     },
 
     // ---------- Grok API ----------
@@ -371,10 +386,53 @@
     _resolveOptions(cfg) {
       const c = cfg || {};
       return {
+        format: c.format === 'markdown' ? 'markdown' : 'text',
         includeThinking: c.includeThinking === true,
         includeTimestamps: c.includeTimestamps === true,
         includeSources: c.includeSources === true
       };
+    },
+
+    /**
+     * Plain text keeps every line break exactly as written, with a [User] / [Grok] label per turn.
+     * Markdown viewers join single line breaks into one paragraph, which plain text avoids.
+     */
+    _toPlainText({ title, messages, options, source }) {
+      const lines = [];
+      lines.push(title);
+      lines.push(`Exported from Grok on ${new Date().toLocaleString()} · ${window.location.href}`);
+      if (source === 'dom') {
+        lines.push('(Captured from the rendered page because the Grok API was unavailable.)');
+      }
+
+      messages.forEach(msg => {
+        lines.push('');
+        let label = msg.role === 'user' ? '[User]' : '[Grok]';
+        if (options.includeTimestamps && msg.createTime) {
+          const d = new Date(msg.createTime);
+          if (!isNaN(d.getTime())) label += ` ${d.toLocaleString()}`;
+        }
+        lines.push(label);
+        if (options.includeThinking && msg.thinking) {
+          lines.push('[Thinking]', msg.thinking, '[/Thinking]');
+        }
+        if (msg.attachmentCount) {
+          lines.push(`(${msg.attachmentCount} attachment${msg.attachmentCount > 1 ? 's' : ''} not included)`);
+        }
+        if (msg.text) lines.push(msg.text);
+        msg.images.forEach((url, idx) => lines.push(`[Image ${idx + 1}] ${url}`));
+        if (options.includeSources && msg.sources.length) {
+          lines.push('Sources:');
+          msg.sources.forEach(s => lines.push(`- ${s.title}: ${s.url}`));
+        }
+      });
+
+      return lines.join('\n').replace(/\r\n?/g, '\n').trim() + '\n';
+    },
+
+    _toClipboardHtml(text) {
+      const escaped = String(text || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+      return `<div style="white-space:pre-wrap;">${escaped.split('\n').join('<br>')}</div>`;
     },
 
     _toMarkdown({ title, messages, options, source }) {
@@ -413,7 +471,7 @@
       return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
     },
 
-    _buildFilename(title) {
+    _buildFilename(title, extension = 'txt') {
       const safe = String(title || 'Grok Conversation')
         .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')
         .replace(/\s+/g, ' ')
@@ -421,7 +479,7 @@
         .slice(0, 100) || 'Grok Conversation';
       const d = new Date();
       const pad = (n) => String(n).padStart(2, '0');
-      return `Grok - ${safe} - ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.md`;
+      return `Grok - ${safe} - ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.${extension}`;
     },
 
     _noteSuffix(result) {
@@ -523,11 +581,11 @@
       const bar = document.createElement('div');
       bar.id = this.TOOLBAR_ID;
       bar.style.cssText = 'position:fixed;right:16px;bottom:140px;z-index:2147483646;display:flex;flex-direction:column;align-items:flex-end;gap:6px;';
-      bar.appendChild(this._makeButton('Copy chat', 'Copy the full conversation as Markdown', this._svg([
+      bar.appendChild(this._makeButton('Copy chat', 'Copy the full conversation', this._svg([
         ['rect', { x: '9', y: '9', width: '13', height: '13', rx: '2' }],
         ['path', { d: 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' }]
       ]), () => this.copyConversation()));
-      bar.appendChild(this._makeButton('Download .md', 'Download the full conversation as a Markdown file', this._svg([
+      bar.appendChild(this._makeButton('Download', 'Download the full conversation (plain text or Markdown, set in BESing)', this._svg([
         ['path', { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' }],
         ['polyline', { points: '7 10 12 15 17 10' }],
         ['line', { x1: '12', y1: '15', x2: '12', y2: '3' }]

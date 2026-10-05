@@ -1,7 +1,7 @@
 # Grok Exporter
 
 **Script Identifier:** `grok-exporter`  
-**Current Version:** 1.0.1  
+**Current Version:** 1.1.0  
 **Category:** Tools  
 **Author:** BESing Team  
 **License:** MIT  
@@ -12,7 +12,7 @@
 
 ## 1. Summary
 
-Grok Exporter copies or downloads the whole Grok conversation on the current page as Markdown. Grok only renders the messages near your scroll position, so selecting the page and copying it misses most of a long chat. This script asks Grok's own web API for the conversation instead, so every message on the branch you are viewing is included, whether or not it is on screen.
+Grok Exporter copies or downloads the whole Grok conversation on the current page as plain text (default) or Markdown. Grok only renders the messages near your scroll position, so selecting the page and copying it misses most of a long chat. This script asks Grok's own web API for the conversation instead, so every message on the branch you are viewing is included, whether or not it is on screen.
 
 ---
 
@@ -20,8 +20,10 @@ Grok Exporter copies or downloads the whole Grok conversation on the current pag
 
 | Feature | Description |
 | :--- | :--- |
-| **Copy Full Chat** | Writes the full conversation to the clipboard as Markdown. |
-| **Download .md** | Saves the conversation as `Grok - <title> - <YYYY-MM-DD>.md`. |
+| **Copy Full Chat** | Writes the full conversation to the clipboard. The clipboard also gets an HTML copy with explicit line breaks, so rich-text editors keep them. |
+| **Download** | Saves the conversation as `Grok - <title> - <YYYY-MM-DD>.txt` (or `.md` in Markdown format). |
+| **Plain Text Format** | Default. Each turn starts with a `[User]` or `[Grok]` line and keeps every line break exactly as written. |
+| **Markdown Format** | `## User` / `## Grok` headings separated by `---`. Markdown viewers join single line breaks into one paragraph. |
 | **Branch Aware** | Exports the branch you are looking at when a message was regenerated or edited. The toast notes `current branch of N` when other branches exist. |
 | **Clean Output** | Strips Grok's inline citation markup and links generated images. |
 | **Optional Extras** | Thinking trace, per-message timestamps, and web search sources, each toggled in the secondary menu. All are off by default. |
@@ -32,7 +34,7 @@ Grok Exporter copies or downloads the whole Grok conversation on the current pag
 ## 3. How to Use
 
 1. Open a conversation on grok.com: a regular chat (`https://grok.com/c/<id>`) or a chat inside a project (`https://grok.com/project/<projectId>?chat=<id>`).
-2. Click **Copy chat** or **Download .md** at the bottom right of the page, or open the BESing menu, go to **Grok Exporter**, and use the buttons there.
+2. Click **Copy chat** or **Download** at the bottom right of the page, or open the BESing menu, go to **Grok Exporter**, and use the buttons there.
 3. A toast at the top right reports how many messages were exported.
 
 When bundled in BESing, turn the script on with **SITE ONLY** on grok.com or **ON (GLOBAL)**. It does nothing on other sites. The menu buttons work even while the script is OFF; the floating page buttons need it on.
@@ -43,6 +45,7 @@ When bundled in BESing, turn the script on with **SITE ONLY** on grok.com or **O
 
 | Option | Config key | Default |
 | :--- | :--- | :--- |
+| Output Format | `format` (`text` or `markdown`) | `text` |
 | Floating Buttons on Grok | `showFloatingButtons` | On |
 | Include Thinking | `includeThinking` | Off |
 | Include Timestamps | `includeTimestamps` | Off |
