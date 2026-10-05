@@ -46,6 +46,7 @@ https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-mana
   - 🔗 **Markdown Link Copier**: Instant `Alt + C` title & URL copier.
   - 🛡️ **Ad & Banner Cleaner**: Hides floating overlays and newsletter popups.
   - 🎨 **Color Change**: Dynamic visual background confirmation.
+  - 💬 **Grok Exporter**: Copy or download the full Grok conversation as Markdown, even the parts Grok has not rendered.
 - **Modular Sub-Scripts Catalog**: Every tool lives as a standalone userscript in `scripts/<id>/<id>.user.js` and can run independently or bundled.
 - **Granular Site Blocklist**: Disable BESing on any specific website with 1 click; summon with `Alt + Shift + B` anytime.
 
@@ -72,6 +73,7 @@ BESing/
 │   ├── quick-copy/            # Markdown Link Copier script
 │   ├── ad-cleaner/            # Ad & Element Cleaner script
 │   ├── color-change/          # Background Color Changer script
+│   ├── grok-exporter/         # Grok full-conversation copy & download
 │   ├── SCRIPT_LIST.json       # Metadata & 1-sentence descriptions catalog
 │   └── README.md              # Script hub documentation
 ├── userscript/

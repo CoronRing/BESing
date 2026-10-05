@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.6.9"
+VERSION = "1.7.0"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -2645,6 +2645,82 @@ def build():
             </button>
           </div>
         `;
+      }} else if (m.id === 'grok-exporter') {{
+        const onGrok = typeof m.isGrokHost === 'function' && m.isGrokHost();
+        const hasConversation = onGrok && typeof m.getConversationId === 'function' && !!m.getConversationId();
+        const includeThinking = cfg.includeThinking === true;
+        const includeTimestamps = cfg.includeTimestamps === true;
+        const includeSources = cfg.includeSources === true;
+        const showFloatingButtons = cfg.showFloatingButtons !== false;
+        const statusText = !onGrok
+          ? 'Open a conversation on grok.com to export it.'
+          : (hasConversation ? 'Exports every message on the branch you are viewing, including ones Grok has not rendered yet.' : 'Open a conversation (grok.com/c/...) to export it.');
+        const disabledAttr = hasConversation ? '' : 'disabled';
+        const disabledStyle = hasConversation ? '' : 'opacity:0.45;cursor:not-allowed;';
+
+        specificControls = `
+          <div class="besing-config-section">
+            <p style="font-size:11px;color:#cbd5e1;line-height:1.4;margin:0;" id="grok-export-status">${{statusText}}</p>
+            <div style="display:flex;gap:8px;">
+              <button type="button" class="besing-btn-zapper-launch" id="btn-grok-copy" ${{disabledAttr}} style="flex:1;background:linear-gradient(135deg, rgba(56,189,248,0.2), rgba(99,102,241,0.25));border:1px solid rgba(56,189,248,0.4);color:#38bdf8;box-shadow:none;${{disabledStyle}}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                <span>Copy Full Chat</span>
+              </button>
+              <button type="button" class="besing-btn-zapper-launch" id="btn-grok-download" ${{disabledAttr}} style="flex:1;background:linear-gradient(135deg, rgba(16,185,129,0.2), rgba(20,184,166,0.25));border:1px solid rgba(16,185,129,0.4);color:#34d399;box-shadow:none;${{disabledStyle}}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                <span>Download .md</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-toggle-row-list">
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Floating Buttons on Grok</div>
+                  <div class="besing-toggle-desc">Shows Copy and Download buttons at the bottom right of conversation pages</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-grok-floating" ${{showFloatingButtons ? 'checked' : ''}}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Include Thinking</div>
+                  <div class="besing-toggle-desc">Adds Grok's reasoning trace as a collapsible block when available</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-grok-thinking" ${{includeThinking ? 'checked' : ''}}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Include Timestamps</div>
+                  <div class="besing-toggle-desc">Adds the send time next to each message heading</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-grok-timestamps" ${{includeTimestamps ? 'checked' : ''}}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Include Web Sources</div>
+                  <div class="besing-toggle-desc">Lists the web search results Grok used under each answer</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-grok-sources" ${{includeSources ? 'checked' : ''}}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+        `;
       }} else {{
         specificControls = `
           <div class="besing-config-section">
@@ -3065,6 +3141,43 @@ def build():
             }}
           }};
         }}
+      }} else if (m.id === 'grok-exporter') {{
+        const btnCopy = body.querySelector('#btn-grok-copy');
+        const btnDownload = body.querySelector('#btn-grok-download');
+        const statusEl = body.querySelector('#grok-export-status');
+        const currentCfg = () => this.storage.getScriptConfig(m.id, this.storage.getCurrentHost());
+
+        const runExport = async (btn, action) => {{
+          if (!btn || btn.disabled || typeof m[action] !== 'function') return;
+          const label = btn.querySelector('span');
+          const original = label ? label.textContent : '';
+          btn.disabled = true;
+          if (label) label.textContent = 'Working...';
+          const result = await m[action](currentCfg());
+          btn.disabled = false;
+          if (label) label.textContent = original;
+          if (statusEl && result) {{
+            const verb = action === 'copyConversation' ? 'Copied' : 'Downloaded';
+            const branchNote = result.branchCount > 1 ? ` (current branch of ${{result.branchCount}})` : '';
+            statusEl.textContent = `${{verb}} ${{result.messageCount}} messages from "${{result.title}}"${{branchNote}}.`;
+          }}
+        }};
+
+        if (btnCopy) btnCopy.onclick = () => runExport(btnCopy, 'copyConversation');
+        if (btnDownload) btnDownload.onclick = () => runExport(btnDownload, 'downloadConversation');
+
+        const bindToggle = (selector, key) => {{
+          const chk = body.querySelector(selector);
+          if (chk) {{
+            chk.onchange = async () => {{
+              await this.applyScriptConfig(m.id, {{ [key]: chk.checked }});
+            }};
+          }}
+        }};
+        bindToggle('#chk-grok-floating', 'showFloatingButtons');
+        bindToggle('#chk-grok-thinking', 'includeThinking');
+        bindToggle('#chk-grok-timestamps', 'includeTimestamps');
+        bindToggle('#chk-grok-sources', 'includeSources');
       }}
     }}
 

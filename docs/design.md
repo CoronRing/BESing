@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.6.9  
+**Version:** 1.7.0  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -371,3 +371,15 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Cross-Tab & Sleep-Wake Resilience**:
   - The active alarm timestamp is persisted across all browser tabs via `localStorage` key `besing_rest_reminder_alarm`. When multiple tabs are open, the alarm state remains synchronized.
   - A periodic check interval (every 15 seconds) combined with `visibilitychange` and `pageshow` listeners guarantees that if a laptop lid is closed or a mobile device is put to sleep, the reminder evaluates immediately upon wake if the scheduled timestamp has elapsed.
+
+### 7.25 Grok Exporter: Full-Conversation Copy & Markdown Download (v1.7.0)
+- **Problem**: grok.com virtualizes its transcript. Only the messages near the scroll position are mounted in the DOM, so `Ctrl + A` / `Ctrl + C` (and any DOM-scraping exporter) captures only part of a long conversation.
+- **API-First Engine**: The Grok Exporter module (`scripts/grok-exporter/grok-exporter.user.js`) reads the conversation from the same internal endpoints the Grok web app uses, called same-origin with the user's session cookies:
+  1. `GET /rest/app-chat/conversations/{id}/response-node?includeThreads=true` returns every response node with `responseId`, `sender`, and `parentResponseId`.
+  2. `POST /rest/app-chat/conversations/{id}/load-responses` with `{ "responseIds": [...] }` returns message bodies, sent in batches of 75.
+  3. `GET /rest/app-chat/conversations/{id}` supplies the title, falling back to `document.title`.
+- **Branch Selection**: Regenerating or editing a message creates a branch, so the nodes form a tree. The exporter walks every leaf back to the root and keeps the path that contains the most responses currently mounted on the page (`[id^="response-"]` elements, plus a `?rid=` URL parameter if present). This is the branch the user is viewing. Ties, including the case where nothing is mounted, go to the newest leaf by `createTime`.
+- **Scroll-Capture Fallback**: If the API fails or returns nothing, the module finds the transcript's scroll container, scrolls to the top until older turns stop loading, then steps down 70% of a viewport at a time and records each message as it mounts. The result is plain text (rendered `innerText`), and the export says so in its header.
+- **Markdown Output**: A `# Title` header with export time and URL, then `## User` / `## Grok` sections separated by `---`. Inline citation markup (`<grok:render ...>`) is stripped. Generated images become Markdown image links on `assets.grok.com`. Optional additions: thinking trace in a `<details>` block, per-message timestamps, and a web sources list.
+- **Clipboard Strategy**: Copy passes a promise to `ClipboardItem`, which keeps the click's user activation valid while the conversation is still loading. If that is unsupported, it falls back to `navigator.clipboard.writeText`, then to a hidden textarea with `execCommand('copy')`.
+- **UI Surfaces**: Floating `Copy chat` and `Download .md` buttons on grok.com conversation pages (toggleable), and the same two actions in the module's secondary menu, which work even when the module is OFF. All page UI is built with DOM APIs, never `innerHTML`, so Trusted Types policies cannot strip it. On other hosts the module does nothing.
