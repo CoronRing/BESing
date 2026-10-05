@@ -1,7 +1,7 @@
 # Grok Exporter
 
 **Script Identifier:** `grok-exporter`  
-**Current Version:** 1.0.0  
+**Current Version:** 1.0.1  
 **Category:** Tools  
 **Author:** BESing Team  
 **License:** MIT  
@@ -31,7 +31,7 @@ Grok Exporter copies or downloads the whole Grok conversation on the current pag
 
 ## 3. How to Use
 
-1. Open a conversation on grok.com (the URL looks like `https://grok.com/c/<id>`).
+1. Open a conversation on grok.com: a regular chat (`https://grok.com/c/<id>`) or a chat inside a project (`https://grok.com/project/<projectId>?chat=<id>`).
 2. Click **Copy chat** or **Download .md** at the bottom right of the page, or open the BESing menu, go to **Grok Exporter**, and use the buttons there.
 3. A toast at the top right reports how many messages were exported.
 

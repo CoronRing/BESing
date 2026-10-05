@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Stable
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.1.0
+// @version      1.1.1
 // @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub/GreasyFork with silent auto-updates.
 // @author       BESing Team
 // @license      MIT
@@ -264,9 +264,10 @@
     } catch (err) {
       console.error('[BESing Stable Loader] Execution error:', err);
       const isCspError = err && (err.name === 'EvalError' || (err.message && err.message.includes('Content Security Policy')));
-      if (isCspError) {
-        console.warn('[BESing Stable Loader] Website Content Security Policy (CSP) blocked dynamic eval(). On sites like LinkedIn or GitHub, either enable "Modify CSP headers" in Tampermonkey Settings or install the full direct script: https://greasyfork.org/en/scripts/597772-besing-script-manager');
-      }
+      // Only a CSP block means the code never ran. Any other error came from code that already
+      // started, so running it again in the page would create a second BESing instance.
+      if (!isCspError) return;
+      console.warn('[BESing Stable Loader] Website Content Security Policy (CSP) blocked dynamic eval(). On sites like LinkedIn or GitHub, either enable "Modify CSP headers" in Tampermonkey Settings or install the full direct script: https://greasyfork.org/en/scripts/597772-besing-script-manager');
       try {
         const s = document.createElement('script');
         s.textContent = code;

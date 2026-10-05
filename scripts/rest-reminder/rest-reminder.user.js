@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rest Reminder
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.0
+// @version      1.0.1
 // @description  Repeating rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const RestReminder = {
     id: 'rest-reminder',
     name: 'Rest Reminder',
-    version: '1.0.0',
+    version: '1.0.1',
     description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
     category: 'Productivity',
     _config: null,
@@ -190,6 +190,10 @@
       this._boundReposition = () => this._repositionChatBox();
       window.addEventListener('resize', this._boundReposition);
       window.addEventListener('scroll', this._boundReposition, { passive: true });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', this._boundReposition);
+        window.visualViewport.addEventListener('scroll', this._boundReposition);
+      }
     },
 
     dismissChatBox() {
@@ -202,6 +206,10 @@
       if (this._boundReposition) {
         window.removeEventListener('resize', this._boundReposition);
         window.removeEventListener('scroll', this._boundReposition);
+        if (window.visualViewport) {
+          window.visualViewport.removeEventListener('resize', this._boundReposition);
+          window.visualViewport.removeEventListener('scroll', this._boundReposition);
+        }
         this._boundReposition = null;
       }
       const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
@@ -219,8 +227,11 @@
       const box = this._chatBoxEl;
       const arrow = box.querySelector('#besing-rest-arrow');
 
-      const vpW = window.visualViewport?.width || window.innerWidth || 800;
-      const vpH = window.visualViewport?.height || window.innerHeight || 600;
+      // Inside the BESing layer, positions use the manager's zoom-independent coordinates.
+      const inManagerLayer = !!(appMgr && appMgr.shadow && box.getRootNode() === appMgr.shadow && typeof appMgr.getViewportMetrics === 'function');
+      const metrics = inManagerLayer ? appMgr.getViewportMetrics() : null;
+      const vpW = metrics ? metrics.width : (window.visualViewport?.width || window.innerWidth || 800);
+      const vpH = metrics ? metrics.height : (window.visualViewport?.height || window.innerHeight || 600);
       const boxW = Math.min(270, vpW - 24);
 
       let targetX = vpW - boxW - 20;
@@ -228,7 +239,7 @@
       let isAbove = true;
 
       if (widget) {
-        const rect = widget.getBoundingClientRect();
+        const rect = inManagerLayer ? appMgr.getLocalRect(widget) : widget.getBoundingClientRect();
         const widgetCenterX = rect.left + rect.width / 2;
 
         targetX = Math.max(12, Math.min(vpW - boxW - 12, widgetCenterX - boxW / 2));
@@ -250,6 +261,7 @@
 
       box.style.left = `${Math.round(targetX)}px`;
       box.style.top = `${Math.round(targetY)}px`;
+      box.style.width = `${Math.round(boxW)}px`;
     },
 
     _disableReminder() {

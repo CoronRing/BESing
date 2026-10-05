@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.7.0
+// @version      1.7.1
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -27,6 +27,26 @@
 
 (function () {
   'use strict';
+
+  // Userscript managers inject into every frame. Only the top frame gets the widget and menu;
+  // child frames (ads, embeds) run the modules listed here and nothing else.
+  const IS_TOP_FRAME = (() => {
+    try { return window.top === window.self; } catch (e) { return false; }
+  })();
+  const FRAME_SAFE_MODULES = new Set(['prevent-redirect', 'force-copy']);
+
+  // Ownership claim shared by every JS world (userscript sandboxes, extension content scripts, page).
+  // Worlds do not share globals, and <html> may not exist yet at document-start, but they do share
+  // event dispatch on `document`: the owner cancels this event, and a newcomer sees it was cancelled.
+  const CLAIM_EVENT = 'besing:claim-page';
+  const BOOT_LOG_KEY = 'boot_log';
+  const BOOT_LOG_LIMIT = 15;
+
+  const getLiveInstance = () => {
+    const inst = (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__) ||
+                 (typeof window !== 'undefined' && window.__BESING_INSTANCE__);
+    return inst && !inst.disposed ? inst : null;
+  };
 
   // 1. Unified Adapter Layer
   const BESAdapter = {
@@ -507,6 +527,44 @@
       await BESAdapter.set('global_settings', this.settings);
     }
   }
+
+  // Boot diagnostics: a short history of page loads and how far each one got.
+  // A load missing from the list means the userscript manager never injected BESing.
+  const BESBootLog = {
+    entry: null,
+    startedAt: (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0,
+
+    async record(stage, detail) {
+      if (!IS_TOP_FRAME) return;
+      try {
+        const elapsed = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : 0) - this.startedAt);
+        if (!this.entry) {
+          this.entry = {
+            id: Math.random().toString(36).slice(2, 10),
+            t: Date.now(),
+            host: (window.location.hostname || '').toLowerCase(),
+            v: '1.7.1',
+            ready: document.readyState,
+            stages: {}
+          };
+        }
+        if (this.entry.stages[stage] !== undefined) return; // keep the first time each stage was reached
+        this.entry.stages[stage] = detail !== undefined ? detail : elapsed;
+        const list = await BESAdapter.get(BOOT_LOG_KEY, []);
+        const others = (Array.isArray(list) ? list : []).filter(e => e && e.id !== this.entry.id);
+        await BESAdapter.set(BOOT_LOG_KEY, [this.entry, ...others].slice(0, BOOT_LOG_LIMIT));
+      } catch (e) {}
+    },
+
+    async read() {
+      const list = await BESAdapter.get(BOOT_LOG_KEY, []);
+      return Array.isArray(list) ? list : [];
+    },
+
+    async clear() {
+      await BESAdapter.set(BOOT_LOG_KEY, []);
+    }
+  };
 
   // 3. Pre-bundled Modules (Off by default, zero remote eval)
   const BUILTIN_MODULES = [
@@ -1616,7 +1674,7 @@
       const mod = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.4.0',
+    version: '1.4.1',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
     _origOpen: null,
@@ -1728,6 +1786,23 @@
         return true;
       }
       return false;
+    },
+
+    // Verdict cache: frameworks re-register the same listener and timer functions constantly,
+    // and toString() plus the regex scan is the costliest part of every hooked call.
+    _fnVerdicts: null,
+
+    _isAdFunction(fn) {
+      if (typeof fn !== 'function') return false;
+      if (!this._fnVerdicts) this._fnVerdicts = new WeakMap();
+      const cached = this._fnVerdicts.get(fn);
+      if (cached !== undefined) return cached;
+      let verdict = false;
+      try {
+        verdict = this._isAdCode(Function.prototype.toString.call(fn));
+      } catch (e) {}
+      this._fnVerdicts.set(fn, verdict);
+      return verdict;
     },
 
     _createFakeWindow(url) {
@@ -1857,14 +1932,9 @@
             console.warn('[BESing Prevent Redirect] Suppressed mobile sensor trap:', type);
             return;
           }
-          if (typeof listener === 'function') {
-            try {
-              const fnStr = listener.toString();
-              if (self._isAdCode(fnStr)) {
-                self.notifyBlocked(type, 'malicious redirect event listener');
-                return;
-              }
-            } catch (e) {}
+          if (typeof listener === 'function' && self._isAdFunction(listener)) {
+            self.notifyBlocked(type, 'malicious redirect event listener');
+            return;
           }
           return origAEL.call(this, type, listener, options);
         };
@@ -1876,14 +1946,9 @@
         const origSetTimeout = window.setTimeout;
         this._origSetTimeout = origSetTimeout;
         const hookedSetTimeout = function(handler, delay, ...args) {
-          if (typeof handler === 'function') {
-            try {
-              const fnStr = handler.toString();
-              if (self._isAdCode(fnStr)) {
-                self.notifyBlocked('timer', 'malicious auto-redirect setTimeout');
-                return 0;
-              }
-            } catch (e) {}
+          if (typeof handler === 'function' && self._isAdFunction(handler)) {
+            self.notifyBlocked('timer', 'malicious auto-redirect setTimeout');
+            return 0;
           }
           return origSetTimeout.call(this, handler, delay, ...args);
         };
@@ -1896,14 +1961,9 @@
         const origSetInterval = window.setInterval;
         this._origSetInterval = origSetInterval;
         const hookedSetInterval = function(handler, delay, ...args) {
-          if (typeof handler === 'function') {
-            try {
-              const fnStr = handler.toString();
-              if (self._isAdCode(fnStr)) {
-                self.notifyBlocked('timer', 'malicious auto-redirect setInterval');
-                return 0;
-              }
-            } catch (e) {}
+          if (typeof handler === 'function' && self._isAdFunction(handler)) {
+            self.notifyBlocked('timer', 'malicious auto-redirect setInterval');
+            return 0;
           }
           return origSetInterval.call(this, handler, delay, ...args);
         };
@@ -2337,6 +2397,18 @@
               return origOpen.call(this || window, url, target, feat);
             };
 
+            var fnVerdicts = (typeof WeakMap === 'function') ? new WeakMap() : null;
+            var isAdFn = function(f) {
+              if (fnVerdicts) {
+                var hit = fnVerdicts.get(f);
+                if (hit !== undefined) return hit;
+              }
+              var verdict = false;
+              try { verdict = isAdCode(Function.prototype.toString.call(f)); } catch(e) {}
+              if (fnVerdicts) fnVerdicts.set(f, verdict);
+              return verdict;
+            };
+
             // Hook Function constructor in page context
             var OrigFunction = window.Function;
             window.Function = function(...args) {
@@ -2353,13 +2425,9 @@
             var origAEL = EventTarget.prototype.addEventListener;
             EventTarget.prototype.addEventListener = function(t, l, o) {
               if (t === 'devicemotion' || t === 'deviceorientation') return;
-              if (typeof l === 'function') {
-                try {
-                  if (isAdCode(l.toString())) {
-                    window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: t, reason: 'page-script addEventListener' } }));
-                    return;
-                  }
-                } catch(e) {}
+              if (typeof l === 'function' && isAdFn(l)) {
+                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: t, reason: 'page-script addEventListener' } }));
+                return;
               }
               return origAEL.call(this, t, l, o);
             };
@@ -2367,21 +2435,13 @@
             // Hook setTimeout & setInterval in page context
             var origSetTimeout = window.setTimeout;
             window.setTimeout = function(h, d, ...args) {
-              if (typeof h === 'function') {
-                try {
-                  if (isAdCode(h.toString())) return 0;
-                } catch(e) {}
-              }
+              if (typeof h === 'function' && isAdFn(h)) return 0;
               return origSetTimeout.call(this, h, d, ...args);
             };
 
             var origSetInterval = window.setInterval;
             window.setInterval = function(h, d, ...args) {
-              if (typeof h === 'function') {
-                try {
-                  if (isAdCode(h.toString())) return 0;
-                } catch(e) {}
-              }
+              if (typeof h === 'function' && isAdFn(h)) return 0;
               return origSetInterval.call(this, h, d, ...args);
             };
 
@@ -3566,7 +3626,7 @@
       const mod = {
     id: 'rest-reminder',
     name: 'Rest Reminder',
-    version: '1.0.0',
+    version: '1.0.1',
     description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
     category: 'Productivity',
     _config: null,
@@ -3740,6 +3800,10 @@
       this._boundReposition = () => this._repositionChatBox();
       window.addEventListener('resize', this._boundReposition);
       window.addEventListener('scroll', this._boundReposition, { passive: true });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', this._boundReposition);
+        window.visualViewport.addEventListener('scroll', this._boundReposition);
+      }
     },
 
     dismissChatBox() {
@@ -3752,6 +3816,10 @@
       if (this._boundReposition) {
         window.removeEventListener('resize', this._boundReposition);
         window.removeEventListener('scroll', this._boundReposition);
+        if (window.visualViewport) {
+          window.visualViewport.removeEventListener('resize', this._boundReposition);
+          window.visualViewport.removeEventListener('scroll', this._boundReposition);
+        }
         this._boundReposition = null;
       }
       const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
@@ -3769,8 +3837,11 @@
       const box = this._chatBoxEl;
       const arrow = box.querySelector('#besing-rest-arrow');
 
-      const vpW = window.visualViewport?.width || window.innerWidth || 800;
-      const vpH = window.visualViewport?.height || window.innerHeight || 600;
+      // Inside the BESing layer, positions use the manager's zoom-independent coordinates.
+      const inManagerLayer = !!(appMgr && appMgr.shadow && box.getRootNode() === appMgr.shadow && typeof appMgr.getViewportMetrics === 'function');
+      const metrics = inManagerLayer ? appMgr.getViewportMetrics() : null;
+      const vpW = metrics ? metrics.width : (window.visualViewport?.width || window.innerWidth || 800);
+      const vpH = metrics ? metrics.height : (window.visualViewport?.height || window.innerHeight || 600);
       const boxW = Math.min(270, vpW - 24);
 
       let targetX = vpW - boxW - 20;
@@ -3778,7 +3849,7 @@
       let isAbove = true;
 
       if (widget) {
-        const rect = widget.getBoundingClientRect();
+        const rect = inManagerLayer ? appMgr.getLocalRect(widget) : widget.getBoundingClientRect();
         const widgetCenterX = rect.left + rect.width / 2;
 
         targetX = Math.max(12, Math.min(vpW - boxW - 12, widgetCenterX - boxW / 2));
@@ -3800,6 +3871,7 @@
 
       box.style.left = `${Math.round(targetX)}px`;
       box.style.top = `${Math.round(targetY)}px`;
+      box.style.width = `${Math.round(boxW)}px`;
     },
 
     _disableReminder() {
@@ -3832,7 +3904,7 @@
       const mod = {
     id: 'grok-exporter',
     name: 'Grok Exporter',
-    version: '1.0.0',
+    version: '1.0.1',
     description: 'Copy or download the full Grok conversation on the current page as Markdown, including messages Grok has not rendered yet.',
     category: 'Tools',
     _config: null,
@@ -3875,10 +3947,22 @@
       return /(^|\.)grok\.com$/i.test(window.location.hostname);
     },
 
+    /**
+     * Grok puts the conversation ID in different places:
+     * - regular chats: grok.com/c/<id>
+     * - chats inside a project: grok.com/project/<projectId>?tab=conversations&chat=<id>
+     */
     getConversationId() {
       if (!this.isGrokHost()) return null;
+      const idPattern = /^[A-Za-z0-9-]{8,}$/;
       const m = window.location.pathname.match(/\/c\/([A-Za-z0-9-]{8,})/);
-      return m ? m[1] : null;
+      if (m) return m[1];
+      const params = new URLSearchParams(window.location.search);
+      for (const key of ['chat', 'conversation', 'conversationId']) {
+        const value = params.get(key);
+        if (value && idPattern.test(value)) return value;
+      }
+      return null;
     },
 
     // ---------- Public actions ----------
@@ -3946,7 +4030,7 @@
       const options = this._resolveOptions(cfg);
       const conversationId = this.getConversationId();
       if (!conversationId) {
-        throw new Error('Open a Grok conversation first (URL should look like grok.com/c/...)');
+        throw new Error('Open a Grok conversation first (a chat, or a chat inside a project)');
       }
 
       let messages;
@@ -4402,7 +4486,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.7.0';
+    static CURRENT_VERSION = '1.7.1';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -4577,18 +4661,18 @@
       this.updateAvailable = null;
       this.lastFoldSide = null;
       this.outsideClickHandler = null;
+      this.bootDocument = document;
+      this.disposed = false;
+      this._viewportFrame = 0;
+      this._viewportHandler = null;
     }
 
-    destroy() {
-      try {
-        if (this.host && this.host.parentNode) {
-          this.host.parentNode.removeChild(this.host);
-        }
-      } catch (e) {}
-      this.host = null;
-      this.shadow = null;
-      this.widgetEl = null;
-      this.menuWrapperEl = null;
+    // Full shutdown used when another instance replaces this one: stops timers, modules and UI,
+    // and makes every later lifecycle callback (pageshow, heartbeat, load) a no-op.
+    dispose() {
+      this.disposed = true;
+      this.teardown();
+      this.detachViewportTracking();
     }
 
     initPreemptiveShields() {
@@ -4615,7 +4699,14 @@
 
     async init() {
       await this.storage.init();
+      if (this.disposed) return;
+      BESBootLog.record('storage');
       const currentHost = this.storage.getCurrentHost();
+
+      if (!IS_TOP_FRAME) {
+        this.initFrameModules(currentHost);
+        return;
+      }
 
       if (!this.modules || this.modules.length === 0) {
         this.modules = BUILTIN_MODULES.map(m => ({
@@ -4695,60 +4786,56 @@
 
       // Hotkey: Alt + Shift + B
       window.addEventListener('keydown', (e) => {
+        if (this.disposed) return;
         if (e.altKey && e.shiftKey && (e.key === 'b' || e.key === 'B')) {
           e.preventDefault();
           this.openModal(this.storage.isCurrentBlocked() ? 'settings' : 'extensions');
         }
       });
 
-      // Tampermonkey Control Panel Menu Commands
+      // Userscript manager menu commands. They resolve the live instance at click time,
+      // because a later copy of BESing may have replaced this one.
       if (!window.__BESING_MENU_REGISTERED__) {
         window.__BESING_MENU_REGISTERED__ = true;
+        const live = () => getLiveInstance() || this;
         BESAdapter.registerMenu('✨ Show / Pull Up BESing Icon', () => {
-          this.pullUpIcon();
+          live().pullUpIcon();
         });
         BESAdapter.registerMenu('🔄 Reset Icon Position to Default', () => {
-          this.resetWidgetPosition();
+          live().resetWidgetPosition();
         });
         BESAdapter.registerMenu('⚙️ Open BESing Settings', () => {
-          this.openModal('settings');
+          live().openModal('settings');
         });
         BESAdapter.registerMenu('📦 Open BESing Extensions', () => {
-          this.openModal('extensions');
+          live().openModal('extensions');
         });
       }
 
       // Page Navigation & bfcache Resilience
-      window.addEventListener('pageshow', (e) => {
+      window.addEventListener('pageshow', () => {
+        if (this.disposed) return;
         this.ensureMounted();
         this.clampWidgetPosition();
         this.refreshCurrentSiteModules();
       });
 
       window.addEventListener('popstate', () => {
+        if (this.disposed) return;
         this.ensureMounted();
         this.clampWidgetPosition();
         this.refreshCurrentSiteModules();
       });
 
       document.addEventListener('visibilitychange', () => {
+        if (this.disposed) return;
         if (document.visibilityState === 'visible') {
           this.ensureMounted();
           this.clampWidgetPosition();
         }
       });
 
-      window.addEventListener('resize', () => {
-        this.clampWidgetPosition();
-        if (this.widgetEl) this.checkEdgeDocking(this.widgetEl);
-      });
-
-      // Heartbeat DOM guardian (every 2.5s) to catch any random DOM detachments
-      if (!this._heartbeatInterval) {
-        this._heartbeatInterval = setInterval(() => {
-          this.ensureMounted();
-        }, 2500);
-      }
+      this.startHeartbeat();
 
       // Direct DOM MutationObserver on document.documentElement
       try {
@@ -4765,13 +4852,44 @@
 
       if (this.storage.isCurrentBlocked()) {
         console.log(`[BESing] Inactive on ${window.location.hostname} (Site blocked)`);
+        BESBootLog.record('blocked');
         return;
       }
 
       this.mount();
     }
 
+    // Heartbeat DOM guardian (every 2.5s) to catch any random DOM detachments
+    startHeartbeat() {
+      if (this._heartbeatInterval || this.disposed || !IS_TOP_FRAME) return;
+      this._heartbeatInterval = setInterval(() => {
+        this.ensureMounted();
+      }, 2500);
+    }
+
+    // Child frames: honor the frame's site rules for frame-safe modules only, with no widget or listeners.
+    initFrameModules(currentHost) {
+      this.modules.forEach(m => {
+        const shouldBeActive = FRAME_SAFE_MODULES.has(m.id) && this.storage.isScriptActiveOnSite(m.id, currentHost);
+        const cfg = this.storage.getScriptConfig(m.id, currentHost);
+        try {
+          if (shouldBeActive && !m.running) {
+            m.init(cfg);
+            m.running = true;
+          } else if (!shouldBeActive && m.running) {
+            m.destroy();
+            m.running = false;
+          } else if (shouldBeActive && m.running && typeof m.onConfigChange === 'function') {
+            m.onConfigChange(cfg);
+          }
+        } catch (err) {
+          console.error(`[BESing] Frame module error ${m.id}:`, err);
+        }
+      });
+    }
+
     refreshCurrentSiteModules() {
+      if (this.disposed) return;
       const currentHost = this.storage.getCurrentHost();
       this.modules.forEach(m => {
         const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
@@ -4823,6 +4941,7 @@
     }
 
     ensureMounted() {
+      if (this.disposed || !IS_TOP_FRAME) return;
       if (this.storage.isCurrentBlocked()) return;
 
       const docRoot = document.body || document.documentElement;
@@ -4859,6 +4978,7 @@
     }
 
     mount() {
+      if (this.disposed || !IS_TOP_FRAME) return;
       const docRoot = document.body || document.documentElement;
       if (!docRoot) return;
 
@@ -4895,7 +5015,10 @@
       this.shadow = shadow;
 
       this.injectStyles(shadow);
+      this.attachViewportTracking();
+      this.applyViewportCompensation();
       this.renderWidget(shadow);
+      BESBootLog.record('mounted');
 
       if (!this._redirectListenerAttached) {
         window.addEventListener('besing:redirect-blocked', () => {
@@ -4905,33 +5028,111 @@
       }
     }
 
-    clampWidgetPosition() {
-      if (!this.widgetEl) return;
-      const vp = window.visualViewport;
+    // ---- Visual viewport compensation ----
+    // The widget layer is position: fixed, which grows and drifts with pinch-zoom on mobile.
+    // The host is translated onto the visual viewport and scaled by 1 / zoom, so the widget keeps
+    // its normal on-screen size. Widget coordinates live in this "local" space, whose size stays
+    // roughly constant while zooming, so saved positions are not disturbed by zoom.
+
+    getViewportMetrics() {
       const doc = document.documentElement;
-      const vpW = vp?.width || doc?.clientWidth || window.innerWidth || 0;
-      const vpH = vp?.height || doc?.clientHeight || window.innerHeight || 0;
-
-      if (vpW < 200 || vpH < 200) return; // Layout not ready, avoid degenerate clamping
-
-      const maxW = Math.max(300, vpW);
-      const maxH = Math.max(300, vpH);
-
-      const currentLeft = parseFloat(this.widgetEl.style.left);
-      const currentTop = parseFloat(this.widgetEl.style.top);
-
-      if (!isNaN(currentLeft) && !isNaN(currentTop)) {
-        const clampedLeft = Math.max(0, Math.min(maxW - 48, currentLeft));
-        const clampedTop = Math.max(0, Math.min(maxH - 48, currentTop));
-
-        if (clampedLeft !== currentLeft || clampedTop !== currentTop) {
-          this.widgetEl.style.left = `${clampedLeft}px`;
-          this.widgetEl.style.top = `${clampedTop}px`;
-          this.widgetEl.style.right = 'auto';
-          this.widgetEl.style.bottom = 'auto';
-          this.storage.setWidgetPosition({ x: Math.round(clampedLeft), y: Math.round(clampedTop) });
-        }
+      const layoutW = (doc && doc.clientWidth) || window.innerWidth || 0;
+      const layoutH = window.innerHeight || (doc && doc.clientHeight) || 0;
+      const vv = window.visualViewport;
+      if (!vv || !(vv.width > 0) || !(vv.height > 0)) {
+        return { scale: 1, offsetLeft: 0, offsetTop: 0, width: layoutW, height: layoutH };
       }
+      const scale = vv.scale > 0 ? vv.scale : 1;
+      return {
+        scale,
+        offsetLeft: vv.offsetLeft || 0,
+        offsetTop: vv.offsetTop || 0,
+        width: vv.width * scale,
+        height: vv.height * scale
+      };
+    }
+
+    getLocalRect(el) {
+      const r = el.getBoundingClientRect();
+      const m = this.getViewportMetrics();
+      const left = (r.left - m.offsetLeft) * m.scale;
+      const top = (r.top - m.offsetTop) * m.scale;
+      const width = r.width * m.scale;
+      const height = r.height * m.scale;
+      return { left, top, width, height, right: left + width, bottom: top + height };
+    }
+
+    applyViewportCompensation() {
+      if (!this.host) return;
+      const m = this.getViewportMetrics();
+      const isIdentity = Math.abs(m.scale - 1) < 0.01 && Math.abs(m.offsetLeft) < 0.5 && Math.abs(m.offsetTop) < 0.5;
+      const transform = isIdentity ? 'none' : `translate(${m.offsetLeft}px, ${m.offsetTop}px) scale(${1 / m.scale})`;
+      this.host.style.setProperty('--besing-host-w', `${Math.round(m.width)}px`);
+      this.host.style.setProperty('--besing-host-h', `${Math.round(m.height)}px`);
+      this.host.style.setProperty('--besing-vw', `${Math.round(m.width)}px`);
+      this.host.style.setProperty('--besing-vh', `${Math.round(m.height)}px`);
+      this.host.style.setProperty('--besing-host-transform', transform);
+    }
+
+    attachViewportTracking() {
+      if (this._viewportHandler) return;
+      this._viewportHandler = () => {
+        if (this._viewportFrame) return;
+        this._viewportFrame = requestAnimationFrame(() => {
+          this._viewportFrame = 0;
+          if (this.disposed) return;
+          this.applyViewportCompensation();
+          if (this.widgetEl && !this.isDragging) {
+            this.restoreWidgetPosition();
+            this.checkEdgeDocking(this.widgetEl);
+          }
+          if (this.menuWrapperEl) {
+            this.positionBubble(this.menuWrapperEl, this.menuWrapperEl.querySelector('.besing-bubble-panel'), this.menuWrapperEl.querySelector('.besing-bubble-arrow'));
+          }
+        });
+      };
+      window.addEventListener('resize', this._viewportHandler);
+      window.addEventListener('orientationchange', this._viewportHandler);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', this._viewportHandler);
+        window.visualViewport.addEventListener('scroll', this._viewportHandler);
+      }
+    }
+
+    detachViewportTracking() {
+      if (!this._viewportHandler) return;
+      window.removeEventListener('resize', this._viewportHandler);
+      window.removeEventListener('orientationchange', this._viewportHandler);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', this._viewportHandler);
+        window.visualViewport.removeEventListener('scroll', this._viewportHandler);
+      }
+      if (this._viewportFrame) cancelAnimationFrame(this._viewportFrame);
+      this._viewportFrame = 0;
+      this._viewportHandler = null;
+    }
+
+    // Re-applies the saved position clamped to the current viewport without saving the clamp,
+    // so a temporary shrink (on-screen keyboard, rotation) does not overwrite where the user put it.
+    restoreWidgetPosition() {
+      if (!this.widgetEl) return;
+      const saved = this.storage.getWidgetPosition();
+      if (!saved || saved.x === undefined || saved.y === undefined) return;
+      const m = this.getViewportMetrics();
+      if (m.width < 200 || m.height < 200) return;
+      const left = Math.max(0, Math.min(m.width - 48, saved.x));
+      const top = Math.max(0, Math.min(m.height - 48, saved.y));
+      this.widgetEl.style.left = `${left}px`;
+      this.widgetEl.style.top = `${top}px`;
+      this.widgetEl.style.right = 'auto';
+      this.widgetEl.style.bottom = 'auto';
+    }
+
+    // Keeps the widget on screen for the current viewport. The saved position is only written
+    // by explicit user actions (drag, pull up, reset), never by a clamp.
+    clampWidgetPosition() {
+      this.applyViewportCompensation();
+      this.restoreWidgetPosition();
     }
 
     pullUpIcon() {
@@ -4955,10 +5156,10 @@
       this.widgetEl.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
 
       // 2. Position comfortably in visible viewport (bottom-right)
-      const vp = window.visualViewport;
-      const doc = document.documentElement;
-      const clientW = Math.max(300, vp?.width || (doc ? doc.clientWidth : window.innerWidth) || 800);
-      const clientH = Math.max(300, vp?.height || (doc ? doc.clientHeight : window.innerHeight) || 600);
+      this.applyViewportCompensation();
+      const m = this.getViewportMetrics();
+      const clientW = Math.max(300, m.width || 800);
+      const clientH = Math.max(300, m.height || 600);
       const targetLeft = Math.max(20, clientW - 72);
       const targetTop = Math.max(20, clientH - 120);
 
@@ -5021,6 +5222,7 @@
       }
       this.modules.forEach(m => {
         try { m.destroy(); } catch (e) {}
+        m.running = false;
       });
       if (this.host) {
         this.host.remove();
@@ -5037,9 +5239,9 @@
       btn.id = 'besing-widget-btn';
 
       const savedPos = this.storage.getWidgetPosition();
-      const doc = document.documentElement;
-      const maxW = Math.max(300, (doc ? doc.clientWidth : window.innerWidth) || 800);
-      const maxH = Math.max(300, (doc ? doc.clientHeight : window.innerHeight) || 600);
+      const m = this.getViewportMetrics();
+      const maxW = Math.max(300, m.width || 800);
+      const maxH = Math.max(300, m.height || 600);
 
       if (savedPos && savedPos.x !== undefined && savedPos.y !== undefined) {
         const clampX = Math.max(0, Math.min(maxW - 48, savedPos.x));
@@ -5246,22 +5448,33 @@
         this.startX = pt.clientX;
         this.startY = pt.clientY;
 
-        const rect = btn.getBoundingClientRect();
-        this.initialLeft = rect.left;
-        this.initialTop = rect.top;
-
         btn.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
         btn.style.transition = 'none';
+
+        // Prefer the stored coordinates: the measured rect includes fold and hover transforms.
+        const styleLeft = parseFloat(btn.style.left);
+        const styleTop = parseFloat(btn.style.top);
+        if (!isNaN(styleLeft) && !isNaN(styleTop)) {
+          this.initialLeft = styleLeft;
+          this.initialTop = styleTop;
+        } else {
+          const rect = this.getLocalRect(btn);
+          this.initialLeft = rect.left;
+          this.initialTop = rect.top;
+        }
+        this._dragScale = this.getViewportMetrics().scale;
 
         window.addEventListener('mousemove', onMove, { passive: false });
         window.addEventListener('mouseup', onEnd);
         window.addEventListener('touchmove', onMove, { passive: false });
         window.addEventListener('touchend', onEnd);
+        window.addEventListener('touchcancel', onEnd);
       };
 
       const onMove = (e) => {
         if (!this.isDragging) return;
         const pt = e.touches ? e.touches[0] : e;
+        if (!pt) return;
         const dx = pt.clientX - this.startX;
         const dy = pt.clientY - this.startY;
 
@@ -5270,8 +5483,11 @@
           if (e.cancelable) e.preventDefault();
         }
 
-        const newL = Math.max(0, Math.min(window.innerWidth - 48, this.initialLeft + dx));
-        const newT = Math.max(0, Math.min(window.innerHeight - 48, this.initialTop + dy));
+        // Pointer deltas are in zoomed page pixels; the widget lives in unzoomed local pixels.
+        const s = this._dragScale || 1;
+        const m = this.getViewportMetrics();
+        const newL = Math.max(0, Math.min(m.width - 48, this.initialLeft + dx * s));
+        const newT = Math.max(0, Math.min(m.height - 48, this.initialTop + dy * s));
 
         btn.style.left = `${newL}px`;
         btn.style.top = `${newT}px`;
@@ -5292,9 +5508,16 @@
         window.removeEventListener('mouseup', onEnd);
         window.removeEventListener('touchmove', onMove);
         window.removeEventListener('touchend', onEnd);
+        window.removeEventListener('touchcancel', onEnd);
 
-        const rect = btn.getBoundingClientRect();
-        this.storage.setWidgetPosition({ x: Math.round(rect.left), y: Math.round(rect.top) });
+        // Only a real drag moves the saved position; a tap leaves it alone.
+        if (this.dragMoved) {
+          const left = parseFloat(btn.style.left);
+          const top = parseFloat(btn.style.top);
+          if (!isNaN(left) && !isNaN(top)) {
+            this.storage.setWidgetPosition({ x: Math.round(left), y: Math.round(top) });
+          }
+        }
         this.checkEdgeDocking(btn);
 
         if (!this.dragMoved && isTouch) {
@@ -5316,16 +5539,16 @@
     }
 
     checkEdgeDocking(btn) {
-      const vp = window.visualViewport;
-      const doc = document.documentElement;
-      const clientW = vp?.width || doc?.clientWidth || window.innerWidth || 800;
-      const clientH = vp?.height || doc?.clientHeight || window.innerHeight || 600;
+      if (!btn) return;
+      const m = this.getViewportMetrics();
+      const clientW = m.width;
+      const clientH = m.height;
       if (clientW < 200 || clientH < 200) return;
 
-      const rect = btn.getBoundingClientRect();
-      const margin = 14;
-
+      // Measure unfolded: the fold transform would otherwise shift the rect toward the edge.
       btn.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
+      const rect = this.getLocalRect(btn);
+      const margin = 14;
 
       if (rect.right >= clientW - margin) {
         btn.classList.add('folded-right');
@@ -5349,12 +5572,16 @@
     }
 
     openModal(view = 'extensions') {
+      if (this.disposed || !IS_TOP_FRAME) return;
       if (this.outsideClickHandler) {
         document.removeEventListener('click', this.outsideClickHandler, true);
         document.removeEventListener('click', this.outsideClickHandler, false);
         this.outsideClickHandler = null;
       }
       if (this.menuWrapperEl) this.closeModal();
+      // The host is torn down on blocked sites; mount it so Settings can still be opened to unblock.
+      if (!this.shadow || !this.host || !this.host.isConnected) this.mount();
+      if (!this.shadow) return;
       this.currentView = view;
 
       const wrapper = document.createElement('div');
@@ -5468,6 +5695,10 @@
     }
 
     positionBubble(wrapper, panel, arrow) {
+      if (panel) {
+        panel.style.removeProperty('max-height');
+        panel.style.removeProperty('min-height');
+      }
       if (this.isExpanded) {
         wrapper.style.left = '50%';
         wrapper.style.top = '50%';
@@ -5479,17 +5710,22 @@
       }
 
       arrow.style.display = 'block';
-      const bubbleW = 390;
       const margin = 14;
+      const m = this.getViewportMetrics();
+      const bubbleW = Math.min(390, Math.max(200, m.width - 28));
 
       if (this.widgetEl) {
-        const doc = document.documentElement;
-        const clientW = doc ? doc.clientWidth : window.innerWidth;
-        const clientH = doc ? doc.clientHeight : window.innerHeight;
-        const rect = this.widgetEl.getBoundingClientRect();
+        const clientW = m.width;
+        const clientH = m.height;
+        const rect = this.getLocalRect(this.widgetEl);
         const center = rect.left + rect.width / 2;
         const left = Math.max(margin, Math.min(clientW - bubbleW - margin, center - bubbleW / 2));
         const isBottom = rect.top > clientH / 2;
+
+        // Cap the panel to the space on its side of the widget so it never runs off screen.
+        const available = isBottom ? rect.top - 10 - margin : clientH - rect.bottom - 10 - margin;
+        if (panel) panel.style.setProperty('max-height', `${Math.max(200, Math.round(available))}px`, 'important');
+        if (panel) panel.style.setProperty('min-height', `${Math.min(380, Math.max(200, Math.round(available)))}px`, 'important');
 
         if (isBottom) {
           wrapper.style.bottom = `${clientH - rect.top + 10}px`;
@@ -5576,6 +5812,17 @@
               </div>
             </div>
 
+            <div class="besing-update-card" style="background:rgba(148,163,184,0.05);border-color:rgba(148,163,184,0.2);">
+              <div class="besing-update-header">
+                <span class="besing-section-title">Recent Page Loads</span>
+                <button type="button" class="besing-btn-sub-action" id="besing-btn-clear-boot-log">Clear</button>
+              </div>
+              <div style="font-size:10px;color:#94a3b8;line-height:1.35;">
+                Each page load BESing ran on, newest first. If a load you made is missing, your userscript manager never started BESing on it. "Stopped" means BESing started but the icon never appeared.
+              </div>
+              <div id="besing-boot-log-list" style="display:flex;flex-direction:column;gap:4px;max-height:150px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#cbd5e1;">Loading...</div>
+            </div>
+
             <div class="besing-site-card">
               <div class="besing-site-card-header">
                 <div>
@@ -5623,6 +5870,47 @@
           };
         });
 
+        const bootLogList = body.querySelector('#besing-boot-log-list');
+        const renderBootLog = async () => {
+          if (!bootLogList) return;
+          const entries = await BESBootLog.read();
+          bootLogList.textContent = '';
+          if (!entries.length) {
+            bootLogList.textContent = 'No page loads recorded yet.';
+            return;
+          }
+          entries.forEach(e => {
+            const s = e.stages || {};
+            const when = new Date(e.t || 0);
+            const pad = (n) => String(n).padStart(2, '0');
+            const time = `${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}:${pad(when.getMinutes())}`;
+            let status;
+            if (s.mounted !== undefined) status = `shown ${s.mounted}ms`;
+            else if (s.blocked !== undefined) status = 'site disabled';
+            else if (s.storage !== undefined) status = 'stopped after settings load';
+            else status = 'stopped at start';
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;justify-content:space-between;gap:8px;';
+            const left = document.createElement('span');
+            left.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+            left.textContent = `${time} ${e.host || ''}`;
+            const right = document.createElement('span');
+            right.style.cssText = `flex-shrink:0;color:${s.mounted !== undefined ? '#34d399' : (s.blocked !== undefined ? '#94a3b8' : '#fbbf24')};`;
+            right.textContent = e.id === (BESBootLog.entry && BESBootLog.entry.id) ? `${status} (this page)` : status;
+            row.appendChild(left);
+            row.appendChild(right);
+            bootLogList.appendChild(row);
+          });
+        };
+        renderBootLog();
+        const clearBootLogBtn = body.querySelector('#besing-btn-clear-boot-log');
+        if (clearBootLogBtn) {
+          clearBootLogBtn.onclick = async () => {
+            await BESBootLog.clear();
+            renderBootLog();
+          };
+        }
+
         const checkBtn = body.querySelector('#besing-btn-check-update');
         const updateMsg = body.querySelector('#besing-update-msg');
         checkBtn.onclick = async () => {
@@ -5656,6 +5944,7 @@
           const val = e.target.checked;
           await this.storage.setSiteDisabledAll(currentHost, val);
           this.refreshCurrentSiteModules();
+          if (!val) this.startHeartbeat();
           renderSiteRulesList();
         };
 
@@ -6458,7 +6747,7 @@
         const showFloatingButtons = cfg.showFloatingButtons !== false;
         const statusText = !onGrok
           ? 'Open a conversation on grok.com to export it.'
-          : (hasConversation ? 'Exports every message on the branch you are viewing, including ones Grok has not rendered yet.' : 'Open a conversation (grok.com/c/...) to export it.');
+          : (hasConversation ? 'Exports every message on the branch you are viewing, including ones Grok has not rendered yet.' : 'Open a conversation (a chat, or a chat inside a project) to export it.');
         const disabledAttr = hasConversation ? '' : 'disabled';
         const disabledStyle = hasConversation ? '' : 'opacity:0.45;cursor:not-allowed;';
 
@@ -7003,12 +7292,12 @@
     injectStyles(shadow) {
       const style = document.createElement('style');
       style.textContent = `
-        :host { all: initial; position: fixed !important; top: 0 !important; left: 0 !important; width: 0 !important; height: 0 !important; z-index: 2147483647 !important; pointer-events: none !important; overflow: visible !important; display: block !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }
+        :host { all: initial; position: fixed !important; top: 0 !important; left: 0 !important; width: var(--besing-host-w, 0px) !important; height: var(--besing-host-h, 0px) !important; transform: var(--besing-host-transform, none) !important; transform-origin: 0 0 !important; z-index: 2147483647 !important; pointer-events: none !important; overflow: visible !important; display: block !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }
         *, *::before, *::after { box-sizing: border-box !important; margin: 0; padding: 0; }
         svg { display: block !important; overflow: visible !important; flex-shrink: 0 !important; }
         svg:not(:root) { overflow: visible !important; }
         .besing-trigger { position: fixed; width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%); border: 1.5px solid rgba(129, 140, 248, 0.45); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 18px rgba(99, 102, 241, 0.3); display: flex; align-items: center; justify-content: center; color: #c7d2fe; cursor: grab; user-select: none; touch-action: none; z-index: 2147483647; pointer-events: auto; transition: transform 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.2s ease, border-color 0.2s ease, opacity 0.2s ease; }
-        .besing-trigger:hover { transform: scale(1.1); border-color: rgba(165, 180, 252, 0.85); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 26px rgba(99, 102, 241, 0.55); }
+        @media (hover: hover) { .besing-trigger:hover { transform: scale(1.1); border-color: rgba(165, 180, 252, 0.85); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 26px rgba(99, 102, 241, 0.55); } }
         .besing-trigger:active { cursor: grabbing; transform: scale(0.95); }
         .besing-trigger.folded-left { transform: translateX(-24px) !important; opacity: 0.88; }
         .besing-trigger.folded-right { transform: translateX(24px) !important; opacity: 0.88; }
@@ -7018,7 +7307,7 @@
         .besing-trigger.folded-top.folded-right { transform: translate(24px, -24px) !important; opacity: 0.88; }
         .besing-trigger.folded-bottom.folded-left { transform: translate(-24px, 24px) !important; opacity: 0.88; }
         .besing-trigger.folded-bottom.folded-right { transform: translate(24px, 24px) !important; opacity: 0.88; }
-        .besing-trigger.folded-right:hover, .besing-trigger.folded-left:hover, .besing-trigger.folded-top:hover, .besing-trigger.folded-bottom:hover { transform: translate(0, 0) scale(1.08) !important; opacity: 1 !important; }
+        @media (hover: hover) { .besing-trigger.folded-right:hover, .besing-trigger.folded-left:hover, .besing-trigger.folded-top:hover, .besing-trigger.folded-bottom:hover { transform: translate(0, 0) scale(1.08) !important; opacity: 1 !important; } }
         .besing-trigger.folded-right::before { content: ""; position: absolute; left: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
         .besing-trigger.folded-left::after { content: ""; position: absolute; right: 2px; top: 14px; bottom: 14px; width: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
         .besing-trigger.folded-top:not(.folded-right)::before, .besing-trigger.folded-top.folded-right::after { content: ""; position: absolute; bottom: 2px; left: 14px; right: 14px; height: 3px; background: #38bdf8; border-radius: 2px; box-shadow: 0 0 8px #38bdf8; z-index: 3; }
@@ -7030,14 +7319,14 @@
         @keyframes besingPulsePop { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.35); } }
         .besing-badge-count { position: absolute; top: -2px; right: -2px; background: linear-gradient(135deg, #06b6d4, #3b82f6); color: #fff; font-size: 10px; font-weight: 700; height: 18px; min-width: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #0f172a; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
         .besing-pet-eye { transform-origin: center; animation: petBlink 4.5s infinite; }
-        .besing-pet-face:hover .besing-pet-eye { animation: none; transform: scaleY(0.2) translateY(1px); }
+        @media (hover: hover) { .besing-pet-face:hover .besing-pet-eye { animation: none; transform: scaleY(0.2) translateY(1px); } }
         @keyframes petBlink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
         .besing-bubble-wrapper { position: fixed; z-index: 2147483647; pointer-events: auto; animation: besingBubblePop 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
         .besing-bubble-arrow { position: absolute; width: 14px; height: 14px; background: #0d1322; border: 1px solid rgba(255, 255, 255, 0.14); transform: rotate(45deg); z-index: 2; }
         .besing-bubble-arrow.arrow-bottom { bottom: -7px; border-top: none; border-left: none; }
         .besing-bubble-arrow.arrow-top { top: -7px; border-bottom: none; border-right: none; }
-        .besing-bubble-panel { width: 390px !important; min-width: 360px !important; max-width: calc(100vw - 28px) !important; min-height: 380px !important; max-height: 520px !important; background: linear-gradient(180deg, rgba(16, 23, 38, 0.98) 0%, rgba(9, 13, 22, 0.99) 100%) !important; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.13) !important; border-radius: 18px !important; box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.75), 0 0 30px rgba(99, 102, 241, 0.16) !important; display: flex !important; flex-direction: column !important; overflow: hidden !important; color: #e2e8f0 !important; transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
-        .besing-bubble-panel.is-expanded { width: 540px !important; min-height: 500px !important; max-height: 80vh !important; }
+        .besing-bubble-panel { width: 390px !important; min-width: min(360px, calc(var(--besing-vw, 100vw) - 28px)) !important; max-width: calc(var(--besing-vw, 100vw) - 28px) !important; min-height: min(380px, calc(var(--besing-vh, 100vh) - 90px)) !important; max-height: min(520px, calc(var(--besing-vh, 100vh) - 90px)) !important; background: linear-gradient(180deg, rgba(16, 23, 38, 0.98) 0%, rgba(9, 13, 22, 0.99) 100%) !important; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.13) !important; border-radius: 18px !important; box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.75), 0 0 30px rgba(99, 102, 241, 0.16) !important; display: flex !important; flex-direction: column !important; overflow: hidden !important; color: #e2e8f0 !important; transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
+        .besing-bubble-panel.is-expanded { width: 540px !important; min-height: min(500px, calc(var(--besing-vh, 100vh) - 28px)) !important; max-height: calc(var(--besing-vh, 100vh) * 0.8) !important; }
         .besing-header { min-height: 54px !important; height: 54px !important; padding: 14px 18px !important; display: flex !important; align-items: center !important; justify-content: space-between !important; border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important; background: rgba(255, 255, 255, 0.02) !important; flex-shrink: 0 !important; }
         .besing-logo-group { display: flex !important; align-items: center !important; gap: 10px !important; flex-shrink: 0 !important; }
         .besing-logo-icon { width: 28px !important; height: 28px !important; min-width: 28px !important; min-height: 28px !important; border-radius: 8px !important; background: linear-gradient(135deg, #6366f1, #3b82f6) !important; display: flex !important; align-items: center !important; justify-content: center !important; color: #ffffff !important; box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4) !important; flex-shrink: 0 !important; }
@@ -7245,23 +7534,40 @@
     }
   }
 
-  // Prevent duplicate mounts if another instance is already initialized and alive in CURRENT document
+  // Single-instance guard. A second copy can arrive from the same script running twice, a second
+  // install (Stable + Packed, GitHub + Greasy Fork), or the extension alongside a userscript.
+  // 1. Same JS world: an instance created for this document wins, mounted or not.
   const existingApp = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
                       (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
-  if (existingApp && existingApp.host && existingApp.host.isConnected && existingApp.host.ownerDocument === document) {
-    console.warn('[BESing] An instance is already mounted in current document. Skipping duplicate initialization.');
+  if (existingApp && !existingApp.disposed && existingApp.bootDocument === document) {
+    console.warn('[BESing] An instance already owns this page. Skipping duplicate initialization.');
     return;
   }
-  if (existingApp && typeof existingApp.destroy === 'function') {
-    try { existingApp.destroy(); } catch (e) {}
+  // An instance left over from a previous document (WebKit can keep the global across reloads) is shut down fully.
+  if (existingApp && !existingApp.disposed && typeof existingApp.dispose === 'function') {
+    try { existingApp.dispose(); } catch (e) {}
+  }
+  // 2. Other JS worlds: ask whether a live owner exists. Dispatch is synchronous, so two copies
+  // starting at the same moment still run one after the other and only the first claims the page.
+  let claimedElsewhere = false;
+  try {
+    claimedElsewhere = !document.dispatchEvent(new CustomEvent(CLAIM_EVENT, { cancelable: true }));
+  } catch (e) {}
+  if (claimedElsewhere) {
+    console.warn('[BESing] Another BESing copy (different script or extension) already owns this page. Skipping.');
+    return;
   }
 
   const app = new BESManagerApp();
+  document.addEventListener(CLAIM_EVENT, (e) => {
+    if (!app.disposed) e.preventDefault();
+  });
   app.isPacked = !BESUpdater.isStableLoader();
   try {
     window.__BESING_INSTANCE__ = app;
     if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_INSTANCE__ = app;
   } catch (e) {}
+  BESBootLog.record('start', 0);
 
   // 1. Synchronously arm security shields at document-start before yielding to event loop
   app.initPreemptiveShields();

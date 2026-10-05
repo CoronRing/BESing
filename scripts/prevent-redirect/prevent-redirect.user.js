@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prevent Redirect & Tab Hijack
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.4.0
+// @version      1.4.1
 // @description  Prevents unwanted automatic redirects, mobile touch/sensor traps, popups, and malicious ad network script injections while preserving normal site navigation.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const PreventRedirect = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.4.0',
+    version: '1.4.1',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
     _origOpen: null,
@@ -128,6 +128,23 @@
         return true;
       }
       return false;
+    },
+
+    // Verdict cache: frameworks re-register the same listener and timer functions constantly,
+    // and toString() plus the regex scan is the costliest part of every hooked call.
+    _fnVerdicts: null,
+
+    _isAdFunction(fn) {
+      if (typeof fn !== 'function') return false;
+      if (!this._fnVerdicts) this._fnVerdicts = new WeakMap();
+      const cached = this._fnVerdicts.get(fn);
+      if (cached !== undefined) return cached;
+      let verdict = false;
+      try {
+        verdict = this._isAdCode(Function.prototype.toString.call(fn));
+      } catch (e) {}
+      this._fnVerdicts.set(fn, verdict);
+      return verdict;
     },
 
     _createFakeWindow(url) {
@@ -257,14 +274,9 @@
             console.warn('[BESing Prevent Redirect] Suppressed mobile sensor trap:', type);
             return;
           }
-          if (typeof listener === 'function') {
-            try {
-              const fnStr = listener.toString();
-              if (self._isAdCode(fnStr)) {
-                self.notifyBlocked(type, 'malicious redirect event listener');
-                return;
-              }
-            } catch (e) {}
+          if (typeof listener === 'function' && self._isAdFunction(listener)) {
+            self.notifyBlocked(type, 'malicious redirect event listener');
+            return;
           }
           return origAEL.call(this, type, listener, options);
         };
@@ -276,14 +288,9 @@
         const origSetTimeout = window.setTimeout;
         this._origSetTimeout = origSetTimeout;
         const hookedSetTimeout = function(handler, delay, ...args) {
-          if (typeof handler === 'function') {
-            try {
-              const fnStr = handler.toString();
-              if (self._isAdCode(fnStr)) {
-                self.notifyBlocked('timer', 'malicious auto-redirect setTimeout');
-                return 0;
-              }
-            } catch (e) {}
+          if (typeof handler === 'function' && self._isAdFunction(handler)) {
+            self.notifyBlocked('timer', 'malicious auto-redirect setTimeout');
+            return 0;
           }
           return origSetTimeout.call(this, handler, delay, ...args);
         };
@@ -296,14 +303,9 @@
         const origSetInterval = window.setInterval;
         this._origSetInterval = origSetInterval;
         const hookedSetInterval = function(handler, delay, ...args) {
-          if (typeof handler === 'function') {
-            try {
-              const fnStr = handler.toString();
-              if (self._isAdCode(fnStr)) {
-                self.notifyBlocked('timer', 'malicious auto-redirect setInterval');
-                return 0;
-              }
-            } catch (e) {}
+          if (typeof handler === 'function' && self._isAdFunction(handler)) {
+            self.notifyBlocked('timer', 'malicious auto-redirect setInterval');
+            return 0;
           }
           return origSetInterval.call(this, handler, delay, ...args);
         };
@@ -737,6 +739,18 @@
               return origOpen.call(this || window, url, target, feat);
             };
 
+            var fnVerdicts = (typeof WeakMap === 'function') ? new WeakMap() : null;
+            var isAdFn = function(f) {
+              if (fnVerdicts) {
+                var hit = fnVerdicts.get(f);
+                if (hit !== undefined) return hit;
+              }
+              var verdict = false;
+              try { verdict = isAdCode(Function.prototype.toString.call(f)); } catch(e) {}
+              if (fnVerdicts) fnVerdicts.set(f, verdict);
+              return verdict;
+            };
+
             // Hook Function constructor in page context
             var OrigFunction = window.Function;
             window.Function = function(...args) {
@@ -753,13 +767,9 @@
             var origAEL = EventTarget.prototype.addEventListener;
             EventTarget.prototype.addEventListener = function(t, l, o) {
               if (t === 'devicemotion' || t === 'deviceorientation') return;
-              if (typeof l === 'function') {
-                try {
-                  if (isAdCode(l.toString())) {
-                    window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: t, reason: 'page-script addEventListener' } }));
-                    return;
-                  }
-                } catch(e) {}
+              if (typeof l === 'function' && isAdFn(l)) {
+                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: t, reason: 'page-script addEventListener' } }));
+                return;
               }
               return origAEL.call(this, t, l, o);
             };
@@ -767,21 +777,13 @@
             // Hook setTimeout & setInterval in page context
             var origSetTimeout = window.setTimeout;
             window.setTimeout = function(h, d, ...args) {
-              if (typeof h === 'function') {
-                try {
-                  if (isAdCode(h.toString())) return 0;
-                } catch(e) {}
-              }
+              if (typeof h === 'function' && isAdFn(h)) return 0;
               return origSetTimeout.call(this, h, d, ...args);
             };
 
             var origSetInterval = window.setInterval;
             window.setInterval = function(h, d, ...args) {
-              if (typeof h === 'function') {
-                try {
-                  if (isAdCode(h.toString())) return 0;
-                } catch(e) {}
-              }
+              if (typeof h === 'function' && isAdFn(h)) return 0;
               return origSetInterval.call(this, h, d, ...args);
             };
 

@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.7.0  
+**Version:** 1.7.1  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -374,6 +374,7 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 
 ### 7.25 Grok Exporter: Full-Conversation Copy & Markdown Download (v1.7.0)
 - **Problem**: grok.com virtualizes its transcript. Only the messages near the scroll position are mounted in the DOM, so `Ctrl + A` / `Ctrl + C` (and any DOM-scraping exporter) captures only part of a long conversation.
+- **Conversation ID**: Taken from `/c/<id>` for regular chats, or from the `chat` query parameter for chats inside a project (`/project/<projectId>?tab=conversations&chat=<id>`). Both use the same API endpoints.
 - **API-First Engine**: The Grok Exporter module (`scripts/grok-exporter/grok-exporter.user.js`) reads the conversation from the same internal endpoints the Grok web app uses, called same-origin with the user's session cookies:
   1. `GET /rest/app-chat/conversations/{id}/response-node?includeThreads=true` returns every response node with `responseId`, `sender`, and `parentResponseId`.
   2. `POST /rest/app-chat/conversations/{id}/load-responses` with `{ "responseIds": [...] }` returns message bodies, sent in batches of 75.
@@ -383,3 +384,20 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Markdown Output**: A `# Title` header with export time and URL, then `## User` / `## Grok` sections separated by `---`. Inline citation markup (`<grok:render ...>`) is stripped. Generated images become Markdown image links on `assets.grok.com`. Optional additions: thinking trace in a `<details>` block, per-message timestamps, and a web sources list.
 - **Clipboard Strategy**: Copy passes a promise to `ClipboardItem`, which keeps the click's user activation valid while the conversation is still loading. If that is unsupported, it falls back to `navigator.clipboard.writeText`, then to a hidden textarea with `execCommand('copy')`.
 - **UI Surfaces**: Floating `Copy chat` and `Download .md` buttons on grok.com conversation pages (toggleable), and the same two actions in the module's secondary menu, which work even when the module is OFF. All page UI is built with DOM APIs, never `innerHTML`, so Trusted Types policies cannot strip it. On other hosts the module does nothing.
+
+### 7.26 Top-Frame UI, Cross-World Single Instance, Pinch-Zoom Compensation & Boot Log (v1.7.1)
+- **Duplicate Pet Icons (Root Cause)**: The Packed userscript has no `@noframes`, so userscript managers inject it into every iframe (ads, embeds, comment widgets). Each frame mounted its own fixed-position widget, which showed up as a second pet inside the iframe's box. Frame instances also ran every module (a Rest Reminder bubble per frame, PageStream inside frames) and wrote frame-sized clamped widget positions into the shared storage.
+- **Top-Frame UI**: `IS_TOP_FRAME` gates the widget, menu, hotkeys, heartbeat and lifecycle listeners. Child frames load settings and run only `FRAME_SAFE_MODULES` (`prevent-redirect`, `force-copy`) according to the frame's own site rules, so redirect protection inside frames is unchanged.
+- **Single Instance Across JS Worlds**: The previous guard only skipped a second copy when the first had already mounted its host, which never happens at `document-start`. The second copy then "destroyed" the first by removing its host while the first copy's timers kept remounting, and the two fought into two visible widgets. Two checks now replace it:
+  1. **Same world**: an instance whose `bootDocument` is the current document wins whether or not it has mounted. An instance from an earlier document is shut down with `dispose()` (timers, modules, listeners, viewport tracking), and every lifecycle callback checks `disposed`.
+  2. **Other worlds** (Stable + Packed, a second install, the extension next to a userscript): worlds share no globals and `<html>` may not exist yet at `document-start`, but they share event dispatch on `document`. Each new copy dispatches a cancelable `besing:claim-page` event; the owner's listener calls `preventDefault()`, so a newcomer that sees its event cancelled exits. Dispatch is synchronous, so copies starting at the same moment still resolve to one owner.
+- **Pinch-Zoom Compensation (Root Cause of the Oversized Icon)**: On mobile, `position: fixed` content scales with pinch-zoom, so the widget grew with the page. `clampWidgetPosition()` also measured against the shrunken visual viewport and saved the shifted position. The host element is now sized to the visual viewport and given `transform: translate(offsetLeft, offsetTop) scale(1 / visualViewport.scale)` (via the `--besing-host-*` custom properties). Children of a transformed element use it as their containing block, so the widget and menu keep their normal on-screen size and stay in the visible area.
+  - Widget coordinates live in this "local" space, whose size is the visual viewport times its scale and so stays roughly constant while zooming. `getViewportMetrics()`, `getLocalRect()` and drag deltas multiplied by the scale keep every calculation (clamping, docking, bubble placement, Rest Reminder bubble) in local pixels.
+  - Tracking runs on `visualViewport` `resize`/`scroll` plus window `resize`/`orientationchange`, batched per animation frame.
+  - The panel's size limits use `--besing-vw` / `--besing-vh` instead of `100vw` / `100vh`, and `positionBubble()` caps the panel height to the space on its side of the widget.
+- **Saved Position Integrity**: Only explicit user actions write the widget position (a real drag, Pull Up, Reset). Clamping for the current viewport (keyboard open, rotation, zoom) is applied visually from the saved position without saving, so the icon returns to its place when the viewport grows back. A tap no longer rewrites the position, and `touchcancel` ends a drag.
+- **Sticky Hover on Touch**: Hover-only effects on the trigger are wrapped in `@media (hover: hover)`, so a tap on iOS no longer leaves the pet scaled up.
+- **Blocked-Site Recovery**: Opening the menu on a blocked site (hotkey or userscript menu) now mounts the host first instead of throwing, `teardown()` resets each module's `running` flag so modules restart after unblocking, and the heartbeat restarts on unblock.
+- **Boot Log (Diagnostics)**: Each top-frame load records `start`, `storage`, `mounted` (or `blocked`) with elapsed milliseconds under the `boot_log` storage key (last 15 loads). Settings shows them as "Recent Page Loads". A load the user made that is missing from the list was never injected by the userscript manager; "stopped" means BESing started but the icon did not appear.
+- **Prevent Redirect Performance (v1.4.1)**: Every hooked `addEventListener`, `setTimeout` and `setInterval` call ran `toString()` and a regex scan on the callback. Verdicts are now cached per function in a `WeakMap`, in both the userscript world and the injected page-world guard.
+- **Stable Loader (v1.1.1)**: The page `<script>` fallback now runs only when CSP blocked `new Function`. Previously any runtime error re-ran the whole bundle in the page world, creating a second instance.

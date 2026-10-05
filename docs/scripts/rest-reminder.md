@@ -1,7 +1,7 @@
 # Rest Reminder
 
 **Script Identifier:** `rest-reminder`  
-**Current Version:** 1.0.0  
+**Current Version:** 1.0.1  
 **Category:** Productivity  
 **Author:** BESing Team  
 **License:** MIT  

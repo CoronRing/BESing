@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Exporter
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.0
+// @version      1.0.1
 // @description  Copy or download the full Grok conversation on the current page as Markdown, including messages Grok has not rendered yet.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const GrokExporter = {
     id: 'grok-exporter',
     name: 'Grok Exporter',
-    version: '1.0.0',
+    version: '1.0.1',
     description: 'Copy or download the full Grok conversation on the current page as Markdown, including messages Grok has not rendered yet.',
     category: 'Tools',
     _config: null,
@@ -59,10 +59,22 @@
       return /(^|\.)grok\.com$/i.test(window.location.hostname);
     },
 
+    /**
+     * Grok puts the conversation ID in different places:
+     * - regular chats: grok.com/c/<id>
+     * - chats inside a project: grok.com/project/<projectId>?tab=conversations&chat=<id>
+     */
     getConversationId() {
       if (!this.isGrokHost()) return null;
+      const idPattern = /^[A-Za-z0-9-]{8,}$/;
       const m = window.location.pathname.match(/\/c\/([A-Za-z0-9-]{8,})/);
-      return m ? m[1] : null;
+      if (m) return m[1];
+      const params = new URLSearchParams(window.location.search);
+      for (const key of ['chat', 'conversation', 'conversationId']) {
+        const value = params.get(key);
+        if (value && idPattern.test(value)) return value;
+      }
+      return null;
     },
 
     // ---------- Public actions ----------
@@ -130,7 +142,7 @@
       const options = this._resolveOptions(cfg);
       const conversationId = this.getConversationId();
       if (!conversationId) {
-        throw new Error('Open a Grok conversation first (URL should look like grok.com/c/...)');
+        throw new Error('Open a Grok conversation first (a chat, or a chat inside a project)');
       }
 
       let messages;
