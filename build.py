@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -1104,6 +1104,16 @@ def build():
       }}
     }}
 
+    // Cross-site state for modules. Userscript manager and extension storage are shared by every
+    // site, unlike localStorage, which is separate per origin. Values must be JSON-serializable.
+    async readSharedState(key, fallback = null) {{
+      return BESAdapter.get('shared_' + key, fallback);
+    }}
+
+    async writeSharedState(key, value) {{
+      return BESAdapter.set('shared_' + key, value);
+    }}
+
     openScriptConfig(scriptId) {{
       this.activeConfigScriptId = scriptId;
       this.currentView = 'script-config';
@@ -2015,12 +2025,12 @@ def build():
                 <span class="besing-blocklist-count" id="besing-rules-count">0</span>
               </div>
               <div class="besing-site-rules-list" id="besing-site-rules-container"></div>
-              <div class="besing-add-override-row" style="margin-top:10px;display:flex;gap:6px;align-items:center;">
-                <input type="text" class="besing-input-sm" id="besing-settings-new-host" placeholder="domain (e.g. google.com, rbc.com)" style="flex:1;">
-                <select class="besing-select-sm" id="besing-settings-new-script">
+              <div class="besing-add-override-row" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+                <input type="text" class="besing-input-sm" id="besing-settings-new-host" placeholder="domain (e.g. google.com, rbc.com)" style="flex:1 1 100%;min-width:0;">
+                <select class="besing-select-sm" id="besing-settings-new-script" style="flex:1 1 0;min-width:0;">
                   ${{this.modules.map(mod => `<option value="${{mod.id}}">${{mod.name}}</option>`).join('')}}
                 </select>
-                <select class="besing-select-sm" id="besing-settings-new-mode">
+                <select class="besing-select-sm" id="besing-settings-new-mode" style="flex:1 1 0;min-width:0;">
                   <option value="site">Site Only (ON)</option>
                   <option value="site-off">Excluded (OFF)</option>
                 </select>
@@ -2118,6 +2128,8 @@ def build():
           renderSiteRulesList();
         }};
 
+        // Groups start collapsed except the current site; the open set survives re-renders.
+        const expandedHosts = new Set([currentHost.toLowerCase()]);
         const renderSiteRulesList = () => {{
           const container = body.querySelector('#besing-site-rules-container');
           const countEl = body.querySelector('#besing-rules-count');
@@ -2135,7 +2147,7 @@ def build():
           hosts.forEach(host => {{
             const rule = allRules[host];
             const group = document.createElement('div');
-            group.className = 'besing-site-group';
+            group.className = expandedHosts.has(host) ? 'besing-site-group' : 'besing-site-group collapsed';
 
             let ruleCount = 0;
             if (rule.disableAll) ruleCount++;
@@ -2152,7 +2164,7 @@ def build():
               <div class="besing-site-group-title">
                 <svg class="besing-site-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-                <span>${{host}}</span>
+                <span class="besing-site-host">${{host}}</span>
                 <span class="besing-site-rule-count">${{ruleCount}} configured</span>
               </div>
               <button type="button" class="besing-btn-del-site" title="Remove all rules for ${{host}}">Remove Site</button>
@@ -2161,7 +2173,9 @@ def build():
             // Collapsible dropdown toggle: click header to expand/collapse rules
             groupHeader.onclick = (e) => {{
               if (e.target.closest('.besing-btn-del-site')) return;
-              group.classList.toggle('collapsed');
+              const collapsed = group.classList.toggle('collapsed');
+              if (collapsed) expandedHosts.delete(host);
+              else expandedHosts.add(host);
             }};
 
             groupHeader.querySelector('.besing-btn-del-site').onclick = async (e) => {{
@@ -2883,7 +2897,7 @@ def build():
               <button type="button" class="besing-segmented-btn ${{activePreset === 'custom' ? 'active' : ''}}" data-preset="custom">Custom</button>
             </div>
             <p style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.3;">
-              When the time is up, a chat bubble pops up on the icon with Repeat and Off buttons. It remains until you choose an action.
+              When the time is up, a chat bubble pops up on the icon with Repeat and Off buttons. It remains until you choose an action. One timer is shared by every tab and site: Repeat or Off on any page applies everywhere within a few seconds.
             </p>
           </div>
 
@@ -3414,7 +3428,7 @@ def build():
           btnTest.onclick = () => {{
             this.closeModal();
             if (typeof m.showReminderChatBox === 'function') {{
-              m.showReminderChatBox();
+              m.showReminderChatBox({{ preview: true }});
             }}
           }};
         }}
@@ -3577,25 +3591,27 @@ def build():
         .besing-site-card-header {{ display: flex; align-items: center; justify-content: space-between; }}
         .besing-current-domain {{ font-size: 12px; font-weight: 600; color: #38bdf8; font-family: monospace; }}
         .besing-site-rules-wrap {{ display: flex; flex-direction: column; gap: 8px; }}
-        .besing-site-rules-list {{ display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }}
-        .besing-site-group {{ background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; overflow: hidden; }}
-        .besing-site-group-header {{ padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: space-between; cursor: pointer; user-select: none; transition: background 0.15s ease; }}
+        .besing-site-rules-list {{ display: flex; flex-direction: column; gap: 8px; }}
+        .besing-site-group {{ flex-shrink: 0; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; overflow: hidden; }}
+        .besing-site-group-header {{ padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; user-select: none; transition: background 0.15s ease; }}
         .besing-site-group-header:hover {{ background: rgba(255, 255, 255, 0.06); }}
         .besing-site-chevron {{ transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); color: #94a3b8; flex-shrink: 0; }}
         .besing-site-group.collapsed .besing-site-chevron {{ transform: rotate(-90deg); }}
         .besing-site-group.collapsed .besing-site-subrules {{ display: none; }}
         .besing-site-group.collapsed .besing-site-group-header {{ border-bottom: none; }}
         .besing-site-rule-count {{ font-size: 10px; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.25); padding: 1px 6px; border-radius: 999px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-        .besing-site-group-title {{ display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: #f1f5f9; font-family: monospace; }}
+        .besing-site-group-title {{ display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11px; font-weight: 700; color: #f1f5f9; font-family: monospace; }}
+        .besing-site-host {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+        .besing-site-rule-count, .besing-btn-del-site {{ flex-shrink: 0; white-space: nowrap; }}
         .besing-btn-del-site {{ background: transparent; border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px; cursor: pointer; transition: all 0.15s ease; }}
         .besing-btn-del-site:hover {{ background: rgba(239, 68, 68, 0.2); border-color: #ef4444; }}
         .besing-site-subrules {{ display: flex; flex-direction: column; padding: 4px 10px; }}
-        .besing-site-rule-row {{ display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }}
+        .besing-site-rule-row {{ display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }}
         .besing-site-rule-row:last-child {{ border-bottom: none; }}
-        .besing-site-rule-info {{ display: flex; align-items: center; gap: 6px; }}
+        .besing-site-rule-info {{ display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }}
         .besing-site-rule-name {{ font-size: 11px; font-weight: 500; color: #e2e8f0; }}
         .besing-site-rule-tag {{ font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 4px; }}
-        .besing-site-rule-actions {{ display: flex; align-items: center; gap: 6px; }}
+        .besing-site-rule-actions {{ display: flex; align-items: center; gap: 6px; flex-shrink: 0; }}
         .besing-switch-sm {{ width: 32px; height: 18px; }}
         .besing-switch-sm .besing-slider::before {{ height: 12px; width: 12px; left: 3px; bottom: 3px; }}
         .besing-switch-sm input:checked + .besing-slider::before {{ transform: translateX(14px); }}

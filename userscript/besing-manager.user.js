@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.7.1
+// @version      1.7.2
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -543,7 +543,7 @@
             id: Math.random().toString(36).slice(2, 10),
             t: Date.now(),
             host: (window.location.hostname || '').toLowerCase(),
-            v: '1.7.1',
+            v: '1.7.2',
             ready: document.readyState,
             stages: {}
           };
@@ -3626,34 +3626,68 @@
       const mod = {
     id: 'rest-reminder',
     name: 'Rest Reminder',
-    version: '1.0.1',
+    version: '1.1.0',
     description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
     category: 'Productivity',
+    SHARED_KEY: 'rest_reminder',
+    LOCAL_KEY: 'besing_rest_reminder_state',
+    SYNC_INTERVAL_MS: 5000,
+    MAX_TIMEOUT_MS: 2147483647,
     _config: null,
+    _active: false,
+    _state: null,
     _timer: null,
-    _checkInterval: null,
+    _syncInterval: null,
+    _syncing: false,
     _chatBoxEl: null,
-    _targetAlarmTime: 0,
+    _preview: false,
     _boundReposition: null,
+    _boundWake: null,
 
     init(config = {}) {
       this.destroy();
       this._config = config || {};
-      this._scheduleNextReminder();
-      this._startPeriodicChecker();
+      this._active = true;
+
+      // Background tabs throttle timers, and other tabs may press Repeat or Off, so the state is
+      // re-read on a slow poll while visible and immediately whenever the page comes back.
+      this._boundWake = () => {
+        if (document.visibilityState !== 'hidden') this._sync();
+      };
+      document.addEventListener('visibilitychange', this._boundWake);
+      window.addEventListener('pageshow', this._boundWake);
+      window.addEventListener('focus', this._boundWake);
+      this._syncInterval = setInterval(() => {
+        if (document.visibilityState !== 'hidden') this._sync();
+      }, this.SYNC_INTERVAL_MS);
+
+      this._sync(true);
     },
 
     onConfigChange(newConfig) {
       const prevInterval = this._getIntervalMinutes();
       this._config = newConfig || {};
-      const newInterval = this._getIntervalMinutes();
-      if (prevInterval !== newInterval) {
-        this._scheduleNextReminder(true);
+      if (this._active && prevInterval !== this._getIntervalMinutes()) {
+        this._startCycle();
       }
     },
 
     destroy() {
-      this._clearTimers();
+      this._active = false;
+      if (this._timer) {
+        clearTimeout(this._timer);
+        this._timer = null;
+      }
+      if (this._syncInterval) {
+        clearInterval(this._syncInterval);
+        this._syncInterval = null;
+      }
+      if (this._boundWake) {
+        document.removeEventListener('visibilitychange', this._boundWake);
+        window.removeEventListener('pageshow', this._boundWake);
+        window.removeEventListener('focus', this._boundWake);
+        this._boundWake = null;
+      }
       this.dismissChatBox();
     },
 
@@ -3666,67 +3700,130 @@
       return 20; // Default 20 minutes
     },
 
-    _scheduleNextReminder(forceNewCycle = false) {
-      this._clearTimers();
-      const intervalMinutes = this._getIntervalMinutes();
-      const intervalMs = intervalMinutes * 60 * 1000;
-      const now = Date.now();
+    _manager() {
+      const inst = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                   (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      return inst && !inst.disposed ? inst : null;
+    },
 
-      let targetTime = 0;
-      if (!forceNewCycle) {
+    /** @returns {Promise<RestReminderState | null>} */
+    async _readState() {
+      const appMgr = this._manager();
+      if (appMgr && typeof appMgr.readSharedState === 'function') {
         try {
-          const stored = window.localStorage.getItem('besing_rest_reminder_alarm');
-          if (stored) targetTime = Number(stored);
+          return await appMgr.readSharedState(this.SHARED_KEY, null);
         } catch (e) {}
       }
-
-      // If targetTime is empty, invalid, or expired beyond 2 hours, compute fresh target
-      if (!targetTime || isNaN(targetTime) || targetTime < now - (2 * 60 * 60 * 1000)) {
-        targetTime = now + intervalMs;
-        try {
-          window.localStorage.setItem('besing_rest_reminder_alarm', String(targetTime));
-        } catch (e) {}
-      }
-
-      this._targetAlarmTime = targetTime;
-
-      if (now >= targetTime) {
-        // Alarm already due! Show chat box right away
-        this.showReminderChatBox();
-      } else {
-        const delay = Math.max(500, targetTime - now);
-        this._timer = setTimeout(() => {
-          this.showReminderChatBox();
-        }, delay);
+      try {
+        const raw = window.localStorage.getItem(this.LOCAL_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch (e) {
+        return null;
       }
     },
 
-    _startPeriodicChecker() {
-      if (this._checkInterval) clearInterval(this._checkInterval);
-      // Periodically verify in case tab was backgrounded or clock shifted
-      this._checkInterval = setInterval(() => {
-        if (!this._chatBoxEl && this._targetAlarmTime && Date.now() >= this._targetAlarmTime) {
-          this.showReminderChatBox();
+    /** @param {RestReminderState} state */
+    async _writeState(state) {
+      const appMgr = this._manager();
+      if (appMgr && typeof appMgr.writeSharedState === 'function') {
+        try {
+          await appMgr.writeSharedState(this.SHARED_KEY, state);
+          return;
+        } catch (e) {}
+      }
+      try {
+        window.localStorage.setItem(this.LOCAL_KEY, JSON.stringify(state));
+      } catch (e) {}
+    },
+
+    _isValidState(state) {
+      return !!state && typeof state === 'object' && Number.isFinite(Number(state.due)) && Number(state.due) > 0;
+    },
+
+    // Reads the shared state and brings this page in line with it.
+    // On init, a missing or "off" state starts a fresh cycle: the script only runs when enabled,
+    // so being initialized after Off means the user switched it back on.
+    async _sync(isInit = false) {
+      if (this._syncing) return;
+      this._syncing = true;
+      try {
+        const state = await this._readState();
+        if (!this._active) return;
+        if (state && state.off && !isInit) {
+          this._goDormant();
+          return;
         }
-      }, 15000);
+        if (!this._isValidState(state) || state.off) {
+          await this._startCycle();
+          return;
+        }
+        this._apply(state);
+      } finally {
+        this._syncing = false;
+      }
     },
 
-    _clearTimers() {
+    /** @returns {Promise<RestReminderState>} */
+    async _startCycle() {
+      const minutes = this._getIntervalMinutes();
+      const state = { due: Date.now() + minutes * 60 * 1000, intervalMinutes: minutes, off: false };
+      await this._writeState(state);
+      if (this._active) this._apply(state);
+      return state;
+    },
+
+    /** @param {RestReminderState} state */
+    _apply(state) {
+      this._state = state;
       if (this._timer) {
         clearTimeout(this._timer);
         this._timer = null;
       }
-      if (this._checkInterval) {
-        clearInterval(this._checkInterval);
-        this._checkInterval = null;
+      const remaining = Number(state.due) - Date.now();
+      if (remaining <= 0) {
+        this._ensureChatBox();
+        return;
       }
+      if (this._chatBoxEl && !this._preview) {
+        // Another tab pressed Repeat.
+        this.dismissChatBox();
+      }
+      this._timer = setTimeout(() => this._sync(), Math.min(this.MAX_TIMEOUT_MS, Math.max(250, remaining)));
     },
 
-    showReminderChatBox() {
-      if (this._chatBoxEl) return; // Already visible
+    // Another tab pressed Off: stop here too, without touching storage.
+    _goDormant() {
+      this._state = null;
+      if (this._timer) {
+        clearTimeout(this._timer);
+        this._timer = null;
+      }
+      if (!this._preview) this.dismissChatBox();
+    },
 
-      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
-                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+    // Keeps the bubble on screen while the reminder is due, rebuilding it if the page or the
+    // BESing layer removed it.
+    _ensureChatBox() {
+      const appMgr = this._manager();
+      const box = this._chatBoxEl;
+      const layer = appMgr && appMgr.shadow;
+      if (box && box.isConnected && (!layer || box.getRootNode() === layer)) {
+        this._preview = false;
+        if (appMgr && appMgr.widgetEl) appMgr.widgetEl.classList.add('besing-pulse-alert');
+        this._repositionChatBox();
+        return;
+      }
+      if (box) this.dismissChatBox();
+      this.showReminderChatBox();
+    },
+
+    /** @param {{ preview?: boolean }} [options] preview shows the bubble without a due reminder. */
+    showReminderChatBox(options = {}) {
+      if (this._chatBoxEl && this._chatBoxEl.isConnected) return; // Already visible
+      if (this._chatBoxEl) this.dismissChatBox();
+      this._preview = !!options.preview;
+
+      const appMgr = this._manager();
 
       if (appMgr && typeof appMgr.ensureMounted === 'function') {
         appMgr.ensureMounted();
@@ -3737,21 +3834,22 @@
       }
 
       const interval = this._getIntervalMinutes();
+      const activeMinutes = (this._state && Number(this._state.intervalMinutes)) || interval;
 
       // 1. Create chat box element
       const box = document.createElement('div');
       box.className = 'besing-rest-chat-box';
       box.id = 'besing-rest-chat-box';
 
-      box.innerHTML = `
+      const html = `
         <div class="besing-rest-arrow" id="besing-rest-arrow"></div>
         <div class="besing-rest-header">
           <span class="besing-rest-avatar">🐾</span>
           <span class="besing-rest-title">Time to Rest!</span>
-          <span class="besing-rest-badge">${interval}m</span>
+          <span class="besing-rest-badge">${activeMinutes}m</span>
         </div>
         <div class="besing-rest-msg">
-          You've been active for <strong>${interval} minutes</strong>! Look away from the screen, blink, and stretch.
+          You've been active for <strong>${activeMinutes} minute${activeMinutes === 1 ? '' : 's'}</strong>! Look away from the screen, blink, and stretch.
         </div>
         <div class="besing-rest-actions">
           <button type="button" class="besing-rest-btn-repeat" id="besing-rest-btn-repeat">
@@ -3763,6 +3861,12 @@
           </button>
         </div>
       `;
+      // The manager's parser works on Trusted Types sites, where innerHTML throws.
+      if (appMgr && typeof appMgr.setSafeHTML === 'function') {
+        appMgr.setSafeHTML(box, html);
+      } else {
+        box.innerHTML = html;
+      }
 
       // 2. Insert into shadow DOM if available, otherwise document.body
       const targetContainer = (appMgr && appMgr.shadow) ? appMgr.shadow : (document.body || document.documentElement);
@@ -3776,13 +3880,13 @@
         appMgr.widgetEl.classList.add('besing-pulse-alert');
       }
 
-      // 4. Bind Repeat button (Primary action)
+      // 4. Bind Repeat button (Primary action): starts the next cycle for every tab and site
       const btnRepeat = box.querySelector('#besing-rest-btn-repeat');
       if (btnRepeat) {
         btnRepeat.onclick = (e) => {
           e.stopPropagation();
           this.dismissChatBox();
-          this._scheduleNextReminder(true); // force new cycle
+          this._startCycle();
         };
       }
 
@@ -3813,6 +3917,7 @@
         }
         this._chatBoxEl = null;
       }
+      this._preview = false;
       if (this._boundReposition) {
         window.removeEventListener('resize', this._boundReposition);
         window.removeEventListener('scroll', this._boundReposition);
@@ -3822,8 +3927,7 @@
         }
         this._boundReposition = null;
       }
-      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
-                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      const appMgr = this._manager();
       if (appMgr && appMgr.widgetEl) {
         appMgr.widgetEl.classList.remove('besing-pulse-alert');
       }
@@ -3831,8 +3935,7 @@
 
     _repositionChatBox() {
       if (!this._chatBoxEl) return;
-      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
-                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      const appMgr = this._manager();
       const widget = appMgr && appMgr.widgetEl;
       const box = this._chatBoxEl;
       const arrow = box.querySelector('#besing-rest-arrow');
@@ -3874,16 +3977,20 @@
       box.style.width = `${Math.round(boxW)}px`;
     },
 
-    _disableReminder() {
+    // Off applies everywhere: the shared state tells open tabs to stop, and the script is switched
+    // off globally, including any per-site "on" rules, so new pages do not start it again.
+    async _disableReminder() {
       this.destroy();
-      try {
-        window.localStorage.removeItem('besing_rest_reminder_alarm');
-      } catch (e) {}
-      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
-                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      await this._writeState({ due: 0, intervalMinutes: this._getIntervalMinutes(), off: true });
+      const appMgr = this._manager();
       if (appMgr && appMgr.storage && typeof appMgr.storage.setScriptMode === 'function') {
-        const host = appMgr.storage.getCurrentHost();
-        appMgr.storage.setScriptMode(this.id, 'off', host);
+        const storage = appMgr.storage;
+        await storage.setScriptMode(this.id, 'off', storage.getCurrentHost());
+        if (typeof storage.getScriptSiteOverrides === 'function' && typeof storage.removeSiteOverride === 'function') {
+          for (const rule of storage.getScriptSiteOverrides(this.id)) {
+            if (rule.enabled) await storage.removeSiteOverride(this.id, rule.host);
+          }
+        }
         if (typeof appMgr.refreshCurrentSiteModules === 'function') {
           appMgr.refreshCurrentSiteModules();
         }
@@ -4544,7 +4651,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.7.1';
+    static CURRENT_VERSION = '1.7.2';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -4990,6 +5097,16 @@
           } catch (e) {}
         }
       }
+    }
+
+    // Cross-site state for modules. Userscript manager and extension storage are shared by every
+    // site, unlike localStorage, which is separate per origin. Values must be JSON-serializable.
+    async readSharedState(key, fallback = null) {
+      return BESAdapter.get('shared_' + key, fallback);
+    }
+
+    async writeSharedState(key, value) {
+      return BESAdapter.set('shared_' + key, value);
     }
 
     openScriptConfig(scriptId) {
@@ -5903,12 +6020,12 @@
                 <span class="besing-blocklist-count" id="besing-rules-count">0</span>
               </div>
               <div class="besing-site-rules-list" id="besing-site-rules-container"></div>
-              <div class="besing-add-override-row" style="margin-top:10px;display:flex;gap:6px;align-items:center;">
-                <input type="text" class="besing-input-sm" id="besing-settings-new-host" placeholder="domain (e.g. google.com, rbc.com)" style="flex:1;">
-                <select class="besing-select-sm" id="besing-settings-new-script">
+              <div class="besing-add-override-row" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+                <input type="text" class="besing-input-sm" id="besing-settings-new-host" placeholder="domain (e.g. google.com, rbc.com)" style="flex:1 1 100%;min-width:0;">
+                <select class="besing-select-sm" id="besing-settings-new-script" style="flex:1 1 0;min-width:0;">
                   ${this.modules.map(mod => `<option value="${mod.id}">${mod.name}</option>`).join('')}
                 </select>
-                <select class="besing-select-sm" id="besing-settings-new-mode">
+                <select class="besing-select-sm" id="besing-settings-new-mode" style="flex:1 1 0;min-width:0;">
                   <option value="site">Site Only (ON)</option>
                   <option value="site-off">Excluded (OFF)</option>
                 </select>
@@ -6006,6 +6123,8 @@
           renderSiteRulesList();
         };
 
+        // Groups start collapsed except the current site; the open set survives re-renders.
+        const expandedHosts = new Set([currentHost.toLowerCase()]);
         const renderSiteRulesList = () => {
           const container = body.querySelector('#besing-site-rules-container');
           const countEl = body.querySelector('#besing-rules-count');
@@ -6023,7 +6142,7 @@
           hosts.forEach(host => {
             const rule = allRules[host];
             const group = document.createElement('div');
-            group.className = 'besing-site-group';
+            group.className = expandedHosts.has(host) ? 'besing-site-group' : 'besing-site-group collapsed';
 
             let ruleCount = 0;
             if (rule.disableAll) ruleCount++;
@@ -6040,7 +6159,7 @@
               <div class="besing-site-group-title">
                 <svg class="besing-site-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-                <span>${host}</span>
+                <span class="besing-site-host">${host}</span>
                 <span class="besing-site-rule-count">${ruleCount} configured</span>
               </div>
               <button type="button" class="besing-btn-del-site" title="Remove all rules for ${host}">Remove Site</button>
@@ -6049,7 +6168,9 @@
             // Collapsible dropdown toggle: click header to expand/collapse rules
             groupHeader.onclick = (e) => {
               if (e.target.closest('.besing-btn-del-site')) return;
-              group.classList.toggle('collapsed');
+              const collapsed = group.classList.toggle('collapsed');
+              if (collapsed) expandedHosts.delete(host);
+              else expandedHosts.add(host);
             };
 
             groupHeader.querySelector('.besing-btn-del-site').onclick = async (e) => {
@@ -6771,7 +6892,7 @@
               <button type="button" class="besing-segmented-btn ${activePreset === 'custom' ? 'active' : ''}" data-preset="custom">Custom</button>
             </div>
             <p style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.3;">
-              When the time is up, a chat bubble pops up on the icon with Repeat and Off buttons. It remains until you choose an action.
+              When the time is up, a chat bubble pops up on the icon with Repeat and Off buttons. It remains until you choose an action. One timer is shared by every tab and site: Repeat or Off on any page applies everywhere within a few seconds.
             </p>
           </div>
 
@@ -7302,7 +7423,7 @@
           btnTest.onclick = () => {
             this.closeModal();
             if (typeof m.showReminderChatBox === 'function') {
-              m.showReminderChatBox();
+              m.showReminderChatBox({ preview: true });
             }
           };
         }
@@ -7465,25 +7586,27 @@
         .besing-site-card-header { display: flex; align-items: center; justify-content: space-between; }
         .besing-current-domain { font-size: 12px; font-weight: 600; color: #38bdf8; font-family: monospace; }
         .besing-site-rules-wrap { display: flex; flex-direction: column; gap: 8px; }
-        .besing-site-rules-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }
-        .besing-site-group { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; overflow: hidden; }
-        .besing-site-group-header { padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: space-between; cursor: pointer; user-select: none; transition: background 0.15s ease; }
+        .besing-site-rules-list { display: flex; flex-direction: column; gap: 8px; }
+        .besing-site-group { flex-shrink: 0; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; overflow: hidden; }
+        .besing-site-group-header { padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; user-select: none; transition: background 0.15s ease; }
         .besing-site-group-header:hover { background: rgba(255, 255, 255, 0.06); }
         .besing-site-chevron { transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); color: #94a3b8; flex-shrink: 0; }
         .besing-site-group.collapsed .besing-site-chevron { transform: rotate(-90deg); }
         .besing-site-group.collapsed .besing-site-subrules { display: none; }
         .besing-site-group.collapsed .besing-site-group-header { border-bottom: none; }
         .besing-site-rule-count { font-size: 10px; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.25); padding: 1px 6px; border-radius: 999px; font-weight: 600; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-        .besing-site-group-title { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: #f1f5f9; font-family: monospace; }
+        .besing-site-group-title { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11px; font-weight: 700; color: #f1f5f9; font-family: monospace; }
+        .besing-site-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .besing-site-rule-count, .besing-btn-del-site { flex-shrink: 0; white-space: nowrap; }
         .besing-btn-del-site { background: transparent; border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px; cursor: pointer; transition: all 0.15s ease; }
         .besing-btn-del-site:hover { background: rgba(239, 68, 68, 0.2); border-color: #ef4444; }
         .besing-site-subrules { display: flex; flex-direction: column; padding: 4px 10px; }
-        .besing-site-rule-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
+        .besing-site-rule-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
         .besing-site-rule-row:last-child { border-bottom: none; }
-        .besing-site-rule-info { display: flex; align-items: center; gap: 6px; }
+        .besing-site-rule-info { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
         .besing-site-rule-name { font-size: 11px; font-weight: 500; color: #e2e8f0; }
         .besing-site-rule-tag { font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 4px; }
-        .besing-site-rule-actions { display: flex; align-items: center; gap: 6px; }
+        .besing-site-rule-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
         .besing-switch-sm { width: 32px; height: 18px; }
         .besing-switch-sm .besing-slider::before { height: 12px; width: 12px; left: 3px; bottom: 3px; }
         .besing-switch-sm input:checked + .besing-slider::before { transform: translateX(14px); }

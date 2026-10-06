@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rest Reminder
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.1
+// @version      1.1.0
 // @description  Repeating rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.
 // @author       BESing Team
 // @license      MIT
@@ -13,37 +13,77 @@
 (function () {
   'use strict';
 
+  /**
+   * Shared reminder state. Inside BESing it lives in the manager's cross-site storage, so every tab
+   * and site follows one timer; standalone it falls back to localStorage, which is per site.
+   * @typedef {{ due: number, intervalMinutes: number, off: boolean }} RestReminderState
+   */
+
   const RestReminder = {
     id: 'rest-reminder',
     name: 'Rest Reminder',
-    version: '1.0.1',
+    version: '1.1.0',
     description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
     category: 'Productivity',
+    SHARED_KEY: 'rest_reminder',
+    LOCAL_KEY: 'besing_rest_reminder_state',
+    SYNC_INTERVAL_MS: 5000,
+    MAX_TIMEOUT_MS: 2147483647,
     _config: null,
+    _active: false,
+    _state: null,
     _timer: null,
-    _checkInterval: null,
+    _syncInterval: null,
+    _syncing: false,
     _chatBoxEl: null,
-    _targetAlarmTime: 0,
+    _preview: false,
     _boundReposition: null,
+    _boundWake: null,
 
     init(config = {}) {
       this.destroy();
       this._config = config || {};
-      this._scheduleNextReminder();
-      this._startPeriodicChecker();
+      this._active = true;
+
+      // Background tabs throttle timers, and other tabs may press Repeat or Off, so the state is
+      // re-read on a slow poll while visible and immediately whenever the page comes back.
+      this._boundWake = () => {
+        if (document.visibilityState !== 'hidden') this._sync();
+      };
+      document.addEventListener('visibilitychange', this._boundWake);
+      window.addEventListener('pageshow', this._boundWake);
+      window.addEventListener('focus', this._boundWake);
+      this._syncInterval = setInterval(() => {
+        if (document.visibilityState !== 'hidden') this._sync();
+      }, this.SYNC_INTERVAL_MS);
+
+      this._sync(true);
     },
 
     onConfigChange(newConfig) {
       const prevInterval = this._getIntervalMinutes();
       this._config = newConfig || {};
-      const newInterval = this._getIntervalMinutes();
-      if (prevInterval !== newInterval) {
-        this._scheduleNextReminder(true);
+      if (this._active && prevInterval !== this._getIntervalMinutes()) {
+        this._startCycle();
       }
     },
 
     destroy() {
-      this._clearTimers();
+      this._active = false;
+      if (this._timer) {
+        clearTimeout(this._timer);
+        this._timer = null;
+      }
+      if (this._syncInterval) {
+        clearInterval(this._syncInterval);
+        this._syncInterval = null;
+      }
+      if (this._boundWake) {
+        document.removeEventListener('visibilitychange', this._boundWake);
+        window.removeEventListener('pageshow', this._boundWake);
+        window.removeEventListener('focus', this._boundWake);
+        this._boundWake = null;
+      }
       this.dismissChatBox();
     },
 
@@ -56,67 +96,130 @@
       return 20; // Default 20 minutes
     },
 
-    _scheduleNextReminder(forceNewCycle = false) {
-      this._clearTimers();
-      const intervalMinutes = this._getIntervalMinutes();
-      const intervalMs = intervalMinutes * 60 * 1000;
-      const now = Date.now();
+    _manager() {
+      const inst = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                   (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      return inst && !inst.disposed ? inst : null;
+    },
 
-      let targetTime = 0;
-      if (!forceNewCycle) {
+    /** @returns {Promise<RestReminderState | null>} */
+    async _readState() {
+      const appMgr = this._manager();
+      if (appMgr && typeof appMgr.readSharedState === 'function') {
         try {
-          const stored = window.localStorage.getItem('besing_rest_reminder_alarm');
-          if (stored) targetTime = Number(stored);
+          return await appMgr.readSharedState(this.SHARED_KEY, null);
         } catch (e) {}
       }
-
-      // If targetTime is empty, invalid, or expired beyond 2 hours, compute fresh target
-      if (!targetTime || isNaN(targetTime) || targetTime < now - (2 * 60 * 60 * 1000)) {
-        targetTime = now + intervalMs;
-        try {
-          window.localStorage.setItem('besing_rest_reminder_alarm', String(targetTime));
-        } catch (e) {}
-      }
-
-      this._targetAlarmTime = targetTime;
-
-      if (now >= targetTime) {
-        // Alarm already due! Show chat box right away
-        this.showReminderChatBox();
-      } else {
-        const delay = Math.max(500, targetTime - now);
-        this._timer = setTimeout(() => {
-          this.showReminderChatBox();
-        }, delay);
+      try {
+        const raw = window.localStorage.getItem(this.LOCAL_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch (e) {
+        return null;
       }
     },
 
-    _startPeriodicChecker() {
-      if (this._checkInterval) clearInterval(this._checkInterval);
-      // Periodically verify in case tab was backgrounded or clock shifted
-      this._checkInterval = setInterval(() => {
-        if (!this._chatBoxEl && this._targetAlarmTime && Date.now() >= this._targetAlarmTime) {
-          this.showReminderChatBox();
+    /** @param {RestReminderState} state */
+    async _writeState(state) {
+      const appMgr = this._manager();
+      if (appMgr && typeof appMgr.writeSharedState === 'function') {
+        try {
+          await appMgr.writeSharedState(this.SHARED_KEY, state);
+          return;
+        } catch (e) {}
+      }
+      try {
+        window.localStorage.setItem(this.LOCAL_KEY, JSON.stringify(state));
+      } catch (e) {}
+    },
+
+    _isValidState(state) {
+      return !!state && typeof state === 'object' && Number.isFinite(Number(state.due)) && Number(state.due) > 0;
+    },
+
+    // Reads the shared state and brings this page in line with it.
+    // On init, a missing or "off" state starts a fresh cycle: the script only runs when enabled,
+    // so being initialized after Off means the user switched it back on.
+    async _sync(isInit = false) {
+      if (this._syncing) return;
+      this._syncing = true;
+      try {
+        const state = await this._readState();
+        if (!this._active) return;
+        if (state && state.off && !isInit) {
+          this._goDormant();
+          return;
         }
-      }, 15000);
+        if (!this._isValidState(state) || state.off) {
+          await this._startCycle();
+          return;
+        }
+        this._apply(state);
+      } finally {
+        this._syncing = false;
+      }
     },
 
-    _clearTimers() {
+    /** @returns {Promise<RestReminderState>} */
+    async _startCycle() {
+      const minutes = this._getIntervalMinutes();
+      const state = { due: Date.now() + minutes * 60 * 1000, intervalMinutes: minutes, off: false };
+      await this._writeState(state);
+      if (this._active) this._apply(state);
+      return state;
+    },
+
+    /** @param {RestReminderState} state */
+    _apply(state) {
+      this._state = state;
       if (this._timer) {
         clearTimeout(this._timer);
         this._timer = null;
       }
-      if (this._checkInterval) {
-        clearInterval(this._checkInterval);
-        this._checkInterval = null;
+      const remaining = Number(state.due) - Date.now();
+      if (remaining <= 0) {
+        this._ensureChatBox();
+        return;
       }
+      if (this._chatBoxEl && !this._preview) {
+        // Another tab pressed Repeat.
+        this.dismissChatBox();
+      }
+      this._timer = setTimeout(() => this._sync(), Math.min(this.MAX_TIMEOUT_MS, Math.max(250, remaining)));
     },
 
-    showReminderChatBox() {
-      if (this._chatBoxEl) return; // Already visible
+    // Another tab pressed Off: stop here too, without touching storage.
+    _goDormant() {
+      this._state = null;
+      if (this._timer) {
+        clearTimeout(this._timer);
+        this._timer = null;
+      }
+      if (!this._preview) this.dismissChatBox();
+    },
 
-      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
-                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+    // Keeps the bubble on screen while the reminder is due, rebuilding it if the page or the
+    // BESing layer removed it.
+    _ensureChatBox() {
+      const appMgr = this._manager();
+      const box = this._chatBoxEl;
+      const layer = appMgr && appMgr.shadow;
+      if (box && box.isConnected && (!layer || box.getRootNode() === layer)) {
+        this._preview = false;
+        if (appMgr && appMgr.widgetEl) appMgr.widgetEl.classList.add('besing-pulse-alert');
+        this._repositionChatBox();
+        return;
+      }
+      if (box) this.dismissChatBox();
+      this.showReminderChatBox();
+    },
+
+    /** @param {{ preview?: boolean }} [options] preview shows the bubble without a due reminder. */
+    showReminderChatBox(options = {}) {
+      if (this._chatBoxEl && this._chatBoxEl.isConnected) return; // Already visible
+      if (this._chatBoxEl) this.dismissChatBox();
+      this._preview = !!options.preview;
+
+      const appMgr = this._manager();
 
       if (appMgr && typeof appMgr.ensureMounted === 'function') {
         appMgr.ensureMounted();
@@ -127,21 +230,22 @@
       }
 
       const interval = this._getIntervalMinutes();
+      const activeMinutes = (this._state && Number(this._state.intervalMinutes)) || interval;
 
       // 1. Create chat box element
       const box = document.createElement('div');
       box.className = 'besing-rest-chat-box';
       box.id = 'besing-rest-chat-box';
 
-      box.innerHTML = `
+      const html = `
         <div class="besing-rest-arrow" id="besing-rest-arrow"></div>
         <div class="besing-rest-header">
           <span class="besing-rest-avatar">🐾</span>
           <span class="besing-rest-title">Time to Rest!</span>
-          <span class="besing-rest-badge">${interval}m</span>
+          <span class="besing-rest-badge">${activeMinutes}m</span>
         </div>
         <div class="besing-rest-msg">
-          You've been active for <strong>${interval} minutes</strong>! Look away from the screen, blink, and stretch.
+          You've been active for <strong>${activeMinutes} minute${activeMinutes === 1 ? '' : 's'}</strong>! Look away from the screen, blink, and stretch.
         </div>
         <div class="besing-rest-actions">
           <button type="button" class="besing-rest-btn-repeat" id="besing-rest-btn-repeat">
@@ -153,6 +257,12 @@
           </button>
         </div>
       `;
+      // The manager's parser works on Trusted Types sites, where innerHTML throws.
+      if (appMgr && typeof appMgr.setSafeHTML === 'function') {
+        appMgr.setSafeHTML(box, html);
+      } else {
+        box.innerHTML = html;
+      }
 
       // 2. Insert into shadow DOM if available, otherwise document.body
       const targetContainer = (appMgr && appMgr.shadow) ? appMgr.shadow : (document.body || document.documentElement);
@@ -166,13 +276,13 @@
         appMgr.widgetEl.classList.add('besing-pulse-alert');
       }
 
-      // 4. Bind Repeat button (Primary action)
+      // 4. Bind Repeat button (Primary action): starts the next cycle for every tab and site
       const btnRepeat = box.querySelector('#besing-rest-btn-repeat');
       if (btnRepeat) {
         btnRepeat.onclick = (e) => {
           e.stopPropagation();
           this.dismissChatBox();
-          this._scheduleNextReminder(true); // force new cycle
+          this._startCycle();
         };
       }
 
@@ -203,6 +313,7 @@
         }
         this._chatBoxEl = null;
       }
+      this._preview = false;
       if (this._boundReposition) {
         window.removeEventListener('resize', this._boundReposition);
         window.removeEventListener('scroll', this._boundReposition);
@@ -212,8 +323,7 @@
         }
         this._boundReposition = null;
       }
-      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
-                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      const appMgr = this._manager();
       if (appMgr && appMgr.widgetEl) {
         appMgr.widgetEl.classList.remove('besing-pulse-alert');
       }
@@ -221,8 +331,7 @@
 
     _repositionChatBox() {
       if (!this._chatBoxEl) return;
-      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
-                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      const appMgr = this._manager();
       const widget = appMgr && appMgr.widgetEl;
       const box = this._chatBoxEl;
       const arrow = box.querySelector('#besing-rest-arrow');
@@ -264,16 +373,20 @@
       box.style.width = `${Math.round(boxW)}px`;
     },
 
-    _disableReminder() {
+    // Off applies everywhere: the shared state tells open tabs to stop, and the script is switched
+    // off globally, including any per-site "on" rules, so new pages do not start it again.
+    async _disableReminder() {
       this.destroy();
-      try {
-        window.localStorage.removeItem('besing_rest_reminder_alarm');
-      } catch (e) {}
-      const appMgr = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
-                     (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      await this._writeState({ due: 0, intervalMinutes: this._getIntervalMinutes(), off: true });
+      const appMgr = this._manager();
       if (appMgr && appMgr.storage && typeof appMgr.storage.setScriptMode === 'function') {
-        const host = appMgr.storage.getCurrentHost();
-        appMgr.storage.setScriptMode(this.id, 'off', host);
+        const storage = appMgr.storage;
+        await storage.setScriptMode(this.id, 'off', storage.getCurrentHost());
+        if (typeof storage.getScriptSiteOverrides === 'function' && typeof storage.removeSiteOverride === 'function') {
+          for (const rule of storage.getScriptSiteOverrides(this.id)) {
+            if (rule.enabled) await storage.removeSiteOverride(this.id, rule.host);
+          }
+        }
         if (typeof appMgr.refreshCurrentSiteModules === 'function') {
           appMgr.refreshCurrentSiteModules();
         }

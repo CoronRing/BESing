@@ -1,7 +1,7 @@
 # Rest Reminder
 
 **Script Identifier:** `rest-reminder`  
-**Current Version:** 1.0.1  
+**Current Version:** 1.1.0  
 **Category:** Productivity  
 **Author:** BESing Team  
 **License:** MIT  
@@ -25,7 +25,7 @@ Rest Reminder is an ergonomic productivity tool engineered to prevent screen fat
 | **Persistent Notification** | The chat bubble stays visible across page interactions and does not auto-dismiss or close on outside clicks until user clicks Repeat or Off. | Strict user-action dismissal |
 | **Interval Presets** | One-click interval selection for common ergonomic rhythms, including the standard 20-20-20 rule. | 20m (Default), 45m, 60m, Custom |
 | **Custom Time Selector** | Dedicated stepper control and direct numeric input to specify any custom rest interval. | 1 to 240 minutes |
-| **Cross-Tab & Reload Persistence** | Tracks target alarm timestamps in local storage so page reloads or tab navigation maintain the exact remaining time. | Automatic session synchronization |
+| **One Timer Everywhere** | The due time is kept in BESing's cross-site storage, so every tab and site follows the same timer, and reloads or navigation keep it. Repeat or Off on any page applies to all open pages within about 5 seconds. | Shared state `shared_rest_reminder` |
 | **Test Preview Action** | Instant preview button in the settings panel to verify chat box styling and positioning. | Accessible via "Test Chat Bubble Now" |
 
 ---
@@ -36,5 +36,8 @@ Rest Reminder is an ergonomic productivity tool engineered to prevent screen fat
 When the reminder triggers:
 - **Widget Alert**: The floating pet icon unfolds from edge docking and activates a rhythmic glowing pulse animation (`besing-pulse-alert`).
 - **Anchored Balloon**: A speech balloon appears adjacent to the icon (positioned above the icon if in the lower viewport, or below the icon if in the upper viewport), with a directional arrow tail aligned with the pet center.
-- **Repeat (Primary)**: Clicking Repeat immediately dismisses the chat bubble, calculates `nextAlarmTime = Date.now() + intervalMinutes * 60 * 1000`, stores the target in persistent storage, and begins the countdown for the next cycle. No rest time tracking is required.
-- **Off**: Clicking Off immediately dismisses the chat bubble, clears all active timers, wipes the alarm state, and toggles the script to disabled status.
+- **Repeat (Primary)**: Clicking Repeat immediately dismisses the chat bubble, calculates `due = Date.now() + intervalMinutes * 60 * 1000`, stores it in the shared state, and begins the countdown for the next cycle on every page. No rest time tracking is required.
+- **Off**: Clicking Off immediately dismisses the chat bubble, marks the shared state as off so other open pages stop too, and switches the script off globally, including any per-site ON rules. Switching the script back on starts a fresh cycle.
+
+### Timer Sync
+Each page with the script running re-reads the shared state every 5 seconds while it is visible, and right away when the tab becomes visible again. Hidden tabs do no work. While the reminder is due, the bubble is shown on whichever page you are on, and rebuilt if the page removed it. Without the BESing manager (standalone install) the timer falls back to `localStorage`, which is separate per site.

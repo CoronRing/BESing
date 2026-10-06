@@ -110,7 +110,7 @@
   {
     "id": "rest-reminder",
     "name": "Rest Reminder",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "description": "Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.",
     "category": "Productivity",
     "author": "BESing Team",

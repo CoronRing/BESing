@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.7.1  
+**Version:** 1.7.2  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -362,11 +362,11 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Strict Non-Dismissal Persistence Constraint**:
   - In strict compliance with the requirement that the reminder must not disappear unless explicitly acknowledged, the chat bubble disables all auto-dismiss timeouts and outside-click dismiss listeners.
   - Clicks elsewhere on the page, scroll movements, or tab focus shifts leave the bubble open. Only clicking one of the two explicit action buttons can dismiss it:
-    1. **Repeat (Primary Action, `.besing-btn-primary`)**: Immediately resets the timer for the configured interval (e.g. "Repeat (20m)"), schedules the next alarm in `localStorage`, removes the pulse alert, and dismisses the chat bubble. No rest duration timing or manual resumption is required.
-    2. **Off (`.besing-btn-secondary`)**: Clears the active alarm from storage, disables the `rest-reminder` script toggle via `appMgr.storage.toggleScript('rest-reminder', false)`, and dismisses the chat bubble.
+    1. **Repeat (Primary Action, `.besing-btn-primary`)**: Immediately resets the timer for the configured interval (e.g. "Repeat (20m)"), writes the next due time to the shared cross-site state (see 7.27), removes the pulse alert, and dismisses the chat bubble on every open page. No rest duration timing or manual resumption is required.
+    2. **Off (`.besing-btn-secondary`)**: Marks the shared state as off, switches the `rest-reminder` script off globally (including any per-site ON rules), and dismisses the chat bubble on every open page.
 - **Interval Presets and Custom Time Selector**:
   - The script manager settings panel provides three quick-select preset buttons: **20 min** (recommended standard), **45 min**, and **60 min**.
-  - A numerical custom stepper input allows users to set any interval between 1 and 720 minutes with increment (`+`) and decrement (`-`) buttons or direct keyboard entry.
+  - A numerical custom stepper input allows users to set any interval between 1 and 240 minutes with increment (`+`) and decrement (`-`) buttons or direct keyboard entry.
   - A dedicated **Test Chat Bubble Now** action button allows users to immediately preview the chat bubble and verify its positioning without waiting for the timer to expire.
 - **Cross-Tab & Sleep-Wake Resilience**:
   - The active alarm timestamp is persisted across all browser tabs via `localStorage` key `besing_rest_reminder_alarm`. When multiple tabs are open, the alarm state remains synchronized.
@@ -402,3 +402,17 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Boot Log (Diagnostics)**: Each top-frame load records `start`, `storage`, `mounted` (or `blocked`) with elapsed milliseconds under the `boot_log` storage key (last 15 loads). Settings shows them as "Recent Page Loads". A load the user made that is missing from the list was never injected by the userscript manager; "stopped" means BESing started but the icon did not appear.
 - **Prevent Redirect Performance (v1.4.1)**: Every hooked `addEventListener`, `setTimeout` and `setInterval` call ran `toString()` and a regex scan on the callback. Verdicts are now cached per function in a `WeakMap`, in both the userscript world and the injected page-world guard.
 - **Stable Loader (v1.1.1)**: The page `<script>` fallback now runs only when CSP blocked `new Function`. Previously any runtime error re-ran the whole bundle in the page world, creating a second instance.
+
+### 7.27 Shared Rest Reminder Timer & Site Rules Layout (v1.7.2)
+- **Shared Module State API**: `BESManagerApp.readSharedState(key, fallback)` and `writeSharedState(key, value)` store JSON values under `shared_<key>` through `BESAdapter`. Userscript manager storage (`GM_getValue`) and extension storage (`chrome.storage.local`) are shared by every site, unlike `localStorage`, which is separate per origin. Modules use this for state that must follow the user across tabs and sites.
+- **Rest Reminder Timer (Root Cause)**: The due time lived in each site's `localStorage`, so every site kept its own timer, and the bubble was only shown when the local timer fired. A bubble that the page or a remount removed from the DOM was never rebuilt, because the module still held a reference to the detached element.
+- **Rest Reminder Timer (v1.1.0 Design)**: One state object, `shared_rest_reminder = { due, intervalMinutes, off }`, drives every page.
+  - **Sync**: each page re-reads the state every 5 seconds while visible, and immediately on `visibilitychange`, `pageshow` and `focus`. A local timer also fires at the due time. While the state is due, the bubble is shown, and rebuilt if it was detached or belongs to an old BESing layer. When another tab presses Repeat, the new future due time hides the bubble here; when another tab presses Off, this page goes dormant.
+  - **Start**: on init, a missing state or an `off` state starts a fresh cycle. The module only initializes when the script is enabled, so initializing after Off means the user switched it back on.
+  - **Repeat** writes `due = now + interval`. **Off** writes `off: true` and switches the script off globally, removing per-site ON rules so new pages do not restart it.
+  - **Cost**: one read of a small cached value every 5 seconds in the visible tab, and nothing in hidden tabs. Changing the interval starts a new cycle with the new length.
+  - **Test Chat Bubble Now** opens a preview bubble (`showReminderChatBox({ preview: true })`) that sync does not hide.
+  - Without the manager (standalone install) the state falls back to `localStorage`, which is per site.
+  - The bubble markup goes through the manager's `setSafeHTML()` parser, so it also works on Trusted Types sites where `innerHTML` throws.
+- **Site Specific Rules Layout (Root Cause)**: The rules list was a flex column capped at 220px with its own scroll, and each site group had `overflow: hidden`, which lets flex items shrink below their content. Expanded groups were squeezed to about 30px each, clipping their rules, and since everything fit after shrinking, there was nothing to scroll.
+- **Site Specific Rules Layout (Fix)**: Groups no longer shrink (`flex-shrink: 0`), and the list has no inner scroll box, so the settings panel scrolls as a whole, which also avoids nested scrolling on touch screens. Groups start collapsed except the current site's, and the open set survives re-renders after toggling a rule. Long host names truncate with an ellipsis, rule tags wrap, and the add-rule row wraps on narrow screens (domain field on its own line).
