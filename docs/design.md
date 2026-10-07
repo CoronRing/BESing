@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.7.3  
+**Version:** 1.7.4  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -428,5 +428,16 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
   6. **Checks** at `load`, 3s and 10s: whether the host is in the DOM and not hidden by page CSS, the widget's on-screen rectangle and fold state, the running modules, whether Ad Cleaner's `<style>` is still attached, and whether Prevent Redirect's page-world guard is active (`__besing_pr_active__`, which a strict CSP can block).
   7. **Errors** (up to 12): module `init`/`destroy`/config errors, `init()` rejections, and mount failures, which previously only reached the console.
 - **Storage**: The last 20 entries are stored under `boot_log` in manager storage (shared across sites) and mirrored to `localStorage` key `besing_boot_log_mirror`, so a load whose manager storage misbehaves still leaves a trace on that site. Entries carry an update stamp (`u`) and the two lists are merged by id, newest copy wins. Writes from one page are chained and debounced (150ms), flushed on `pagehide`, and the read before each write waits up to 3s for extension storage instead of the normal 350ms so a slow IPC cannot overwrite the shared log with a single site's mirror.
-- **Copy Debug Log**: Settings > Recent Page Loads has a **Copy Debug Log** button that copies a plain-text report (header with user agent and environment, then each load with its stages, info, events and errors). The report is built when Settings opens, because iOS only allows clipboard writes during the tap. Copy order: `GM_setClipboard` (works without a gesture), `navigator.clipboard.writeText` raced against a 1.5s timeout (it can stay pending forever when permission is withheld), then a hidden textarea with `execCommand('copy')`. If all fail, the report is shown selected in a text box for a manual copy. The userscript manager menu also has **Copy BESing Debug Log**, which works on loads where the icon never appeared.
-- **Packaging**: BESing Packed adds `@grant GM_setClipboard`. BESing Stable 1.1.2 adds the same grant, passes `GM_setClipboard` into the bundle, and reports how it loaded the bundle. Older Stable installs still work; their menu command falls back to opening Settings.
+- **Copy Debug Log**: Settings > Recent Page Loads has **Copy Debug Log**, **Share** and **View Full Screen** buttons for a plain-text report (header with user agent and environment, then each load with its stages, info, events and errors). Copying and sharing are covered in 7.29.
+- **Packaging**: BESing Packed adds `@grant GM_setClipboard`. BESing Stable 1.1.2 adds the same grant, passes `GM_setClipboard` into the bundle, and reports how it loaded the bundle.
+
+### 7.29 Debug Log Copy on iOS, Share Sheet & Full-Screen Viewer (v1.7.4)
+- **Problem (Root Cause)**: On iOS Edge with the Stay userscript manager, Copy Debug Log reported success but the clipboard stayed empty. The copy routine tried `GM_setClipboard` first and treated the call as success. Stay provides that function but it does not reach the clipboard in Edge, and since the call reports nothing, the routes that do work on iOS were never tried.
+- **Copy Order**: `copyTextToClipboard()` must run before the tap handler awaits anything, because WebKit only allows clipboard writes while the tap's user activation is live. The report is therefore built when Settings opens, not on tap.
+  1. `navigator.clipboard.writeText()` is started synchronously inside the tap and raced against 1.5s, since it can stay pending forever when permission is withheld. Its promise resolving is the browser's confirmation.
+  2. If that is missing or refused, `execCommand('copy')` on an off-screen textarea, using the selection steps iOS needs (a range over the field plus `setSelectionRange`). Its return value is the browser's answer.
+  `GM_setClipboard` is not used for copying, because it reports nothing, and Packed no longer requests that grant. Success is shown only when the browser confirmed one of the two routes. The method used is logged as an event (`log copy from settings: clipboard`).
+- **Share**: Where `navigator.share` exists (iOS, Android), a Share button opens the system share sheet with the report as text. On iOS the sheet offers Copy and can send straight to Messages or Notes.
+- **Full-Screen Viewer (`openBootLogViewer`)**: Its own `<besing-log-viewer>` element and shadow root, so it works even when the widget never mounted. It shows the report in a large read-only text area with 44px Copy, Share, Open as Tab and Close buttons. Open as Tab is a real link to a `text/plain` blob URL, so Prevent Redirect's `window.open` hook does not block it. The viewer opens automatically when Copy is refused, and from View Full Screen.
+- **Menu Command**: The userscript menu entry is now **View BESing Debug Log**. A menu command is not a tap on the page, so it cannot copy on iOS; it opens the viewer, whose buttons can.
+- **Verification**: Real clicks via Playwright in Edge (clipboard read back and compared) and WebKit (writeText resolved), with a `GM_setClipboard` shim that copies nothing, as Stay does. Also tested with both copy routes refused, where the viewer opens. Not yet verified on an iOS device.

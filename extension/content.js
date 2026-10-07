@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.7.3
+ * Version 1.7.4
  */
 
 (function () {
@@ -564,7 +564,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.7.3',
+          v: '1.7.4',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -743,7 +743,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.7.3), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.7.4), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -791,39 +791,164 @@
     return env;
   }
 
-  // Copies text to the clipboard. GM_setClipboard works without a user gesture (menu commands);
-  // the others need one. Returns false when every route failed.
+  // Copies text from inside a tap or click handler, and must be called before that handler awaits
+  // anything: WebKit only allows clipboard writes while the tap's user activation is live.
+  // Resolves to the method the browser confirmed ('clipboard' or 'command'), or '' when none did.
+  // GM_setClipboard is deliberately not used: it reports nothing, and Stay on iOS Edge accepts
+  // the call without copying.
   async function copyTextToClipboard(text) {
-    try {
-      if (typeof GM_setClipboard === 'function') {
-        GM_setClipboard(text, 'text');
-        return true;
-      }
-    } catch (e) {}
+    let pending = null;
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        // writeText can stay pending forever when the browser withholds permission, so it is raced.
-        const ok = await Promise.race([
-          navigator.clipboard.writeText(text).then(() => true),
+        // Started synchronously so it carries the activation. It can also stay pending forever
+        // when the browser withholds permission, so it is raced.
+        pending = Promise.race([
+          navigator.clipboard.writeText(text).then(() => true, () => false),
           new Promise(resolve => setTimeout(() => resolve(false), 1500))
         ]);
-        if (ok) return true;
       }
-    } catch (e) {}
+    } catch (e) {
+      pending = null;
+    }
+    if (!pending && copyViaCommand(text)) return 'command';
+    if (pending && await pending) return 'clipboard';
+    if (pending && copyViaCommand(text)) return 'command';
+    return '';
+  }
+
+  // execCommand('copy') with the selection steps iOS needs (a range on the field plus
+  // setSelectionRange). Returns the browser's answer, which is false when it refused.
+  function copyViaCommand(text) {
+    let ta = null;
     try {
-      const ta = document.createElement('textarea');
+      ta = document.createElement('textarea');
       ta.value = text;
       ta.setAttribute('readonly', '');
-      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
+      ta.contentEditable = 'true';
+      ta.style.cssText = 'position:fixed;top:0;left:-9999px;width:2em;height:2em;padding:0;border:0;font-size:16px;';
       (document.body || document.documentElement).appendChild(ta);
-      ta.focus();
-      ta.select();
+      const range = document.createRange();
+      range.selectNodeContents(ta);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
       ta.setSelectionRange(0, text.length);
       const ok = document.execCommand('copy');
-      ta.remove();
-      if (ok) return true;
-    } catch (e) {}
-    return false;
+      sel.removeAllRanges();
+      return !!ok;
+    } catch (e) {
+      return false;
+    } finally {
+      if (ta) ta.remove();
+    }
+  }
+
+  // Opens the system share sheet (iOS offers Copy, Notes, Messages). Like copying, it must be
+  // called before the tap handler awaits. Resolves to 'shared', 'cancelled' or 'unavailable'.
+  async function shareText(title, text) {
+    if (!navigator.share) return 'unavailable';
+    try {
+      await navigator.share({ title, text });
+      return 'shared';
+    } catch (e) {
+      return e && e.name === 'AbortError' ? 'cancelled' : 'unavailable';
+    }
+  }
+
+  // Full-screen viewer for the debug log with large Copy and Share buttons, for touch devices where
+  // selecting text in the small Settings panel is impractical. It is its own element with its own
+  // shadow root, so it works even when the BESing icon never mounted on this load.
+  function openBootLogViewer(report) {
+    try {
+      const old = document.getElementById('__besing_log_viewer__');
+      if (old) old.remove();
+      const host = document.createElement('besing-log-viewer');
+      host.id = '__besing_log_viewer__';
+      host.style.cssText = 'position:fixed !important;top:0 !important;left:0 !important;right:0 !important;bottom:0 !important;z-index:2147483647 !important;display:block !important;';
+      (document.body || document.documentElement).appendChild(host);
+      const root = host.attachShadow({ mode: 'open' });
+
+      const style = document.createElement('style');
+      style.textContent = `
+        :host { all: initial; }
+        .wrap { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 10px; padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)); background: #0b1120; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; box-sizing: border-box; }
+        .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .title { font-size: 16px; font-weight: 700; flex: 1 1 100%; }
+        button, a.btn { flex: 1 1 0; min-height: 44px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.15); background: #1e293b; color: #e2e8f0; font-size: 15px; font-weight: 600; text-align: center; text-decoration: none; display: flex; align-items: center; justify-content: center; padding: 0 10px; cursor: pointer; font-family: inherit; }
+        button.primary { background: linear-gradient(135deg, #0284c7, #2563eb); border-color: transparent; color: #fff; }
+        .msg { font-size: 13px; min-height: 18px; color: #34d399; }
+        .msg.warn { color: #fbbf24; }
+        textarea { flex: 1; width: 100%; box-sizing: border-box; background: #020617; color: #e2e8f0; border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.45; resize: none; -webkit-user-select: text; user-select: text; }
+      `;
+      root.appendChild(style);
+
+      const wrap = document.createElement('div');
+      wrap.className = 'wrap';
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      const title = document.createElement('div');
+      title.className = 'title';
+      title.textContent = 'BESing debug log';
+      bar.appendChild(title);
+
+      const msg = document.createElement('div');
+      msg.className = 'msg';
+      const say = (text, warn) => {
+        msg.textContent = text;
+        msg.className = warn ? 'msg warn' : 'msg';
+      };
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'primary';
+      copyBtn.textContent = 'Copy';
+      copyBtn.addEventListener('click', async () => {
+        const method = await copyTextToClipboard(report);
+        BESBootLog.event(`log copy from viewer: ${method || 'failed'}`);
+        if (method) say('Copied. Paste it into your message.');
+        else say('This browser blocked copying. Use Share, or press and hold the text and choose Select All.', true);
+      });
+      bar.appendChild(copyBtn);
+
+      if (navigator.share) {
+        const shareBtn = document.createElement('button');
+        shareBtn.textContent = 'Share';
+        shareBtn.addEventListener('click', async () => {
+          const result = await shareText('BESing debug log', report);
+          if (result === 'unavailable') say('Sharing is not available here.', true);
+        });
+        bar.appendChild(shareBtn);
+      }
+
+      // Plain-text tab as a last resort; a real link, so popup guards do not treat it as a script popup.
+      try {
+        const url = URL.createObjectURL(new Blob([report], { type: 'text/plain;charset=utf-8' }));
+        const tabLink = document.createElement('a');
+        tabLink.className = 'btn';
+        tabLink.href = url;
+        tabLink.target = '_blank';
+        tabLink.rel = 'noopener';
+        tabLink.textContent = 'Open as Tab';
+        bar.appendChild(tabLink);
+      } catch (e) {}
+
+      const closeBtn = document.createElement('button');
+      closeBtn.textContent = 'Close';
+      closeBtn.addEventListener('click', () => host.remove());
+      bar.appendChild(closeBtn);
+
+      const ta = document.createElement('textarea');
+      ta.readOnly = true;
+      ta.value = report;
+
+      wrap.appendChild(bar);
+      wrap.appendChild(msg);
+      wrap.appendChild(ta);
+      root.appendChild(wrap);
+      return true;
+    } catch (err) {
+      BESBootLog.error('log viewer', err);
+      return false;
+    }
   }
 
   // 3. Pre-bundled Modules (Off by default, zero remote eval)
@@ -4911,7 +5036,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.7.3';
+    static CURRENT_VERSION = '1.7.4';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -5249,15 +5374,10 @@
         BESAdapter.registerMenu('📦 Open BESing Extensions', () => {
           live().openModal('extensions');
         });
-        // Works even when the icon never appeared on this load.
-        BESAdapter.registerMenu('🐞 Copy BESing Debug Log', async () => {
-          const report = await BESBootLog.buildReport();
-          const copied = await copyTextToClipboard(report);
-          if (copied) {
-            try { window.alert('BESing debug log copied to the clipboard.'); } catch (e) {}
-          } else {
-            live().openModal('settings');
-          }
+        // Works even when the icon never appeared on this load. A menu command is not a tap on the
+        // page, so it cannot copy on iOS; it opens the viewer, whose buttons can.
+        BESAdapter.registerMenu('🐞 View BESing Debug Log', async () => {
+          openBootLogViewer(await BESBootLog.buildReport());
         });
       }
 
@@ -6286,16 +6406,17 @@
             <div class="besing-update-card" style="background:rgba(148,163,184,0.05);border-color:rgba(148,163,184,0.2);">
               <div class="besing-update-header">
                 <span class="besing-section-title">Recent Page Loads</span>
-                <div style="display:flex;gap:6px;">
-                  <button type="button" class="besing-btn-sub-action" id="besing-btn-copy-boot-log" style="color:#38bdf8;border-color:rgba(56,189,248,0.3);">Copy Debug Log</button>
-                  <button type="button" class="besing-btn-sub-action" id="besing-btn-clear-boot-log">Clear</button>
-                </div>
+                <button type="button" class="besing-btn-sub-action" id="besing-btn-clear-boot-log">Clear</button>
               </div>
               <div style="font-size:10px;color:#94a3b8;line-height:1.35;">
-                Each page load BESing ran on, newest first. If a load you made is missing, your userscript manager never started BESing on it. "Stopped" means BESing started but the icon never appeared. Copy Debug Log copies the last ${BOOT_LOG_LIMIT} loads with timings and errors for a bug report.
+                Each page load BESing ran on, newest first. If a load you made is missing, your userscript manager never started BESing on it. "Stopped" means BESing started but the icon never appeared. The debug log holds the last ${BOOT_LOG_LIMIT} loads with timings and errors for a bug report.
+              </div>
+              <div style="display:flex;gap:6px;">
+                <button type="button" class="besing-btn-sub-action" id="besing-btn-copy-boot-log" style="flex:1;min-height:34px;font-size:11px;color:#38bdf8;border-color:rgba(56,189,248,0.3);">Copy Debug Log</button>
+                ${navigator.share ? '<button type="button" class="besing-btn-sub-action" id="besing-btn-share-boot-log" style="flex:1;min-height:34px;font-size:11px;">Share</button>' : ''}
+                <button type="button" class="besing-btn-sub-action" id="besing-btn-view-boot-log" style="flex:1;min-height:34px;font-size:11px;">View Full Screen</button>
               </div>
               <div id="besing-boot-log-msg" style="font-size:10px;color:#34d399;display:none;"></div>
-              <textarea id="besing-boot-log-text" readonly style="display:none;width:100%;height:140px;background:rgba(15,23,42,0.8);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;resize:vertical;"></textarea>
               <div id="besing-boot-log-list" style="display:flex;flex-direction:column;gap:4px;max-height:150px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#cbd5e1;">Loading...</div>
             </div>
 
@@ -6348,9 +6469,8 @@
 
         const bootLogList = body.querySelector('#besing-boot-log-list');
         const bootLogMsg = body.querySelector('#besing-boot-log-msg');
-        const bootLogText = body.querySelector('#besing-boot-log-text');
-        // Built ahead of the click: iOS only allows clipboard writes during the tap itself,
-        // and awaiting storage first would use that window up.
+        // Built ahead of the tap: iOS only allows clipboard writes and sharing during the tap
+        // itself, and awaiting storage first would use that window up.
         let bootLogReport = '';
         const renderBootLog = async () => {
           if (!bootLogList) return;
@@ -6390,21 +6510,41 @@
         const copyBootLogBtn = body.querySelector('#besing-btn-copy-boot-log');
         if (copyBootLogBtn) {
           copyBootLogBtn.onclick = async () => {
-            const report = bootLogReport || await BESBootLog.buildReport();
-            const copied = await copyTextToClipboard(report);
-            if (copied) {
+            if (!bootLogReport) {
+              // Report not ready yet, so this tap cannot copy; the viewer's own Copy button can.
+              openBootLogViewer(await BESBootLog.buildReport());
+              return;
+            }
+            const report = bootLogReport;
+            const method = await copyTextToClipboard(report);
+            BESBootLog.event(`log copy from settings: ${method || 'failed'}`);
+            if (method) {
               showBootLogMsg('Debug log copied. Paste it into your message.', '#34d399');
-              if (bootLogText) bootLogText.style.display = 'none';
-            } else if (bootLogText) {
-              // Clipboard refused: show the text so it can be selected and copied by hand.
-              bootLogText.value = report;
-              bootLogText.style.display = 'block';
-              bootLogText.focus();
-              bootLogText.select();
-              bootLogText.setSelectionRange(0, report.length);
-              showBootLogMsg('Clipboard blocked here. The log is selected below: use Copy from the text menu.', '#fbbf24');
+            } else {
+              showBootLogMsg('This browser blocked copying, so the log opened full screen. Try Share there.', '#fbbf24');
+              openBootLogViewer(report);
             }
             renderBootLog();
+          };
+        }
+        const shareBootLogBtn = body.querySelector('#besing-btn-share-boot-log');
+        if (shareBootLogBtn) {
+          shareBootLogBtn.onclick = async () => {
+            if (!bootLogReport) {
+              openBootLogViewer(await BESBootLog.buildReport());
+              return;
+            }
+            const result = await shareText('BESing debug log', bootLogReport);
+            if (result === 'unavailable') {
+              showBootLogMsg('Sharing is not available here, so the log opened full screen.', '#fbbf24');
+              openBootLogViewer(bootLogReport);
+            }
+          };
+        }
+        const viewBootLogBtn = body.querySelector('#besing-btn-view-boot-log');
+        if (viewBootLogBtn) {
+          viewBootLogBtn.onclick = async () => {
+            openBootLogViewer(bootLogReport || await BESBootLog.buildReport());
           };
         }
         const clearBootLogBtn = body.querySelector('#besing-btn-clear-boot-log');
@@ -6412,7 +6552,6 @@
           clearBootLogBtn.onclick = async () => {
             await BESBootLog.clear();
             if (bootLogMsg) bootLogMsg.style.display = 'none';
-            if (bootLogText) bootLogText.style.display = 'none';
             renderBootLog();
           };
         }
