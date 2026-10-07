@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.7.4  
+**Version:** 1.7.5  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -441,3 +441,10 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Full-Screen Viewer (`openBootLogViewer`)**: Its own `<besing-log-viewer>` element and shadow root, so it works even when the widget never mounted. It shows the report in a large read-only text area with 44px Copy, Share, Open as Tab and Close buttons. Open as Tab is a real link to a `text/plain` blob URL, so Prevent Redirect's `window.open` hook does not block it. The viewer opens automatically when Copy is refused, and from View Full Screen.
 - **Menu Command**: The userscript menu entry is now **View BESing Debug Log**. A menu command is not a tap on the page, so it cannot copy on iOS; it opens the viewer, whose buttons can.
 - **Verification**: Real clicks via Playwright in Edge (clipboard read back and compared) and WebKit (writeText resolved), with a `GM_setClipboard` shim that copies nothing, as Stay does. Also tested with both copy routes refused, where the viewer opens. Not yet verified on an iOS device.
+
+### 7.30 Late Injection Protection & Debug Log Clarity (v1.7.5)
+- **Finding**: A debug log from iOS Edge with Stay (20 loads) showed BESing always mounting, settings always loading and every enabled module running. The failures came from timing: 9 of 20 loads began after the page had parsed (`ready=interactive` in 3, `ready=complete` in 6), so the site's ad code had already scheduled redirects and registered tap traps before Prevent Redirect could hook anything. A reload is a new draw of the same race, which is why refreshing usually fixed it. Restarting BESing would not help, because BESing already runs on those loads; what is missing is the chance to intercept code that already ran.
+- **Prevent Redirect 1.5.0**: adds a Navigation API guard and an existing-trap sweep (see `docs/scripts/prevent-redirect.md`, "Late Injection"). The guard cancels script-driven off-site and ad navigations when they start, regardless of when the redirect was scheduled. It needs Safari / iOS 26.2 or later on Apple devices.
+- **Self-Match Fix**: Prevent Redirect's DOM observer no longer flags the module's own page-world guard script, whose source quotes the ad patterns it hooks. Previously every load logged a blocked script and blinked the pet's redirect alert.
+- **Debug Log**: Blocked redirects are logged as events (first 10 per load, with reason and target host); the listener is attached before the preemptive shields so startup blocks are included. Checks report `nav-guard-on` or `NAV-GUARD-OFF`. Late loads are marked `LATE` in the copied report, and entries from older versions without injection timing no longer print `undefined`.
+- **Verification**: Playwright in Edge with a page whose ad code runs before BESing (a 2.5s `location.href` timer, a tap-anywhere redirect listener and an invisible overlay) and BESing injected after `DOMContentLoaded`: both redirects were blocked, the overlay was removed, and a same-site link still navigated. The same test against v1.7.4 was redirected. Playwright's WebKit build lacks the Navigation API, so the guard could not be exercised in WebKit there.

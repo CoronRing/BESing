@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.7.4"
+VERSION = "1.7.5"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -756,6 +756,8 @@ def build():
           let guard = 'unknown';
           try {{ guard = pageWin.__besing_pr_active__ ? 'ok' : 'MISSING'; }} catch (e) {{}}
           parts.push(`page-guard-${{guard}}`);
+          const pr = (app.modules || []).find(m => m.id === 'prevent-redirect');
+          parts.push(pr && pr._navigateHandler ? 'nav-guard-on' : 'NAV-GUARD-OFF');
         }}
         parts.push(`vis=${{document.visibilityState}}`);
         this.event(`${{label}}: ${{parts.join(' ')}}`);
@@ -860,7 +862,9 @@ def build():
         const stageText = Object.entries(s).map(([k, v]) => `${{k}} ${{v}}`).join(', ');
         const here = this.entry && e.id === this.entry.id ? ' (this page)' : '';
         lines.push(`#${{i + 1}} ${{fmt(e.t)}} ${{e.host || '?'}} [${{e.nav || '?'}}] -- ${{this.statusOf(e)}}${{here}}`);
-        lines.push(`  inject ${{e.injectMs}}ms, ready=${{e.ready}}, vis=${{e.vis}}, v${{e.v}}`);
+        const late = e.ready && e.ready !== 'loading' ? ' (LATE: page scripts had already run)' : '';
+        const inject = e.injectMs !== undefined ? `inject ${{e.injectMs}}ms, ` : '';
+        lines.push(`  ${{inject}}ready=${{e.ready}}${{late}}, vis=${{e.vis || '?'}}, v${{e.v}}`);
         lines.push(`  stages: ${{stageText || 'none'}}`);
         const info = e.info || {{}};
         if (Object.keys(info).length) {{
@@ -4278,6 +4282,18 @@ def build():
   }} catch (e) {{}}
   BESBootLog.record('start', describeEnvironment());
   if (disposedStale) BESBootLog.event('disposed instance left from a previous document');
+
+  // Blocked redirects, so a late load shows whether protection still caught something.
+  let blockedLogged = 0;
+  window.addEventListener('besing:redirect-blocked', (e) => {{
+    if (++blockedLogged > 10) return;
+    try {{
+      const d = (e && e.detail) || {{}};
+      let where = String(d.url || '');
+      try {{ where = new URL(where, location.href).host || where; }} catch (x) {{}}
+      BESBootLog.event(`blocked ${{d.reason || '?'}}: ${{where.slice(0, 60)}}`);
+    }} catch (err) {{}}
+  }});
 
   // 1. Synchronously arm security shields at document-start before yielding to event loop
   app.initPreemptiveShields();

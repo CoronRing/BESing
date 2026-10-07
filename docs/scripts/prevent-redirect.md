@@ -1,7 +1,7 @@
 # Prevent Redirect & Tab Hijack
 
 **Script Identifier:** `prevent-redirect`  
-**Current Version:** 1.4.1  
+**Current Version:** 1.5.0  
 **Category:** Security  
 **Author:** BESing Team  
 **License:** MIT  
@@ -34,6 +34,8 @@ Prevent Redirect & Tab Hijack shields users from deceptive redirects, forced new
 | **Location Assign Interception** | Blocks scripts attempting to force-redirect the current page to another domain via `location.assign` or `location.replace`. | API proxy guard on `Location.prototype` |
 | **Same-Host Whitelisting** | Automatically allows valid same-origin and sub-domain links, intra-page anchors (`#`), and protocol links (`mailto:`, `tel:`). | Sub-domain and hostname evaluation |
 | **Main-World Page Context Guard** | Injects an active prototype guard into the page's native window scope to neutralize main-world inline scripts. | Document-start `<script>` injection with automatic self-cleanup |
+| **Late-Start Navigation Guard** | Cancels script-driven navigations that leave the site (or go to known ad URLs) at the moment they start, including redirects scheduled by timers or tap handlers registered before BESing was injected. Tapped links, form posts, reloads, back/forward and downloads pass through. Needs the Navigation API (Chrome/Edge, Firefox 147, Safari and iOS 26.2+). | `navigation` `navigate` event with `preventDefault()` |
+| **Existing Trap Sweep** | Removes invisible tap overlays and ad iframes that were already in the page when the module started, at init and again at `DOMContentLoaded`. | `querySelectorAll` sweep (`_sweepExisting`) |
 
 ---
 
@@ -54,6 +56,13 @@ Prevent Redirect v1.3.0 eliminates the threat at the root by disarming execution
 4. **WebSocket Tunnel Neutralization**: Evasive WebSocket connections to ad coordination servers return an inert mock socket in a closed state, cutting off encrypted payload delivery.
 5. **Realistic Mock Window Return**: Calls to `window.open(adUrl)` return an object where `closed === false` and mock navigation methods succeed, preventing fallback redirection triggers.
 6. **Legitimate User Navigation Preservation**: When a user physically clicks a legitimate chapter or internal link, `_recordUserClick` arms a 3-second intentional navigation window so natural reading flows unhindered.
+
+### Late Injection (v1.5.0)
+Every hook above has to be installed before the page's ad code runs. Userscript managers on iOS (Stay in Edge, for example) cannot guarantee `document-start`: in a field log, 9 of 20 loads started BESing after the page had parsed (`readyState` `interactive` or `complete`), so the ad code had already scheduled its redirect timers and registered its tap traps. Those cannot be found or unregistered afterwards.
+
+Two defenses do not depend on timing:
+1. **Navigation guard**: the Navigation API's `navigate` event fires when any navigation starts, whatever code triggered it, and `preventDefault()` cancels it. The guard cancels navigations that leave the current site or go to a known ad URL, unless they are reloads, back/forward, downloads, form submissions, or (for non-ad URLs) links the user tapped. This matches the module's existing policy, which already blocks external link clicks, external popups and `location.assign`/`replace`; it extends that to `location.href` and `top.location` assignments, which cannot be hooked. Browsers without the Navigation API (before Safari / iOS 26.2) do not get this guard; BESing's debug log shows `nav-guard-on` or `NAV-GUARD-OFF`.
+2. **Trap sweep**: invisible fixed or absolute overlays (opacity `0` or `0.01`) and iframes pointing at ad URLs that are already in the page are removed.
 
 ---
 

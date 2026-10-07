@@ -86,7 +86,7 @@
   {
     "id": "prevent-redirect",
     "name": "Prevent Redirect",
-    "version": "1.4.1",
+    "version": "1.5.0",
     "description": "Strictly blocks automatic redirects, mobile sensor traps, popups, and malicious ad network script injections.",
     "category": "Security",
     "author": "BESing Team",

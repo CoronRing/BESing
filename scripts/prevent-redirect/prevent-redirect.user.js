@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prevent Redirect & Tab Hijack
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.4.1
+// @version      1.5.0
 // @description  Prevents unwanted automatic redirects, mobile touch/sensor traps, popups, and malicious ad network script injections while preserving normal site navigation.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const PreventRedirect = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.4.1',
+    version: '1.5.0',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
     _origOpen: null,
@@ -50,6 +50,9 @@
     _userIntentionalClick: false,
     _userClickTimer: null,
     _injectedGuardEl: null,
+    _navigationTarget: null,
+    _navigateHandler: null,
+    _sweepHandler: null,
 
     _isSameHost(targetUrl) {
       if (!targetUrl || typeof targetUrl !== 'string') return true;
@@ -207,6 +210,67 @@
         removeEventListener() {},
         dispatchEvent() { return true; }
       };
+    },
+
+    _isTrapStyle(style) {
+      if (!style) return false;
+      const hidden = style.includes('opacity:0.01') || style.includes('opacity: 0.01') || style.includes('opacity:0;') || style.includes('opacity: 0;');
+      const layered = style.includes('position:fixed') || style.includes('position: fixed') || style.includes('position:absolute') || style.includes('position: absolute');
+      return hidden && layered;
+    },
+
+    // Removes traps that were already in the page when this module started: invisible tap overlays
+    // and ad iframes. The hooks only see what is added after init, so this matters when the
+    // userscript manager injected late and the page's ad scripts have already run.
+    _sweepExisting() {
+      let removed = 0;
+      try {
+        document.querySelectorAll('div[style], a[style]').forEach(el => {
+          if (el.closest && el.closest('besing-host, besing-log-viewer, #besing-zapper-hud')) return;
+          if (this._isTrapStyle(el.getAttribute('style') || '')) {
+            el.remove();
+            removed++;
+          }
+        });
+        document.querySelectorAll('iframe[src]').forEach(el => {
+          if (this._isAdOrRedirectUrl(el.getAttribute('src') || '')) {
+            el.remove();
+            removed++;
+          }
+        });
+      } catch (e) {}
+      if (removed) this.notifyBlocked(`${removed} element(s)`, 'traps already in the page');
+      return removed;
+    },
+
+    // Navigation API guard. The `navigate` event fires when a navigation starts, however it was
+    // triggered (a `location.href` assignment, a timer or a touch handler registered long before
+    // this module ran), so it still protects pages where BESing was injected after the page's
+    // scripts. Policy matches the rest of the module: script-driven navigation may not leave the site.
+    _attachNavigationGuard(unsafeWin) {
+      const nav = (unsafeWin && unsafeWin.navigation) || window.navigation;
+      if (!nav || typeof nav.addEventListener !== 'function') return false;
+      const self = this;
+      this._navigateHandler = function (e) {
+        try {
+          if (!e.cancelable) return;
+          if (e.navigationType === 'reload' || e.navigationType === 'traverse') return;
+          if (e.downloadRequest !== null && e.downloadRequest !== undefined) return;
+          // Form posts (logins, payment confirmations) are left alone; ad scripts do not use them.
+          if (e.formData) return;
+          const url = e.destination && e.destination.url;
+          const isAd = self._isAdOrRedirectUrl(url);
+          const isExternal = !self._isSameHost(url);
+          if (!isAd && !isExternal) return;
+          // Links the user tapped are judged by the click guard instead.
+          if (e.userInitiated && !isAd) return;
+          e.preventDefault();
+          self.notifyBlocked(url, isAd ? 'ad redirect (navigate event)' : 'script redirect off-site (navigate event)');
+        } catch (err) {}
+      };
+      nav.addEventListener('navigate', this._navigateHandler);
+      this._navigationTarget = nav;
+      return true;
     },
 
     notifyBlocked(targetUrl, reason) {
@@ -593,6 +657,8 @@
               for (let i = 0; i < added.length; i++) {
                 const node = added[i];
                 if (!node || node.nodeType !== 1) continue;
+                // Our own page-world guard quotes the ad patterns it hooks, so it would match itself.
+                if (node.id === '__besing_pr_guard__') continue;
                 if (node.tagName === 'SCRIPT') {
                   const src = node.getAttribute('src') || node.src || '';
                   const text = node.textContent || '';
@@ -672,6 +738,15 @@
       window.addEventListener('auxclick', this._auxClickHandler, true);
       document.addEventListener('auxclick', this._auxClickHandler, true);
       window.addEventListener('beforeunload', this._beforeUnloadHandler, true);
+
+      // Late-start protection: the navigation guard catches redirects scheduled before this module
+      // ran, and the sweep removes traps already in the page (again once parsing finishes).
+      try { this._attachNavigationGuard(unsafeWin); } catch (e) {}
+      this._sweepExisting();
+      if (document.readyState === 'loading') {
+        this._sweepHandler = () => this._sweepExisting();
+        document.addEventListener('DOMContentLoaded', this._sweepHandler, { once: true });
+      }
 
       // 13. Inject comprehensive page-context guard for page scripts in main execution world
       try {
@@ -976,6 +1051,15 @@
       if (this._userClickTimer) {
         clearTimeout(this._userClickTimer);
         this._userClickTimer = null;
+      }
+      if (this._navigationTarget && this._navigateHandler) {
+        try { this._navigationTarget.removeEventListener('navigate', this._navigateHandler); } catch (e) {}
+      }
+      this._navigationTarget = null;
+      this._navigateHandler = null;
+      if (this._sweepHandler) {
+        document.removeEventListener('DOMContentLoaded', this._sweepHandler);
+        this._sweepHandler = null;
       }
       this._userIntentionalClick = false;
     }
