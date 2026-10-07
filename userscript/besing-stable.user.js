@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Stable
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.1.1
+// @version      1.1.2
 // @description  Ultra-minimal, zero-maintenance bootstrapper for BESing. Dynamically loads and caches the latest BESing release from GitHub/GreasyFork with silent auto-updates.
 // @author       BESing Team
 // @license      MIT
@@ -13,6 +13,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
 // @grant        GM_info
+// @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @connect      *
 // @connect      raw.githubusercontent.com
@@ -170,7 +171,7 @@
         } else {
           console.log('[BESing Stable Loader] Pulling up icon, executing cached code...');
           const cached = (typeof GM_getValue === 'function') ? GM_getValue('besing_cached_code', null) : null;
-          if (cached) runCode(cached);
+          if (cached) runCode(cached, 'menu');
         }
       });
       GM_registerMenuCommand('🔄 Reset Icon Position to Default', () => {
@@ -236,10 +237,16 @@
     return 0;
   }
 
-  function runCode(code) {
+  const LOADER_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '1.1.2';
+
+  // `source` says where the code came from ('cache', 'first-fetch', 'reload'); BESing's boot log records it.
+  function runCode(code, source) {
     if (!code || typeof code !== 'string') return;
     try {
-      if (typeof window !== 'undefined') window.__BESING_ENVIRONMENT__ = 'stable-loader';
+      if (typeof window !== 'undefined') {
+        window.__BESING_ENVIRONMENT__ = 'stable-loader';
+        window.__BESING_LOADER_INFO__ = { version: LOADER_VERSION, source: source || 'unknown', codeVersion: parseVersion(code) };
+      }
       // Pass GM APIs explicitly so the dynamically evaluated script has full userscript powers
       const exec = new Function(
         'GM_getValue',
@@ -248,6 +255,7 @@
         'GM_registerMenuCommand',
         'GM_xmlhttpRequest',
         'GM_info',
+        'GM_setClipboard',
         'unsafeWindow',
         code
       );
@@ -258,6 +266,7 @@
         typeof GM_registerMenuCommand !== 'undefined' ? GM_registerMenuCommand : undefined,
         typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : undefined,
         typeof GM_info !== 'undefined' ? GM_info : { script: { name: 'BESing Stable' } },
+        typeof GM_setClipboard !== 'undefined' ? GM_setClipboard : undefined,
         typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
       );
       console.log('[BESing Stable] BESing successfully initialized.');
@@ -405,7 +414,7 @@
   };
   const reloadLatestFn = async () => {
     const res = await downloadAndCacheFull();
-    if (res && res.code) runCode(res.code);
+    if (res && res.code) runCode(res.code, 'reload');
   };
 
   try {
@@ -424,14 +433,14 @@
   // 1. Instant execution of cached version (zero latency on page load)
   const cached = (typeof GM_getValue === 'function') ? GM_getValue('besing_cached_code', null) : null;
   if (cached) {
-    runCode(cached);
+    runCode(cached, 'cache');
   }
 
   // 2. Refresh check (immediately on first install, or throttled background check)
   if (!cached) {
     console.log('[BESing Stable Loader] First install detected. Fetching latest release...');
     downloadAndCacheFull().then((res) => {
-      if (res && res.code) runCode(res.code);
+      if (res && res.code) runCode(res.code, 'first-fetch');
     }).catch(err => {
       console.error('[BESing Stable Loader] Initial setup failed:', err);
     });

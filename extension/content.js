@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.7.2
+ * Version 1.7.3
  */
 
 (function () {
@@ -18,7 +18,10 @@
   // event dispatch on `document`: the owner cancels this event, and a newcomer sees it was cancelled.
   const CLAIM_EVENT = 'besing:claim-page';
   const BOOT_LOG_KEY = 'boot_log';
-  const BOOT_LOG_LIMIT = 15;
+  const BOOT_LOG_MIRROR_KEY = 'besing_boot_log_mirror';
+  const BOOT_LOG_LIMIT = 20;
+  const BOOT_LOG_MAX_EVENTS = 40;
+  const BOOT_LOG_MAX_ERRORS = 12;
 
   const getLiveInstance = () => {
     const inst = (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__) ||
@@ -31,7 +34,8 @@
     isGM: typeof GM_getValue === 'function' && typeof GM_setValue === 'function',
     isExt: typeof chrome !== 'undefined' && !!chrome.storage && !!chrome.storage.local,
 
-    async get(key, defaultValue = null) {
+    // `timeoutMs` bounds the wait for extension storage before falling back to the localStorage mirror.
+    async get(key, defaultValue = null, timeoutMs = 350) {
       if (this.isGM) {
         try {
           const val = GM_getValue(key, defaultValue);
@@ -54,7 +58,7 @@
                 resolve(defaultValue);
               }
             }
-          }, 350);
+          }, timeoutMs);
 
           try {
             chrome.storage.local.get([key], res => {
@@ -99,9 +103,17 @@
       }
     },
 
+    // How the last getAll() was answered, for the boot log: `source` is the backend
+    // ('gm', 'ext', 'ext-timeout', 'ext-error' or 'local'), `found` lists the keys that existed
+    // there, and `local` the keys taken from this site's localStorage mirror. Keys in neither
+    // fell back to defaults. `lateMs` is set when extension storage answered after the timeout.
+    lastLoad: null,
+
     async getAll(defaults = {}) {
       const keys = Object.keys(defaults);
       const result = { ...defaults };
+      const t0 = Date.now();
+      const local = [];
 
       // Pre-fill from localStorage synchronously
       for (const k of keys) {
@@ -109,63 +121,81 @@
           const item = window.localStorage.getItem('besing_' + k);
           if (item !== null && item !== undefined) {
             result[k] = JSON.parse(item);
+            local.push(k);
           }
         } catch (e) {}
       }
 
       if (this.isGM) {
+        const found = [];
         for (const k of keys) {
           try {
             const val = GM_getValue(k, undefined);
-            if (val !== undefined) result[k] = val;
+            if (val !== undefined) {
+              result[k] = val;
+              found.push(k);
+            }
           } catch (e) {}
         }
+        this.lastLoad = { source: 'gm', ms: Date.now() - t0, found, local };
         return result;
       }
 
       if (this.isExt) {
+        const report = { source: 'ext', ms: null, found: [], local };
+        this.lastLoad = report;
         return new Promise(resolve => {
           let resolved = false;
           // Mobile Edge / WebKit timeout guard: 350ms race
           const timer = setTimeout(() => {
             if (!resolved) {
               resolved = true;
+              report.source = 'ext-timeout';
+              report.ms = Date.now() - t0;
               resolve(result);
             }
           }, 350);
 
           try {
             chrome.storage.local.get(keys, res => {
-              if (!resolved) {
-                resolved = true;
-                clearTimeout(timer);
-                if (chrome.runtime && chrome.runtime.lastError) {
-                  resolve(result);
-                } else if (res && typeof res === 'object') {
-                  for (const k of keys) {
-                    if (res[k] !== undefined) {
-                      result[k] = res[k];
-                      try {
-                        window.localStorage.setItem('besing_' + k, JSON.stringify(res[k]));
-                      } catch (e) {}
-                    }
+              if (resolved) {
+                report.lateMs = Date.now() - t0;
+                return;
+              }
+              resolved = true;
+              clearTimeout(timer);
+              report.ms = Date.now() - t0;
+              if (chrome.runtime && chrome.runtime.lastError) {
+                report.source = 'ext-error';
+                resolve(result);
+              } else if (res && typeof res === 'object') {
+                for (const k of keys) {
+                  if (res[k] !== undefined) {
+                    result[k] = res[k];
+                    report.found.push(k);
+                    try {
+                      window.localStorage.setItem('besing_' + k, JSON.stringify(res[k]));
+                    } catch (e) {}
                   }
-                  resolve(result);
-                } else {
-                  resolve(result);
                 }
+                resolve(result);
+              } else {
+                resolve(result);
               }
             });
           } catch (err) {
             if (!resolved) {
               resolved = true;
               clearTimeout(timer);
+              report.source = 'ext-error';
+              report.ms = Date.now() - t0;
               resolve(result);
             }
           }
         });
       }
 
+      this.lastLoad = { source: 'local', ms: Date.now() - t0, found: local.slice(), local };
       return result;
     },
 
@@ -506,43 +536,295 @@
     }
   }
 
-  // Boot diagnostics: a short history of page loads and how far each one got.
+  // Boot diagnostics: a history of page loads with how far each one got, when, and what failed.
   // A load missing from the list means the userscript manager never injected BESing.
+  // Entries live in manager storage (shared by every site) and are mirrored to this site's
+  // localStorage, so a load whose manager storage misbehaves still leaves a trace here.
   const BESBootLog = {
     entry: null,
+    // ms since navigation start when this copy of BESing began running (the injection delay).
     startedAt: (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0,
+    _persistTimer: 0,
+    _writing: Promise.resolve(),
 
-    async record(stage, detail) {
+    elapsed() {
+      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+      return Math.round(now - this.startedAt);
+    },
+
+    ensureEntry() {
+      if (!this.entry) {
+        let navType = '';
+        try {
+          const nav = performance.getEntriesByType('navigation')[0];
+          navType = nav ? nav.type : '';
+        } catch (e) {}
+        this.entry = {
+          id: Math.random().toString(36).slice(2, 10),
+          t: Date.now(),
+          u: Date.now(),
+          host: (window.location.hostname || '').toLowerCase(),
+          v: '1.7.3',
+          nav: navType,
+          injectMs: Math.round(this.startedAt),
+          ready: document.readyState,
+          vis: document.visibilityState,
+          stages: {},
+          info: {},
+          events: [],
+          errors: []
+        };
+      }
+      return this.entry;
+    },
+
+    // Marks the first time a boot stage was reached (ms since BESing started) and merges `info` into the entry.
+    record(stage, info) {
       if (!IS_TOP_FRAME) return;
       try {
-        const elapsed = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : 0) - this.startedAt);
-        if (!this.entry) {
-          this.entry = {
-            id: Math.random().toString(36).slice(2, 10),
-            t: Date.now(),
-            host: (window.location.hostname || '').toLowerCase(),
-            v: '1.7.2',
-            ready: document.readyState,
-            stages: {}
-          };
+        const e = this.ensureEntry();
+        if (e.stages[stage] === undefined) e.stages[stage] = this.elapsed();
+        if (info && typeof info === 'object') Object.assign(e.info, info);
+        this.schedulePersist();
+      } catch (err) {}
+    },
+
+    event(name) {
+      if (!IS_TOP_FRAME) return;
+      try {
+        const e = this.ensureEntry();
+        if (e.events.length >= BOOT_LOG_MAX_EVENTS) return;
+        e.events.push(`+${this.elapsed()} ${name}`);
+        this.schedulePersist();
+      } catch (err) {}
+    },
+
+    error(where, err) {
+      if (!IS_TOP_FRAME) return;
+      try {
+        const e = this.ensureEntry();
+        if (e.errors.length >= BOOT_LOG_MAX_ERRORS) return;
+        const msg = (err && err.message) ? `${err.name || 'Error'}: ${err.message}` : String(err);
+        e.errors.push(`+${this.elapsed()} ${where}: ${msg.slice(0, 240)}`);
+        this.schedulePersist();
+      } catch (x) {}
+    },
+
+    // Snapshot of what the user should be seeing right now, logged as an event.
+    check(label) {
+      if (!IS_TOP_FRAME) return;
+      try {
+        const app = getLiveInstance();
+        if (!app) {
+          this.event(`${label}: no live instance`);
+          return;
         }
-        if (this.entry.stages[stage] !== undefined) return; // keep the first time each stage was reached
-        this.entry.stages[stage] = detail !== undefined ? detail : elapsed;
-        const list = await BESAdapter.get(BOOT_LOG_KEY, []);
-        const others = (Array.isArray(list) ? list : []).filter(e => e && e.id !== this.entry.id);
-        await BESAdapter.set(BOOT_LOG_KEY, [this.entry, ...others].slice(0, BOOT_LOG_LIMIT));
-      } catch (e) {}
+        const parts = [];
+        if (!app.host) {
+          parts.push(app.storage && app.storage.isCurrentBlocked() ? 'site-disabled' : 'NO-HOST');
+        } else {
+          parts.push(app.host.isConnected ? 'host-in-dom' : 'HOST-DETACHED');
+          try {
+            const cs = getComputedStyle(app.host);
+            if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') {
+              parts.push(`HOST-HIDDEN(${cs.display}/${cs.visibility}/${cs.opacity})`);
+            }
+          } catch (e) {}
+          if (!app.widgetEl || !app.shadow || !app.shadow.contains(app.widgetEl)) {
+            parts.push('NO-WIDGET');
+          } else {
+            const r = app.widgetEl.getBoundingClientRect();
+            const onScreen = r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 &&
+              r.left < window.innerWidth && r.top < window.innerHeight;
+            const folded = (app.widgetEl.className.match(/folded-\w+/) || [''])[0];
+            parts.push(`widget ${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)} ${onScreen ? 'on-screen' : 'OFF-SCREEN'}${folded ? ' ' + folded : ''}`);
+          }
+        }
+        const running = (app.modules || []).filter(m => m.running).map(m => m.id);
+        parts.push(`running[${running.join(',')}]`);
+        if (running.includes('ad-cleaner')) {
+          const s = document.getElementById('besing-ad-cleaner-style');
+          parts.push(s && s.isConnected ? 'ad-style-ok' : 'AD-STYLE-MISSING');
+        }
+        if (running.includes('prevent-redirect')) {
+          const pageWin = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+          let guard = 'unknown';
+          try { guard = pageWin.__besing_pr_active__ ? 'ok' : 'MISSING'; } catch (e) {}
+          parts.push(`page-guard-${guard}`);
+        }
+        parts.push(`vis=${document.visibilityState}`);
+        this.event(`${label}: ${parts.join(' ')}`);
+      } catch (err) {
+        this.error(`check ${label}`, err);
+      }
+    },
+
+    schedulePersist() {
+      if (this._persistTimer) return;
+      this._persistTimer = setTimeout(() => {
+        this._persistTimer = 0;
+        this.persist();
+      }, 150);
+    },
+
+    // Writes are chained so one page never interleaves two read-modify-write cycles.
+    persist() {
+      if (!this.entry) return this._writing;
+      if (this._persistTimer) {
+        clearTimeout(this._persistTimer);
+        this._persistTimer = 0;
+      }
+      this.entry.u = Date.now();
+      const snapshot = JSON.parse(JSON.stringify(this.entry));
+      this._writing = this._writing.then(async () => {
+        try {
+          window.localStorage.setItem(BOOT_LOG_MIRROR_KEY, JSON.stringify(this.merge([snapshot], this.readMirror())));
+        } catch (e) {}
+        try {
+          const list = await BESAdapter.get(BOOT_LOG_KEY, [], 3000);
+          await BESAdapter.set(BOOT_LOG_KEY, this.merge([snapshot], list));
+        } catch (e) {}
+      });
+      return this._writing;
+    },
+
+    readMirror() {
+      try {
+        const raw = window.localStorage.getItem(BOOT_LOG_MIRROR_KEY);
+        const list = raw ? JSON.parse(raw) : [];
+        return Array.isArray(list) ? list : [];
+      } catch (e) {
+        return [];
+      }
+    },
+
+    // Combines entry lists, keeping the most recently updated copy of each load, newest load first.
+    merge(...lists) {
+      const byId = new Map();
+      for (const list of lists) {
+        if (!Array.isArray(list)) continue;
+        for (const e of list) {
+          if (!e || !e.id) continue;
+          const prev = byId.get(e.id);
+          if (!prev || (e.u || 0) > (prev.u || 0)) byId.set(e.id, e);
+        }
+      }
+      return Array.from(byId.values()).sort((a, b) => (b.t || 0) - (a.t || 0)).slice(0, BOOT_LOG_LIMIT);
     },
 
     async read() {
-      const list = await BESAdapter.get(BOOT_LOG_KEY, []);
-      return Array.isArray(list) ? list : [];
+      await this.persist();
+      const list = await BESAdapter.get(BOOT_LOG_KEY, [], 3000);
+      return this.merge(list, this.readMirror());
     },
 
     async clear() {
+      try { window.localStorage.removeItem(BOOT_LOG_MIRROR_KEY); } catch (e) {}
       await BESAdapter.set(BOOT_LOG_KEY, []);
+    },
+
+    // One-line status used by the Settings list and the copied report.
+    statusOf(e) {
+      const s = (e && e.stages) || {};
+      if (s.skipped !== undefined) return 'skipped (another copy owns the page)';
+      if (s.mounted !== undefined) return `shown ${s.mounted}ms`;
+      if (s.blocked !== undefined) return 'site disabled';
+      if (s.storage !== undefined) return 'stopped after settings load';
+      return 'stopped at start';
+    },
+
+    // Plain-text report meant to be pasted into a bug report.
+    async buildReport() {
+      const entries = await this.read();
+      const pad = (n) => String(n).padStart(2, '0');
+      const fmt = (t) => {
+        const d = new Date(t || 0);
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      };
+      const env = describeEnvironment();
+      const lines = [
+        `BESing debug log (v1.7.3), copied ${fmt(Date.now())}`,
+        `UA: ${navigator.userAgent}`,
+        `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
+        `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
+        `${entries.length} loads, newest first:`,
+        ''
+      ];
+      entries.forEach((e, i) => {
+        const s = e.stages || {};
+        const stageText = Object.entries(s).map(([k, v]) => `${k} ${v}`).join(', ');
+        const here = this.entry && e.id === this.entry.id ? ' (this page)' : '';
+        lines.push(`#${i + 1} ${fmt(e.t)} ${e.host || '?'} [${e.nav || '?'}] -- ${this.statusOf(e)}${here}`);
+        lines.push(`  inject ${e.injectMs}ms, ready=${e.ready}, vis=${e.vis}, v${e.v}`);
+        lines.push(`  stages: ${stageText || 'none'}`);
+        const info = e.info || {};
+        if (Object.keys(info).length) {
+          lines.push(`  info: ${Object.entries(info).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' ')}`);
+        }
+        (e.events || []).forEach(ev => lines.push(`  ${ev}`));
+        (e.errors || []).forEach(er => lines.push(`  ERROR ${er}`));
+        lines.push('');
+      });
+      return lines.join('\n');
     }
   };
+
+  // Short description of how this copy of BESing was loaded, for the boot log.
+  function describeEnvironment() {
+    const env = {};
+    try {
+      if (typeof GM_info !== 'undefined' && GM_info) {
+        env.handler = `${GM_info.scriptHandler || '?'} ${GM_info.version || ''}`.trim();
+        if (GM_info.injectInto) env.injectInto = GM_info.injectInto;
+        if (GM_info.script) env.script = `${GM_info.script.name || '?'} ${GM_info.script.version || ''}`.trim();
+      } else if (BESAdapter.isExt) {
+        env.handler = 'BESing extension';
+      } else {
+        env.handler = 'none';
+      }
+      const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+      const loader = (typeof window !== 'undefined' && window.__BESING_LOADER_INFO__) || (win && win.__BESING_LOADER_INFO__);
+      if (loader) env.loader = `stable ${loader.version || '?'} ${loader.source || '?'}`;
+      env.storage = BESAdapter.isGM ? 'gm' : (BESAdapter.isExt ? 'ext' : 'local');
+      env.frame = IS_TOP_FRAME ? 'top' : 'child';
+    } catch (e) {}
+    return env;
+  }
+
+  // Copies text to the clipboard. GM_setClipboard works without a user gesture (menu commands);
+  // the others need one. Returns false when every route failed.
+  async function copyTextToClipboard(text) {
+    try {
+      if (typeof GM_setClipboard === 'function') {
+        GM_setClipboard(text, 'text');
+        return true;
+      }
+    } catch (e) {}
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        // writeText can stay pending forever when the browser withholds permission, so it is raced.
+        const ok = await Promise.race([
+          navigator.clipboard.writeText(text).then(() => true),
+          new Promise(resolve => setTimeout(() => resolve(false), 1500))
+        ]);
+        if (ok) return true;
+      }
+    } catch (e) {}
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
+      (document.body || document.documentElement).appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand('copy');
+      ta.remove();
+      if (ok) return true;
+    } catch (e) {}
+    return false;
+  }
 
   // 3. Pre-bundled Modules (Off by default, zero remote eval)
   const BUILTIN_MODULES = [
@@ -4629,7 +4911,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.7.2';
+    static CURRENT_VERSION = '1.7.3';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -4843,8 +5125,15 @@
     async init() {
       await this.storage.init();
       if (this.disposed) return;
-      BESBootLog.record('storage');
       const currentHost = this.storage.getCurrentHost();
+      BESBootLog.record('storage', {
+        store: BESAdapter.lastLoad,
+        modes: BUILTIN_MODULES.reduce((acc, m) => {
+          const mode = this.storage.getScriptMode(m.id, currentHost);
+          if (mode !== 'off') acc[m.id] = mode;
+          return acc;
+        }, {})
+      });
 
       if (!IS_TOP_FRAME) {
         this.initFrameModules(currentHost);
@@ -4875,13 +5164,17 @@
             try {
               m.init(cfg);
               m.running = true;
-            } catch (err) {}
+            } catch (err) {
+              BESBootLog.error(`init ${m.id}`, err);
+            }
           } else if (shouldBeActive && m.running) {
             try {
               if (typeof m.onConfigChange === 'function') {
                 m.onConfigChange(cfg);
               }
-            } catch (err) {}
+            } catch (err) {
+              BESBootLog.error(`config ${m.id}`, err);
+            }
           }
           return;
         }
@@ -4892,6 +5185,7 @@
             m.running = true;
           } catch (err) {
             console.error(`[BESing] Error initializing ${m.id}:`, err);
+            BESBootLog.error(`init ${m.id}`, err);
           }
         } else if (!shouldBeActive && m.running) {
           try {
@@ -4899,13 +5193,15 @@
             m.running = false;
           } catch (err) {
             console.error(`[BESing] Error destroying ${m.id}:`, err);
+            BESBootLog.error(`destroy ${m.id}`, err);
           }
         } else if (shouldBeActive && m.running) {
           if (typeof m.onConfigChange === 'function') {
-            try { m.onConfigChange(cfg); } catch (e) {}
+            try { m.onConfigChange(cfg); } catch (err) { BESBootLog.error(`config ${m.id}`, err); }
           }
         }
       });
+      BESBootLog.record('modules', { running: this.modules.filter(m => m.running).map(m => m.id).join(',') });
 
       // Throttled Update Check:
       // If running inside stable loader: auto-check in background and silently auto-update!
@@ -4953,19 +5249,29 @@
         BESAdapter.registerMenu('📦 Open BESing Extensions', () => {
           live().openModal('extensions');
         });
+        // Works even when the icon never appeared on this load.
+        BESAdapter.registerMenu('🐞 Copy BESing Debug Log', async () => {
+          const report = await BESBootLog.buildReport();
+          const copied = await copyTextToClipboard(report);
+          if (copied) {
+            try { window.alert('BESing debug log copied to the clipboard.'); } catch (e) {}
+          } else {
+            live().openModal('settings');
+          }
+        });
       }
 
       // Page Navigation & bfcache Resilience
       window.addEventListener('pageshow', () => {
         if (this.disposed) return;
-        this.ensureMounted();
+        this.ensureMounted('pageshow');
         this.clampWidgetPosition();
         this.refreshCurrentSiteModules();
       });
 
       window.addEventListener('popstate', () => {
         if (this.disposed) return;
-        this.ensureMounted();
+        this.ensureMounted('popstate');
         this.clampWidgetPosition();
         this.refreshCurrentSiteModules();
       });
@@ -4973,7 +5279,7 @@
       document.addEventListener('visibilitychange', () => {
         if (this.disposed) return;
         if (document.visibilityState === 'visible') {
-          this.ensureMounted();
+          this.ensureMounted('visible');
           this.clampWidgetPosition();
         }
       });
@@ -4986,7 +5292,7 @@
         if (targetNode && !this._domObserver) {
           this._domObserver = new MutationObserver(() => {
             if (this.host && !this.host.isConnected && !this.storage.isCurrentBlocked()) {
-              this.ensureMounted();
+              this.ensureMounted('dom-observer');
             }
           });
           this._domObserver.observe(targetNode, { childList: true, subtree: false });
@@ -4999,14 +5305,14 @@
         return;
       }
 
-      this.mount();
+      this.ensureMounted('init');
     }
 
     // Heartbeat DOM guardian (every 2.5s) to catch any random DOM detachments
     startHeartbeat() {
       if (this._heartbeatInterval || this.disposed || !IS_TOP_FRAME) return;
       this._heartbeatInterval = setInterval(() => {
-        this.ensureMounted();
+        this.ensureMounted('heartbeat');
       }, 2500);
     }
 
@@ -5093,44 +5399,52 @@
       this.renderBody();
     }
 
-    ensureMounted() {
+    ensureMounted(reason = '') {
       if (this.disposed || !IS_TOP_FRAME) return;
       if (this.storage.isCurrentBlocked()) return;
 
-      const docRoot = document.body || document.documentElement;
-      if (!docRoot) return;
+      try {
+        const docRoot = document.body || document.documentElement;
+        if (!docRoot) return;
 
-      // Discard stale host from old document (WebKit / iPadOS refresh or bfcache)
-      if (this.host && this.host.ownerDocument !== document) {
-        this.host = null;
-        this.shadow = null;
-        this.widgetEl = null;
-      }
-
-      // 1. Host exists in memory, belongs to current document, but got detached
-      if (this.host && !this.host.isConnected) {
-        docRoot.appendChild(this.host);
-        this.clampWidgetPosition();
-        return;
-      }
-
-      // 2. Host is null or was removed
-      if (!this.host) {
-        const existing = document.getElementById('__besing_root__');
-        if (existing) {
-          existing.remove();
+        // Discard stale host from old document (WebKit / iPadOS refresh or bfcache)
+        if (this.host && this.host.ownerDocument !== document) {
+          BESBootLog.event(`stale host from old document dropped${reason ? ' (' + reason + ')' : ''}`);
+          this.host = null;
+          this.shadow = null;
+          this.widgetEl = null;
         }
-        this.mount();
-        return;
-      }
 
-      // 3. Make sure widget element is present in shadow DOM
-      if (this.shadow && (!this.widgetEl || !this.shadow.contains(this.widgetEl))) {
-        this.renderWidget(this.shadow);
+        // 1. Host exists in memory, belongs to current document, but got detached
+        if (this.host && !this.host.isConnected) {
+          BESBootLog.event(`host was detached, reattached${reason ? ' (' + reason + ')' : ''}`);
+          docRoot.appendChild(this.host);
+          this.clampWidgetPosition();
+          return;
+        }
+
+        // 2. Host is null or was removed
+        if (!this.host) {
+          const existing = document.getElementById('__besing_root__');
+          if (existing) {
+            existing.remove();
+          }
+          this.mount(reason);
+          return;
+        }
+
+        // 3. Make sure widget element is present in shadow DOM
+        if (this.shadow && (!this.widgetEl || !this.shadow.contains(this.widgetEl))) {
+          BESBootLog.event(`widget missing, re-rendered${reason ? ' (' + reason + ')' : ''}`);
+          this.renderWidget(this.shadow);
+        }
+      } catch (err) {
+        console.error('[BESing] Mount error:', err);
+        BESBootLog.error(`mount${reason ? ' (' + reason + ')' : ''}`, err);
       }
     }
 
-    mount() {
+    mount(reason = '') {
       if (this.disposed || !IS_TOP_FRAME) return;
       const docRoot = document.body || document.documentElement;
       if (!docRoot) return;
@@ -5171,7 +5485,11 @@
       this.attachViewportTracking();
       this.applyViewportCompensation();
       this.renderWidget(shadow);
-      BESBootLog.record('mounted');
+      if (BESBootLog.entry && BESBootLog.entry.stages.mounted !== undefined) {
+        BESBootLog.event(`host recreated${reason ? ' (' + reason + ')' : ''}`);
+      } else {
+        BESBootLog.record('mounted', reason ? { mountedBy: reason } : undefined);
+      }
 
       if (!this._redirectListenerAttached) {
         window.addEventListener('besing:redirect-blocked', () => {
@@ -5296,7 +5614,7 @@
         return;
       }
 
-      this.ensureMounted();
+      this.ensureMounted('pull-up');
 
       if (!this.widgetEl) {
         if (this.shadow) this.renderWidget(this.shadow);
@@ -5968,11 +6286,16 @@
             <div class="besing-update-card" style="background:rgba(148,163,184,0.05);border-color:rgba(148,163,184,0.2);">
               <div class="besing-update-header">
                 <span class="besing-section-title">Recent Page Loads</span>
-                <button type="button" class="besing-btn-sub-action" id="besing-btn-clear-boot-log">Clear</button>
+                <div style="display:flex;gap:6px;">
+                  <button type="button" class="besing-btn-sub-action" id="besing-btn-copy-boot-log" style="color:#38bdf8;border-color:rgba(56,189,248,0.3);">Copy Debug Log</button>
+                  <button type="button" class="besing-btn-sub-action" id="besing-btn-clear-boot-log">Clear</button>
+                </div>
               </div>
               <div style="font-size:10px;color:#94a3b8;line-height:1.35;">
-                Each page load BESing ran on, newest first. If a load you made is missing, your userscript manager never started BESing on it. "Stopped" means BESing started but the icon never appeared.
+                Each page load BESing ran on, newest first. If a load you made is missing, your userscript manager never started BESing on it. "Stopped" means BESing started but the icon never appeared. Copy Debug Log copies the last ${BOOT_LOG_LIMIT} loads with timings and errors for a bug report.
               </div>
+              <div id="besing-boot-log-msg" style="font-size:10px;color:#34d399;display:none;"></div>
+              <textarea id="besing-boot-log-text" readonly style="display:none;width:100%;height:140px;background:rgba(15,23,42,0.8);color:#e2e8f0;border:1px solid rgba(255,255,255,0.12);border-radius:6px;padding:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;resize:vertical;"></textarea>
               <div id="besing-boot-log-list" style="display:flex;flex-direction:column;gap:4px;max-height:150px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#cbd5e1;">Loading...</div>
             </div>
 
@@ -6024,9 +6347,15 @@
         });
 
         const bootLogList = body.querySelector('#besing-boot-log-list');
+        const bootLogMsg = body.querySelector('#besing-boot-log-msg');
+        const bootLogText = body.querySelector('#besing-boot-log-text');
+        // Built ahead of the click: iOS only allows clipboard writes during the tap itself,
+        // and awaiting storage first would use that window up.
+        let bootLogReport = '';
         const renderBootLog = async () => {
           if (!bootLogList) return;
           const entries = await BESBootLog.read();
+          bootLogReport = await BESBootLog.buildReport();
           bootLogList.textContent = '';
           if (!entries.length) {
             bootLogList.textContent = 'No page loads recorded yet.';
@@ -6037,11 +6366,7 @@
             const when = new Date(e.t || 0);
             const pad = (n) => String(n).padStart(2, '0');
             const time = `${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}:${pad(when.getMinutes())}`;
-            let status;
-            if (s.mounted !== undefined) status = `shown ${s.mounted}ms`;
-            else if (s.blocked !== undefined) status = 'site disabled';
-            else if (s.storage !== undefined) status = 'stopped after settings load';
-            else status = 'stopped at start';
+            const status = BESBootLog.statusOf(e);
             const row = document.createElement('div');
             row.style.cssText = 'display:flex;justify-content:space-between;gap:8px;';
             const left = document.createElement('span');
@@ -6056,10 +6381,38 @@
           });
         };
         renderBootLog();
+        const showBootLogMsg = (text, color) => {
+          if (!bootLogMsg) return;
+          bootLogMsg.textContent = text;
+          bootLogMsg.style.color = color;
+          bootLogMsg.style.display = 'block';
+        };
+        const copyBootLogBtn = body.querySelector('#besing-btn-copy-boot-log');
+        if (copyBootLogBtn) {
+          copyBootLogBtn.onclick = async () => {
+            const report = bootLogReport || await BESBootLog.buildReport();
+            const copied = await copyTextToClipboard(report);
+            if (copied) {
+              showBootLogMsg('Debug log copied. Paste it into your message.', '#34d399');
+              if (bootLogText) bootLogText.style.display = 'none';
+            } else if (bootLogText) {
+              // Clipboard refused: show the text so it can be selected and copied by hand.
+              bootLogText.value = report;
+              bootLogText.style.display = 'block';
+              bootLogText.focus();
+              bootLogText.select();
+              bootLogText.setSelectionRange(0, report.length);
+              showBootLogMsg('Clipboard blocked here. The log is selected below: use Copy from the text menu.', '#fbbf24');
+            }
+            renderBootLog();
+          };
+        }
         const clearBootLogBtn = body.querySelector('#besing-btn-clear-boot-log');
         if (clearBootLogBtn) {
           clearBootLogBtn.onclick = async () => {
             await BESBootLog.clear();
+            if (bootLogMsg) bootLogMsg.style.display = 'none';
+            if (bootLogText) bootLogText.style.display = 'none';
             renderBootLog();
           };
         }
@@ -7727,11 +8080,14 @@
                       (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
   if (existingApp && !existingApp.disposed && existingApp.bootDocument === document) {
     console.warn('[BESing] An instance already owns this page. Skipping duplicate initialization.');
+    BESBootLog.record('skipped', { ...describeEnvironment(), reason: 'same-world instance exists' });
     return;
   }
   // An instance left over from a previous document (WebKit can keep the global across reloads) is shut down fully.
+  let disposedStale = false;
   if (existingApp && !existingApp.disposed && typeof existingApp.dispose === 'function') {
     try { existingApp.dispose(); } catch (e) {}
+    disposedStale = true;
   }
   // 2. Other JS worlds: ask whether a live owner exists. Dispatch is synchronous, so two copies
   // starting at the same moment still run one after the other and only the first claims the page.
@@ -7741,6 +8097,7 @@
   } catch (e) {}
   if (claimedElsewhere) {
     console.warn('[BESing] Another BESing copy (different script or extension) already owns this page. Skipping.');
+    BESBootLog.record('skipped', { ...describeEnvironment(), reason: 'another world claimed the page' });
     return;
   }
 
@@ -7753,7 +8110,8 @@
     window.__BESING_INSTANCE__ = app;
     if (typeof unsafeWindow !== 'undefined') unsafeWindow.__BESING_INSTANCE__ = app;
   } catch (e) {}
-  BESBootLog.record('start', 0);
+  BESBootLog.record('start', describeEnvironment());
+  if (disposedStale) BESBootLog.event('disposed instance left from a previous document');
 
   // 1. Synchronously arm security shields at document-start before yielding to event loop
   app.initPreemptiveShields();
@@ -7761,37 +8119,48 @@
   // 2. Initialize storage and load remaining active modules with resilient fallback
   app.init().catch(err => {
     console.error('[BESing] Storage init error:', err);
+    BESBootLog.error('init', err);
   }).finally(() => {
-    app.ensureMounted();
+    app.ensureMounted('init-finally');
   });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
-      app.ensureMounted();
+      BESBootLog.event('DOMContentLoaded');
+      app.ensureMounted('DOMContentLoaded');
     });
   } else {
-    app.ensureMounted();
+    app.ensureMounted('already-' + document.readyState);
   }
 
   window.addEventListener('load', () => {
-    app.ensureMounted();
+    BESBootLog.event('load');
+    app.ensureMounted('load');
+    BESBootLog.check('after load');
   });
 
   // Mobile iPad / WebKit tab suspension and bfcache lifecycle recovery
-  window.addEventListener('pageshow', () => {
-    app.ensureMounted();
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) BESBootLog.event('pageshow from back/forward cache');
+    app.ensureMounted('pageshow');
+  });
+
+  window.addEventListener('pagehide', (e) => {
+    BESBootLog.event(e.persisted ? 'pagehide into back/forward cache' : 'pagehide');
+    BESBootLog.persist();
   });
 
   document.addEventListener('visibilitychange', () => {
+    BESBootLog.event(`visibility ${document.visibilityState}`);
     if (document.visibilityState === 'visible') {
-      app.ensureMounted();
+      app.ensureMounted('visible');
     }
   });
 
   window.addEventListener('orientationchange', () => {
     setTimeout(() => {
       app.clampWidgetPosition();
-      app.ensureMounted();
+      app.ensureMounted('orientation');
     }, 200);
   });
 
@@ -7799,11 +8168,17 @@
   window.addEventListener('touchstart', (e) => {
     if (e.touches && e.touches.length === 3) {
       console.log('[BESing] 3-finger tap detected: pulling up widget icon');
+      BESBootLog.event('3-finger pull-up');
       app.pullUpIcon();
     }
   }, { passive: true });
 
   setTimeout(() => {
-    app.ensureMounted();
+    app.ensureMounted('failsafe-1s');
   }, 1000);
+
+  // What the user should be seeing a few seconds in: catches a widget that mounted but is hidden,
+  // detached or off-screen, and modules whose page hooks went missing.
+  setTimeout(() => BESBootLog.check('check@3s'), 3000);
+  setTimeout(() => BESBootLog.check('check@10s'), 10000);
 })();
