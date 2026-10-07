@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.7.5"
+VERSION = "1.7.6"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -3383,6 +3383,14 @@ def build():
         specificControls = `
           <div class="besing-config-section">
             <div class="besing-section-header-row">
+              <span class="besing-section-title">Next Reminder</span>
+              <span class="besing-shortcut-badge" id="badge-reminder-remaining" style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;color:#38bdf8;">--:--</span>
+            </div>
+            <p id="txt-reminder-due" style="font-size:10px;color:#94a3b8;margin-top:4px;line-height:1.3;">Reading timer...</p>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
               <span class="besing-section-title">Reminder Interval</span>
               <span class="besing-shortcut-badge" id="badge-reminder-interval">${{intervalMinutes}} min</span>
             </div>
@@ -3866,6 +3874,59 @@ def build():
         const btnMinus = body.querySelector('#btn-custom-minus');
         const btnPlus = body.querySelector('#btn-custom-plus');
         const btnTest = body.querySelector('#btn-test-reminder');
+        const badgeRemaining = body.querySelector('#badge-reminder-remaining');
+        const txtDue = body.querySelector('#txt-reminder-due');
+
+        // Live countdown from the shared timer. It ticks every second and re-reads the shared state
+        // every 5 seconds, so Repeat or an interval change in any tab shows up here.
+        let reminderState = m._state || null;
+        let countdownTimer = null;
+        const formatRemaining = (ms) => {{
+          const total = Math.max(0, Math.ceil(ms / 1000));
+          const h = Math.floor(total / 3600);
+          const mm = Math.floor((total % 3600) / 60);
+          const ss = total % 60;
+          const pad = (n) => String(n).padStart(2, '0');
+          return h > 0 ? `${{h}}:${{pad(mm)}}:${{pad(ss)}}` : `${{mm}}:${{pad(ss)}}`;
+        }};
+        const paintCountdown = () => {{
+          if (!badgeRemaining || !badgeRemaining.isConnected) {{
+            if (countdownTimer) clearInterval(countdownTimer);
+            countdownTimer = null;
+            return;
+          }}
+          const due = reminderState && !reminderState.off ? Number(reminderState.due) : 0;
+          if (!m.running) {{
+            badgeRemaining.textContent = 'Off';
+            if (txtDue) txtDue.textContent = 'Rest Reminder is off on this site. Switch it on to start the timer.';
+          }} else if (!due) {{
+            badgeRemaining.textContent = 'Off';
+            if (txtDue) txtDue.textContent = 'No reminder is scheduled.';
+          }} else if (due <= Date.now()) {{
+            badgeRemaining.textContent = 'Now';
+            if (txtDue) txtDue.textContent = 'Time for a break. Use Repeat or Off on the chat bubble.';
+          }} else {{
+            badgeRemaining.textContent = formatRemaining(due - Date.now());
+            const at = new Date(due);
+            if (txtDue) txtDue.textContent = `Due at ${{String(at.getHours()).padStart(2, '0')}}:${{String(at.getMinutes()).padStart(2, '0')}}, shared by every tab and site.`;
+          }}
+        }};
+        const refreshReminderState = async () => {{
+          try {{
+            const shared = await this.readSharedState(m.SHARED_KEY || 'rest_reminder', null);
+            if (shared) reminderState = shared;
+          }} catch (e) {{}}
+          paintCountdown();
+        }};
+        if (badgeRemaining) {{
+          let ticks = 0;
+          paintCountdown();
+          refreshReminderState();
+          countdownTimer = setInterval(() => {{
+            if (++ticks % 5 === 0) refreshReminderState();
+            else paintCountdown();
+          }}, 1000);
+        }}
 
         const updateInterval = async (preset, minutes) => {{
           const clamped = Math.max(1, Math.min(240, Number(minutes) || 20));
@@ -3878,6 +3939,8 @@ def build():
             intervalMinutes: clamped,
             customMinutes: preset === 'custom' ? clamped : (Number(inCustomMin?.value) || 30)
           }});
+          // A new interval starts a new cycle; show it once the shared state is written.
+          setTimeout(refreshReminderState, 300);
         }};
 
         if (groupPreset) {{

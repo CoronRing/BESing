@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageStream
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.1.0
+// @version      1.2.0
 // @description  Continuous page streaming via smart pagination detection and automated clicks for infinite scrolling with rate limiting and IP flood protection.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const PageStream = {
     id: 'pagestream',
     name: 'PageStream',
-    version: '1.1.0',
+    version: '1.2.0',
     description: 'Auto-stream infinite pages by automated click or URL fetch splicing. Supports intelligent pagination detection, history sync, and customizable preload.',
     category: 'Productivity',
 
@@ -46,6 +46,7 @@
     _isLoading: false,
     _isPreloading: false,
     _preloadTimer: null,
+    _preloadPromise: null,  // in-flight background preload, awaited by the scroll trigger
     _lastStreamTime: 0,
     _lastFetchTime: 0,
     _minStreamInterval: 2500, // Minimum 2.5s between page loads
@@ -54,6 +55,8 @@
     _consecutiveErrors: 0,
     _maxPagesPerSession: 50,  // Circuit breaker: max 50 streamed pages per session
     _rule: null,
+    _liveMainSignature: null, // selector of page 1's content container, reused on fetched pages
+    _maxContentScripts: 3,    // document.write content scripts resolved per fetched page
 
     // Built-in site rules (Pagetual format compatible)
     _builtinRules: [
@@ -64,6 +67,14 @@
         pageElement: '#content, #txtContent, .chaptercontent, .content',
         replace: '.bottem2, .bottem1, .page_chapter',
         filter: '.ad-banner, ins, .read_ads'
+      },
+      {
+        // Pages 2+ of each chapter write their text from /i/a.aspx with document.write.
+        name: 'suduguu',
+        url: '^https?://(?:www\\.|m\\.)?suduguu\\.com/\\d+/\\d+(?:-\\d+)?\\.html',
+        nextLink: '.prenext a:contains("下一页"), .prenext a:contains("下一章")',
+        pageElement: '.con',
+        replace: '.prenext'
       },
       {
         name: 'biquge',
@@ -131,6 +142,7 @@
 
       this._injectStyles();
       this._matchRule();
+      this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
       this._setupNextLink();
       this._setupScrollListener();
       this._setupHistoryObserver();
@@ -169,7 +181,7 @@
       }
 
       // Remove streamed dividers
-      document.querySelectorAll('.pagestream-divider, .pagestream-streamed-block').forEach(el => {
+      document.querySelectorAll('.pagestream-divider, .pagestream-streamed-block, .pagestream-continue').forEach(el => {
         el.remove();
       });
 
@@ -232,10 +244,22 @@
 
       if (nextEl) {
         this._currentNextElement = nextEl;
-        this._currentNextUrl = this._extractHref(nextEl);
+        const href = this._extractHref(nextEl);
+        this._currentNextUrl = this._ruleAllows(href) ? href : null;
       } else {
         this._currentNextElement = null;
         this._currentNextUrl = null;
+      }
+    },
+
+    // With a site rule, only pages its URL pattern matches are streamed; a finished book's last
+    // "next" link often leads to the table of contents instead of another chapter.
+    _ruleAllows(url) {
+      if (!url || !this._rule || !this._rule.url) return true;
+      try {
+        return new RegExp(this._rule.url, 'i').test(url);
+      } catch (e) {
+        return true;
       }
     },
 
@@ -343,7 +367,15 @@
         if (el) return el;
       }
 
-      // 3. Common content container candidates
+      // 3. On fetched pages, the same container page 1 used
+      if (doc !== document && this._liveMainSignature) {
+        try {
+          const el = doc.querySelector(this._liveMainSignature);
+          if (el) return el;
+        } catch (e) {}
+      }
+
+      // 4. Common content container candidates
       const candidates = [
         '#content', '#txtContent', '#chaptercontent', '.chaptercontent',
         '.novel-content', '.read-content', '.post-content', '.entry-content',
@@ -358,7 +390,7 @@
         }
       }
 
-      // 4. Heuristic: Find element with highest paragraph / text density
+      // 5. Heuristic: Find element with highest paragraph / text density
       let bestEl = null;
       let maxScore = 0;
       const divs = doc.querySelectorAll('div, section, article, main');
@@ -376,6 +408,91 @@
       }
 
       return bestEl || doc.body;
+    },
+
+    // CSS selector identifying a content container (id, or tag plus classes), or null for <body>.
+    _signatureOf(el) {
+      if (!el || !el.tagName || el === el.ownerDocument.body || el === el.ownerDocument.documentElement) return null;
+      const esc = (v) => (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(v) : String(v).replace(/[^\w-]/g, '\\$&');
+      if (el.id) return `#${esc(el.id)}`;
+      const classes = String(el.getAttribute('class') || '').split(/\s+/).filter(Boolean);
+      return el.tagName.toLowerCase() + classes.map(c => `.${esc(c)}`).join('');
+    },
+
+    // Some sites (many novel sites) write the page text from a script, e.g.
+    // <div class="con"><script src="/i/a.aspx?id=1&p=2"></script></div> answering document.write("<p>...</p>").
+    // Fetched pages never run scripts, so the text would be missing. This finds such scripts inside
+    // content containers, reads the string literals they would write (never executing them), and
+    // puts the resulting HTML in the script's place. Only same-origin scripts are fetched.
+    async _resolveWrittenContent(doc, pageUrl) {
+      const containers = [];
+      const ruleEl = (this._config.customPageSelector && this._queryBySelector(this._config.customPageSelector, doc)) ||
+        (this._rule && this._rule.pageElement && this._queryBySelector(this._rule.pageElement, doc));
+      if (ruleEl) containers.push(ruleEl);
+      const contentLike = /(^|[\s_-])(con|content|contents|chapter\w*|txt\w*|text|article|read\w*|book\w*|novel\w*|entry|post)([\s_-]|$)/i;
+      const scripts = Array.from(doc.querySelectorAll('body script')).filter(sc => {
+        const parent = sc.parentElement;
+        if (!parent || parent === doc.body) return false;
+        if (containers.some(c => c.contains(sc))) return true;
+        return contentLike.test(`${parent.id || ''} ${parent.getAttribute('class') || ''}`);
+      }).slice(0, this._maxContentScripts);
+
+      let origin;
+      try { origin = new URL(pageUrl).origin; } catch (e) { return 0; }
+      let resolved = 0;
+      for (const sc of scripts) {
+        let code = '';
+        const src = sc.getAttribute('src');
+        if (src) {
+          let abs;
+          try { abs = new URL(src, pageUrl); } catch (e) { continue; }
+          if (abs.origin !== origin || abs.origin !== window.location.origin) continue;
+          try {
+            const resp = await fetch(abs.href, { credentials: 'include' });
+            if (!resp.ok) continue;
+            code = await resp.text();
+          } catch (e) {
+            continue;
+          }
+        } else {
+          code = sc.textContent || '';
+        }
+        if (!code || code.length > 2000000) continue;
+        const html = this._extractWrittenHtml(code);
+        if (!html) continue;
+        const written = new DOMParser().parseFromString(`<!doctype html><html><body>${html}</body></html>`, 'text/html');
+        written.querySelectorAll('script, iframe, object, embed').forEach(n => n.remove());
+        const frag = doc.createDocumentFragment();
+        Array.from(written.body.childNodes).forEach(n => frag.appendChild(doc.importNode(n, true)));
+        sc.replaceWith(frag);
+        resolved++;
+      }
+      return resolved;
+    },
+
+    // Concatenates the string literals passed to document.write / document.writeln in `code`.
+    _extractWrittenHtml(code) {
+      const calls = /document\.write(?:ln)?\(\s*(?:"((?:[^"\\]|\\[\s\S])*)"|'((?:[^'\\]|\\[\s\S])*)'|`((?:[^`\\$]|\\[\s\S])*)`)\s*\)/g;
+      let out = '';
+      let m;
+      while ((m = calls.exec(code)) !== null) {
+        const body = m[1] !== undefined ? m[1] : (m[2] !== undefined ? m[2] : m[3]);
+        out += this._decodeJsString(body);
+      }
+      return out;
+    },
+
+    // Decodes the escapes of a JavaScript string literal body without evaluating it.
+    _decodeJsString(body) {
+      const simple = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', '0': '\0', '\n': '', '\r': '' };
+      return body.replace(/\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/g, (all, esc) => {
+        if (esc[0] === 'u' && esc.length > 1) {
+          const hex = esc[1] === '{' ? esc.slice(2, -1) : esc.slice(1);
+          try { return String.fromCodePoint(parseInt(hex, 16)); } catch (e) { return ''; }
+        }
+        if (esc[0] === 'x' && esc.length === 3) return String.fromCharCode(parseInt(esc.slice(1), 16));
+        return Object.prototype.hasOwnProperty.call(simple, esc) ? simple[esc] : esc;
+      });
     },
 
     // 2. Scroll & Trigger Evaluation (Requirement 3)
@@ -496,6 +613,12 @@
       this._lastStreamTime = now;
 
       try {
+        // A background preload may be fetching this very page; wait for it instead of fetching it twice.
+        if (this._preloadPromise) {
+          try { await this._preloadPromise; } catch (e) {}
+          if (!this._active || this._hasEnded) return;
+        }
+
         // 1. Check if we already have preloaded page ready
         if (this._pageCache.length > 0) {
           const cached = this._pageCache.shift();
@@ -568,6 +691,7 @@
       const pageData = await this._loadRemotePage(url);
       if (!pageData) {
         this._hasEnded = true;
+        this._showContinueLink(url);
         return;
       }
 
@@ -627,10 +751,14 @@
         const parser = new DOMParser();
         const doc = parser.parseFromString(text, 'text/html');
 
-        const title = (doc.querySelector('title') ? doc.querySelector('title').innerText : '') || `Page ${this._curPageNum + 1}`;
+        await this._resolveWrittenContent(doc, url);
+
+        const title = (doc.querySelector('title') ? doc.querySelector('title').textContent : '') || `Page ${this._curPageNum + 1}`;
         const mainContent = this._findMainContentElement(doc);
-        if (!mainContent) {
+        // Splicing a whole <body> would duplicate the site's header, menus and footer.
+        if (!mainContent || (mainContent === doc.body && this._liveMainSignature)) {
           console.warn('[PageStream] Could not detect main content container in remote document.');
+          this._showToast('PageStream: could not find the text on the next page. Streaming stopped.');
           return null;
         }
 
@@ -641,6 +769,12 @@
 
         // Clean scripts to prevent re-execution/malicious ads
         mainContent.querySelectorAll('script').forEach(s => s.remove());
+
+        if ((mainContent.textContent || '').trim().length < 20 && !mainContent.querySelector('img')) {
+          console.warn(`[PageStream] Next page has no readable content: ${url}`);
+          this._showToast('PageStream: the next page had no readable text. Streaming stopped.');
+          return null;
+        }
 
         // Smart next link extraction from the loaded document
         let nextEl = null;
@@ -675,11 +809,18 @@
     },
 
     _insertPage(pageData) {
-      const { pageNum, url, title, contentNode, nextUrl } = pageData;
+      const { url, title, contentNode, nextUrl } = pageData;
+      const escUrl = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(url) : String(url).replace(/["\\]/g, '\\$&');
+      if (document.querySelector(`.pagestream-streamed-block[data-pagestream-url="${escUrl}"]`)) {
+        console.log(`[PageStream] Page already on screen, skipped: ${url}`);
+        return;
+      }
+      // Numbered at insert time: a page preloaded ahead does not know how many pages precede it.
+      const pageNum = this._curPageNum + 1;
       this._curPageNum = pageNum;
       this._currentNextUrl = nextUrl;
 
-      if (!nextUrl || this._loadedUrls.has(nextUrl) || nextUrl === window.location.href) {
+      if (!nextUrl || this._loadedUrls.has(nextUrl) || nextUrl === window.location.href || !this._ruleAllows(nextUrl)) {
         console.log('[PageStream] No further unique next pages detected.');
         this._currentNextUrl = null;
         this._hasEnded = true;
@@ -776,19 +917,24 @@
 
         this._isPreloading = true;
         console.log(`[PageStream] Preloading background page: ${targetUrl}`);
-        try {
-          const preData = await this._loadRemotePage(targetUrl);
-          if (preData) {
-            this._loadedUrls.add(targetUrl);
-            this._pageCache.push(preData);
-            this._currentNextUrl = preData.nextUrl;
-            console.log(`[PageStream] Background preloaded page ${preData.pageNum} ready in cache.`);
+        this._preloadPromise = (async () => {
+          try {
+            const preData = await this._loadRemotePage(targetUrl);
+            // Dropped if the page was streamed directly while this preload was in flight.
+            if (preData && this._active && !this._loadedUrls.has(targetUrl)) {
+              this._loadedUrls.add(targetUrl);
+              this._pageCache.push(preData);
+              this._currentNextUrl = preData.nextUrl;
+              console.log(`[PageStream] Background preloaded ${targetUrl} ready in cache.`);
+            }
+          } catch (e) {
+            console.warn('[PageStream] Preload failed:', e);
+          } finally {
+            this._isPreloading = false;
+            this._preloadPromise = null;
           }
-        } catch (e) {
-          console.warn('[PageStream] Preload failed:', e);
-        } finally {
-          this._isPreloading = false;
-        }
+        })();
+        await this._preloadPromise;
       }
     },
 
@@ -860,6 +1006,25 @@
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+    },
+
+    // When streaming stops on an error, the site's own pagination may already be hidden, so a plain
+    // same-tab link to the page that failed is added after the last streamed block.
+    _showContinueLink(url) {
+      try {
+        if (!url || document.getElementById('pagestream-continue')) return;
+        const wrap = document.createElement('div');
+        wrap.id = 'pagestream-continue';
+        wrap.className = 'pagestream-continue';
+        const link = document.createElement('a');
+        link.href = url;
+        link.textContent = 'Continue reading: open the next page';
+        wrap.appendChild(link);
+        const blocks = document.querySelectorAll('.pagestream-streamed-block');
+        const last = blocks.length ? blocks[blocks.length - 1] : this._findMainContentElement(document);
+        if (last && last.parentNode && last !== document.body) last.parentNode.insertBefore(wrap, last.nextSibling);
+        else (document.body || document.documentElement).appendChild(wrap);
+      } catch (e) {}
     },
 
     _showToast(msg) {
@@ -947,6 +1112,22 @@
           width: 100% !important;
           box-sizing: border-box !important;
           animation: pagestreamFadeIn 0.35s ease-out !important;
+        }
+        .pagestream-continue {
+          text-align: center !important;
+          margin: 28px 0 !important;
+        }
+        .pagestream-continue a {
+          display: inline-block !important;
+          padding: 12px 22px !important;
+          border-radius: 9999px !important;
+          background: rgba(15, 23, 42, 0.85) !important;
+          border: 1px solid rgba(56, 189, 248, 0.45) !important;
+          color: #38bdf8 !important;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+          font-size: 15px !important;
+          font-weight: 600 !important;
+          text-decoration: none !important;
         }
         .pagestream-status-toast {
           position: fixed !important;

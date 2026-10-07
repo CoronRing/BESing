@@ -27,6 +27,7 @@ Rest Reminder is an ergonomic productivity tool engineered to prevent screen fat
 | **Custom Time Selector** | Dedicated stepper control and direct numeric input to specify any custom rest interval. | 1 to 240 minutes |
 | **One Timer Everywhere** | The due time is kept in BESing's cross-site storage, so every tab and site follows the same timer, and reloads or navigation keep it. Repeat or Off on any page applies to all open pages within about 5 seconds. | Shared state `shared_rest_reminder` |
 | **Test Preview Action** | Instant preview button in the settings panel to verify chat box styling and positioning. | Accessible via "Test Chat Bubble Now" |
+| **Next Reminder Countdown** | The script's settings panel shows the time left until the next reminder (`M:SS`, or `H:MM:SS` past an hour) and the clock time it is due, ticking every second. It reads the shared timer every 5 seconds, so Repeat or an interval change in another tab shows up; it shows `Now` while a reminder is due and `Off` when the script is off on the site or no reminder is scheduled. | Settings panel, top section |
 
 ---
 

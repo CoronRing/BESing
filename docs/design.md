@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.7.5  
+**Version:** 1.7.6  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -448,3 +448,10 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Self-Match Fix**: Prevent Redirect's DOM observer no longer flags the module's own page-world guard script, whose source quotes the ad patterns it hooks. Previously every load logged a blocked script and blinked the pet's redirect alert.
 - **Debug Log**: Blocked redirects are logged as events (first 10 per load, with reason and target host); the listener is attached before the preemptive shields so startup blocks are included. Checks report `nav-guard-on` or `NAV-GUARD-OFF`. Late loads are marked `LATE` in the copied report, and entries from older versions without injection timing no longer print `undefined`.
 - **Verification**: Playwright in Edge with a page whose ad code runs before BESing (a 2.5s `location.href` timer, a tap-anywhere redirect listener and an invisible overlay) and BESing injected after `DOMContentLoaded`: both redirects were blocked, the overlay was removed, and a same-site link still navigated. The same test against v1.7.4 was redirected. Playwright's WebKit build lacks the Navigation API, so the guard could not be exercised in WebKit there.
+
+### 7.31 PageStream Script-Written Pages, Missed Injections & Rest Reminder Countdown (v1.7.6)
+- **PageStream on suduguu.com (Root Cause)**: Chapters are split into pages. Page 1 has its text in `<div class="con">`, but pages 2 and up contain only `<script src="/i/a.aspx?id=…&p=N&bid=…">`, which answers with `document.write("<p>…</p>")`. PageStream strips scripts from fetched pages, so the text was missing; with no recognisable container, the heuristic fell back to the whole `<body>` and spliced the site's header, menus, related-books list and footer with no chapter text.
+- **PageStream 1.2.0**: recovers script-written text without executing it, adds a suduguu.com rule, reuses page 1's container selector on fetched pages, never splices `<body>`, stops with a message and a Continue link on an empty page, waits for an in-flight preload instead of fetching the same page twice (this race inserted pages twice once each page needed two requests), numbers pages at insert time, and only follows next links that match the site rule's URL pattern. Details in `docs/scripts/pagestream.md`.
+- **Missed Injections (Finding)**: A second iOS log (Stay, v1.7.5) showed a load that never appears in the boot log: the previous page ended with a normal `pagehide`, and the next entry is the user's reload of the failed page. On that load the userscript manager never ran BESing, so nothing in BESing can act on it; this matches reports of iOS Safari web extensions sometimes not injecting content scripts. All v1.7.5 loads in that log were late (`ready=complete`) but protected (`nav-guard-on`). Fewer full page loads mean fewer chances to miss one, which a working PageStream provides on paginated reading sites.
+- **Rest Reminder Countdown**: The Rest Reminder settings panel shows the time left until the next reminder and its due time, ticking every second and re-reading the shared state every 5 seconds (and right after an interval change). It stops ticking when the panel closes.
+- **Verification**: Playwright in Edge on a live suduguu.com chapter: pages 2–4 (script-written), the next chapter and the one after streamed with their text, each once and in order, without site chrome, and streaming stopped at the book's last page instead of splicing its table of contents. The countdown ticked and showed the due time.
