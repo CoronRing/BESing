@@ -1,7 +1,7 @@
 # Prevent Redirect & Tab Hijack
 
 **Script Identifier:** `prevent-redirect`  
-**Current Version:** 1.5.0  
+**Current Version:** 1.6.0  
 **Category:** Security  
 **Author:** BESing Team  
 **License:** MIT  
@@ -28,7 +28,7 @@ Prevent Redirect & Tab Hijack shields users from deceptive redirects, forced new
 | **Dynamic Script & Iframe Neutralization** | Neutralizes dynamic `<script>` and `<iframe>` injections pointing to known ad/redirect tracking domains or evasive non-standard ports. | Hooked `HTMLScriptElement.prototype.src`, `HTMLIFrameElement.prototype.src`, `Node.prototype.appendChild`, `insertBefore` |
 | **Mobile Sensor Trap Neutralization** | Strips `devicemotion` and `deviceorientation` event listener bindings, stopping mobile "shake-to-redirect" traps entirely. | Proxies `window.addEventListener` and `document.addEventListener` |
 | **Invisible Touch Tile Suppression** | Prevents ad scripts from tiling the viewport with high z-index, zero-opacity fixed tiles that hijack reading taps into redirects. | Filters `Element.prototype.insertAdjacentHTML` and dynamic overlays |
-| **Popup Window Interception** | Blocks external popup windows spawned via `window.open`. | Monkey-patches `window.open` & `unsafeWindow.open` |
+| **Popup Window Interception** | Blocks popup windows and new tabs spawned via `window.open`, `anchor.click()` or new-tab links. A new tab to a page on the same site is allowed when the user tapped or clicked (see "Same-Site New Tabs"). | Monkey-patches `window.open` & `unsafeWindow.open`, click and auxclick guards |
 | **Mock Window Spoofing** | Returns a functional mock window object with dummy methods (`focus`, `close`, `postMessage`, `location`) so ad scripts do not trigger fallback `location.href` assignments. | Synthetic `_createFakeWindow(url)` |
 | **Programmatic Click Interception** | Blocks deceptive JavaScript triggers that invoke `.click()` on hidden external anchor tags. | Wraps `HTMLAnchorElement.prototype.click` and `HTMLElement.prototype.click` |
 | **Location Assign Interception** | Blocks scripts attempting to force-redirect the current page to another domain via `location.assign` or `location.replace`. | API proxy guard on `Location.prototype` |
@@ -64,6 +64,17 @@ Two defenses do not depend on timing:
 1. **Navigation guard**: the Navigation API's `navigate` event fires when any navigation starts, whatever code triggered it, and `preventDefault()` cancels it. The guard cancels navigations that leave the current site or go to a known ad URL, unless they are reloads, back/forward, downloads, form submissions, or (for non-ad URLs) links the user tapped. This matches the module's existing policy, which already blocks external link clicks, external popups and `location.assign`/`replace`; it extends that to `location.href` and `top.location` assignments, which cannot be hooked. Browsers without the Navigation API (before Safari / iOS 26.2) do not get this guard; BESing's debug log shows `nav-guard-on` or `NAV-GUARD-OFF`.
 2. **Trap sweep**: invisible fixed or absolute overlays (opacity `0` or `0.01`) and iframes pointing at ad URLs that are already in the page are removed.
 
+### Same-Site New Tabs (v1.6.0)
+New tabs used to be blocked on every route, including a site's own "open in new tab" links and BESing's own links (PageStream's ↗ on each page divider). A new tab is now allowed when all of these hold:
+
+| Condition | Why |
+| :--- | :--- |
+| The URL is `http(s)` and on the current site (same host or a subdomain either way) | Ad popups go to other sites. |
+| The URL is not an ad or redirect URL (`_isAdOrRedirectUrl`) | Some ad URLs sit on the site's own host. |
+| The user caused it: a trusted click, tap or middle-click on the link, or for `window.open` and `anchor.click()`, an active user gesture (`navigator.userActivation.isActive`) | Pop-unders opened by timers or synthetic clicks have no user gesture. |
+
+Blank popups (`window.open()` with no URL, later pointed at an ad) are still blocked, as are all new tabs to other sites. Where the User Activation API is missing, `window.open` and `anchor.click()` new tabs stay blocked; real link taps are still allowed through the trusted-event check.
+
 ---
 
 ## 4. Standalone Userscript Usage
@@ -72,3 +83,12 @@ To run standalone without the BESing manager:
 1. Install [prevent-redirect.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/prevent-redirect/prevent-redirect.user.js) in Tampermonkey or Violentmonkey.
 2. The script runs at `@run-at document-start` on `*://*/*`.
 3. Inspect blocked redirects in the browser developer console under `[BESing Prevent Redirect] Blocked ...`.
+
+---
+
+## 5. Version History
+
+| Version | Changes |
+| :--- | :--- |
+| 1.6.0 | Same-site new tabs are allowed when the user tapped or clicked. |
+| 1.5.0 | Navigation API guard and existing-trap sweep for late injection; the DOM observer skips the module's own guard script. |

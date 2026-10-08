@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prevent Redirect & Tab Hijack
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.5.0
+// @version      1.6.0
 // @description  Prevents unwanted automatic redirects, mobile touch/sensor traps, popups, and malicious ad network script injections while preserving normal site navigation.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const PreventRedirect = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.5.0',
+    version: '1.6.0',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
     _origOpen: null,
@@ -273,6 +273,19 @@
       return true;
     },
 
+    // A new tab to a page on this site is allowed when the user just tapped or clicked: a real
+    // http(s) URL (blank popups are later pointed at ads), not an ad URL, during a user gesture.
+    // Without the User Activation API there is no way to tell, so the popup stays blocked.
+    _isUserSameSiteTab(url) {
+      if (!url || typeof url !== 'string') return false;
+      let parsed;
+      try { parsed = new URL(url.trim(), window.location.href); } catch (e) { return false; }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+      if (!this._isSameHost(parsed.href) || this._isAdOrRedirectUrl(parsed.href)) return false;
+      const ua = typeof navigator !== 'undefined' ? navigator.userActivation : null;
+      return !!(ua && ua.isActive);
+    },
+
     notifyBlocked(targetUrl, reason) {
       console.warn(`[BESing Prevent Redirect] Blocked ${reason}:`, targetUrl);
       try {
@@ -410,7 +423,7 @@
         const isNewTab = target === '_blank' || target === '_new' || !target;
         const isAd = self._isAdOrRedirectUrl(url);
 
-        if (isExt || isNewTab || isAd) {
+        if ((isExt || isNewTab || isAd) && !self._isUserSameSiteTab(url)) {
           self.notifyBlocked(url || 'about:blank', isAd ? 'ad window.open redirect' : (isExt ? 'external window.open redirect' : 'new tab popup'));
           return self._createFakeWindow(url);
         }
@@ -524,7 +537,7 @@
           const isNewTab = target === '_blank' || target === '_new';
           const isAd = self._isAdOrRedirectUrl(href);
 
-          if (isExt || isNewTab || isAd) {
+          if ((isExt || isNewTab || isAd) && !self._isUserSameSiteTab(href)) {
             self.notifyBlocked(href || '', 'programmatic anchor.click()');
             return true;
           }
@@ -596,8 +609,10 @@
         const isExternal = !self._isSameHost(href);
         const isNewTab = target === '_blank' || target === '_new' || e.ctrlKey || e.metaKey || e.shiftKey;
         const isAd = self._isAdOrRedirectUrl(href);
+        // A real tap on a link to this site may open it in a new tab; synthetic clicks may not.
+        const userSameSiteTab = isNewTab && e.isTrusted && !isExternal && !isAd;
 
-        if (isExternal || isNewTab || isAd) {
+        if ((isExternal || isNewTab || isAd) && !userSameSiteTab) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
@@ -711,7 +726,8 @@
         }
         if (e.button === 1) {
           const link = e.target && e.target.closest ? e.target.closest('a') : null;
-          if (link) {
+          const href = link ? (link.getAttribute('href') || link.href || '') : '';
+          if (link && !(e.isTrusted && self._isSameHost(href) && !self._isAdOrRedirectUrl(href))) {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
@@ -804,10 +820,22 @@
               return f;
             }
 
+            // Same-site new tab during a user gesture is allowed; everything else that opens a window is not.
+            function userSameSiteTab(u) {
+              if (!u || typeof u !== 'string') return false;
+              try {
+                var p = new URL(u.trim(), window.location.href);
+                if (p.protocol !== 'http:' && p.protocol !== 'https:') return false;
+                if (!isSame(p.href) || isAd(p.href)) return false;
+              } catch(e) { return false; }
+              var ua = navigator.userActivation;
+              return !!(ua && ua.isActive);
+            }
+
             // Hook window.open in page context
             var origOpen = window.open;
             window.open = function(url, target, feat) {
-              if (isAd(url) || (url && !isSame(url)) || target === '_blank' || target === '_new' || !target) {
+              if ((isAd(url) || (url && !isSame(url)) || target === '_blank' || target === '_new' || !target) && !userSameSiteTab(url)) {
                 window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script window.open' } }));
                 return fakeWin(url);
               }

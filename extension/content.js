@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.7.6
+ * Version 1.7.7
  */
 
 (function () {
@@ -564,7 +564,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.7.6',
+          v: '1.7.7',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -745,7 +745,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.7.6), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.7.7), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -2063,7 +2063,7 @@
       const mod = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.5.0',
+    version: '1.6.0',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
     _origOpen: null,
@@ -2320,6 +2320,19 @@
       return true;
     },
 
+    // A new tab to a page on this site is allowed when the user just tapped or clicked: a real
+    // http(s) URL (blank popups are later pointed at ads), not an ad URL, during a user gesture.
+    // Without the User Activation API there is no way to tell, so the popup stays blocked.
+    _isUserSameSiteTab(url) {
+      if (!url || typeof url !== 'string') return false;
+      let parsed;
+      try { parsed = new URL(url.trim(), window.location.href); } catch (e) { return false; }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+      if (!this._isSameHost(parsed.href) || this._isAdOrRedirectUrl(parsed.href)) return false;
+      const ua = typeof navigator !== 'undefined' ? navigator.userActivation : null;
+      return !!(ua && ua.isActive);
+    },
+
     notifyBlocked(targetUrl, reason) {
       console.warn(`[BESing Prevent Redirect] Blocked ${reason}:`, targetUrl);
       try {
@@ -2457,7 +2470,7 @@
         const isNewTab = target === '_blank' || target === '_new' || !target;
         const isAd = self._isAdOrRedirectUrl(url);
 
-        if (isExt || isNewTab || isAd) {
+        if ((isExt || isNewTab || isAd) && !self._isUserSameSiteTab(url)) {
           self.notifyBlocked(url || 'about:blank', isAd ? 'ad window.open redirect' : (isExt ? 'external window.open redirect' : 'new tab popup'));
           return self._createFakeWindow(url);
         }
@@ -2571,7 +2584,7 @@
           const isNewTab = target === '_blank' || target === '_new';
           const isAd = self._isAdOrRedirectUrl(href);
 
-          if (isExt || isNewTab || isAd) {
+          if ((isExt || isNewTab || isAd) && !self._isUserSameSiteTab(href)) {
             self.notifyBlocked(href || '', 'programmatic anchor.click()');
             return true;
           }
@@ -2643,8 +2656,10 @@
         const isExternal = !self._isSameHost(href);
         const isNewTab = target === '_blank' || target === '_new' || e.ctrlKey || e.metaKey || e.shiftKey;
         const isAd = self._isAdOrRedirectUrl(href);
+        // A real tap on a link to this site may open it in a new tab; synthetic clicks may not.
+        const userSameSiteTab = isNewTab && e.isTrusted && !isExternal && !isAd;
 
-        if (isExternal || isNewTab || isAd) {
+        if ((isExternal || isNewTab || isAd) && !userSameSiteTab) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
@@ -2758,7 +2773,8 @@
         }
         if (e.button === 1) {
           const link = e.target && e.target.closest ? e.target.closest('a') : null;
-          if (link) {
+          const href = link ? (link.getAttribute('href') || link.href || '') : '';
+          if (link && !(e.isTrusted && self._isSameHost(href) && !self._isAdOrRedirectUrl(href))) {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
@@ -2851,10 +2867,22 @@
               return f;
             }
 
+            // Same-site new tab during a user gesture is allowed; everything else that opens a window is not.
+            function userSameSiteTab(u) {
+              if (!u || typeof u !== 'string') return false;
+              try {
+                var p = new URL(u.trim(), window.location.href);
+                if (p.protocol !== 'http:' && p.protocol !== 'https:') return false;
+                if (!isSame(p.href) || isAd(p.href)) return false;
+              } catch(e) { return false; }
+              var ua = navigator.userActivation;
+              return !!(ua && ua.isActive);
+            }
+
             // Hook window.open in page context
             var origOpen = window.open;
             window.open = function(url, target, feat) {
-              if (isAd(url) || (url && !isSame(url)) || target === '_blank' || target === '_new' || !target) {
+              if ((isAd(url) || (url && !isSame(url)) || target === '_blank' || target === '_new' || !target) && !userSameSiteTab(url)) {
                 window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script window.open' } }));
                 return fakeWin(url);
               }
@@ -3122,7 +3150,7 @@
       const mod = {
     id: 'pagestream',
     name: 'PageStream',
-    version: '1.2.0',
+    version: '1.3.0',
     description: 'Auto-stream infinite pages by automated click or URL fetch splicing. Supports intelligent pagination detection, history sync, and customizable preload.',
     category: 'Productivity',
 
@@ -3153,6 +3181,7 @@
     _isPreloading: false,
     _preloadTimer: null,
     _preloadPromise: null,  // in-flight background preload, awaited by the scroll trigger
+    _recheckTimer: null,    // deferred scroll check after a cooldown or load
     _lastStreamTime: 0,
     _lastFetchTime: 0,
     _minStreamInterval: 2500, // Minimum 2.5s between page loads
@@ -3250,6 +3279,7 @@
       this._matchRule();
       this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
       this._setupNextLink();
+      this._resumeStreamedPages();
       this._setupScrollListener();
       this._setupHistoryObserver();
 
@@ -3257,6 +3287,9 @@
       if (this._config.preloadPages > 0) {
         this._schedulePreload(2500);
       }
+      // A reader already at the bottom (e.g. turning PageStream back on there) cannot scroll further,
+      // so no scroll event would ever arrive.
+      this._scheduleRecheck(1000);
 
       console.log(`[PageStream] Initialized (When: ${this._config.whenToLoad}, Preload: ${this._config.preloadPages}, History: ${this._config.enableHistory})`);
     },
@@ -3268,6 +3301,10 @@
       if (this._preloadTimer) {
         clearTimeout(this._preloadTimer);
         this._preloadTimer = null;
+      }
+      if (this._recheckTimer) {
+        clearTimeout(this._recheckTimer);
+        this._recheckTimer = null;
       }
       if (this._scrollHandler) {
         window.removeEventListener('scroll', this._scrollHandler);
@@ -3281,31 +3318,58 @@
         this._observer.disconnect();
         this._observer = null;
       }
-      if (this._styleEl && this._styleEl.parentNode) {
-        this._styleEl.parentNode.removeChild(this._styleEl);
-        this._styleEl = null;
-      }
-
-      // Remove streamed dividers
-      document.querySelectorAll('.pagestream-divider, .pagestream-streamed-block, .pagestream-continue').forEach(el => {
-        el.remove();
-      });
+      // Pages already streamed stay on screen, together with their dividers, styles and the footer
+      // navigation (which points at the newest page), so turning PageStream off only stops further
+      // loading and the reader keeps their place.
+      const toast = document.getElementById('pagestream-status-toast');
+      if (toast) toast.remove();
 
       this._pageCache = [];
+      this._preloadPromise = null;
       this._loadedUrls.clear();
       this._pushedUrls.clear();
-      console.log('[PageStream] Destroyed');
+      console.log('[PageStream] Destroyed (streamed pages kept)');
+    },
+
+    // Picks up pages streamed before PageStream was turned off, so turning it back on continues
+    // after the newest one instead of streaming page 2 again.
+    _resumeStreamedPages() {
+      const blocks = document.querySelectorAll('.pagestream-streamed-block');
+      if (!blocks.length) return;
+      blocks.forEach(b => {
+        const u = b.getAttribute('data-pagestream-url');
+        if (u) {
+          this._loadedUrls.add(u);
+          this._pushedUrls.add(u);
+        }
+        const n = parseInt(b.getAttribute('data-pagestream-page'), 10);
+        if (n > this._curPageNum) this._curPageNum = n;
+      });
+      const last = blocks[blocks.length - 1];
+      const next = last.getAttribute('data-pagestream-next') || null;
+      this._currentNextUrl = next && !this._loadedUrls.has(next) && this._ruleAllows(next) ? next : null;
+      this._currentNextElement = null;
+      this._hasEnded = !this._currentNextUrl;
+      const cont = document.getElementById('pagestream-continue');
+      if (cont && this._currentNextUrl) cont.remove();
+      console.log(`[PageStream] Resumed after page ${this._curPageNum}; next: ${this._currentNextUrl || 'none'}`);
     },
 
     onConfigChange(newConfig = {}) {
+      const selectorsChanged =
+        (newConfig.customNextSelector || '') !== (this._config.customNextSelector || '') ||
+        (newConfig.customPageSelector || '') !== (this._config.customPageSelector || '');
       this._config = {
         ...this._config,
         ...newConfig,
         preloadPages: newConfig.preloadPages !== undefined ? Number(newConfig.preloadPages) : this._config.preloadPages,
         enableHistory: newConfig.enableHistory !== false
       };
-      // If rule overrides changed, re-detect next link
-      this._setupNextLink();
+      // Re-detect the next link only before anything was streamed; afterwards the newest page's
+      // next link is already known and the live document's link would point back at page 2.
+      if (selectorsChanged && this._curPageNum === 1) {
+        this._setupNextLink();
+      }
       if (this._config.preloadPages > 0 && this._pageCache.length === 0) {
         this._schedulePreload(2000);
       }
@@ -3615,12 +3679,30 @@
       window.addEventListener('scroll', this._scrollHandler, { passive: true });
     },
 
+    // Re-runs the scroll check once a cooldown or load ends. A reader who reaches the bottom during
+    // the cooldown and stops scrolling fires no further scroll events, so the trigger would be lost.
+    _scheduleRecheck(delay) {
+      if (this._recheckTimer || !this._active || this._hasEnded) return;
+      this._recheckTimer = setTimeout(() => {
+        this._recheckTimer = null;
+        this._checkScrollTrigger();
+      }, Math.max(50, delay));
+    },
+
     _checkScrollTrigger() {
-      if (!this._active || this._isLoading || this._hasEnded) return;
+      if (!this._active || this._hasEnded) return;
+      if (this._isLoading) {
+        this._scheduleRecheck(500);
+        return;
+      }
 
       // Rate limit check: do not evaluate trigger if within cooldown period
       const now = Date.now();
-      if (now - this._lastStreamTime < this._minStreamInterval) return;
+      const cooldownLeft = this._minStreamInterval - (now - this._lastStreamTime);
+      if (cooldownLeft > 0) {
+        this._scheduleRecheck(cooldownLeft + 50);
+        return;
+      }
 
       // Circuit breaker check
       if (this._curPageNum >= this._maxPagesPerSession) {
@@ -3901,6 +3983,7 @@
           url,
           title: title.trim(),
           contentNode: document.importNode(mainContent, true),
+          footerNavs: this._extractFooterNavs(doc, mainContent, url),
           nextUrl,
           nextEl
         };
@@ -3915,7 +3998,9 @@
     },
 
     _insertPage(pageData) {
-      const { url, title, contentNode, nextUrl } = pageData;
+      // A fetch that finishes after PageStream was turned off is discarded.
+      if (!this._active) return;
+      const { url, title, contentNode, nextUrl, footerNavs } = pageData;
       const escUrl = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(url) : String(url).replace(/["\\]/g, '\\$&');
       if (document.querySelector(`.pagestream-streamed-block[data-pagestream-url="${escUrl}"]`)) {
         console.log(`[PageStream] Page already on screen, skipped: ${url}`);
@@ -3941,6 +4026,7 @@
       streamedWrapper.setAttribute('data-pagestream-page', pageNum);
       streamedWrapper.setAttribute('data-pagestream-url', url);
       streamedWrapper.setAttribute('data-pagestream-title', title);
+      if (nextUrl) streamedWrapper.setAttribute('data-pagestream-next', nextUrl);
       streamedWrapper.appendChild(contentNode);
 
       // 3. Find insertion target: ALWAYS after the latest streamed block if one exists!
@@ -3962,12 +4048,8 @@
         }
       }
 
-      // 4. Hide / remove original pagination or replace target from previous page
-      if (this._rule && this._rule.replace) {
-        document.querySelectorAll(this._rule.replace).forEach(el => {
-          el.style.display = 'none';
-        });
-      }
+      // 4. Footer navigation (previous / contents / next) follows the newest page
+      this._updateFooterNavs(footerNavs || []);
 
       // 5. Observe divider and content for History pushState (Requirement 1)
       if (this._observer) {
@@ -3976,6 +4058,70 @@
       }
 
       console.log(`[PageStream] Successfully spliced Page ${pageNum}: ${title}`);
+    },
+
+    // The rule's `replace` elements in a fetched page (its footer navigation: previous, contents,
+    // next) that sit inside or after its content, cloned into this document with absolute links.
+    _extractFooterNavs(doc, mainContent, pageUrl) {
+      if (!this._rule || !this._rule.replace || !mainContent) return [];
+      let found;
+      try { found = Array.from(doc.querySelectorAll(this._rule.replace)); } catch (e) { return []; }
+      return found
+        .filter(el => this._isFooterOf(el, mainContent))
+        .map(el => {
+          const clone = document.importNode(el, true);
+          clone.querySelectorAll('script, iframe, object, embed').forEach(n => n.remove());
+          clone.querySelectorAll('a[href]').forEach(a => {
+            const raw = a.getAttribute('href') || '';
+            if (!raw || raw.startsWith('#') || /^javascript:/i.test(raw)) return;
+            try { a.setAttribute('href', new URL(raw, pageUrl).href); } catch (e) {}
+          });
+          return clone;
+        });
+    },
+
+    // True when `el` is inside `main` or comes after it; navigation above the content is not a footer.
+    _isFooterOf(el, main) {
+      if (!el || !main || el === main || el.contains(main)) return false;
+      if (main.contains(el)) return true;
+      return !!(main.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+    },
+
+    // Keeps one footer navigation at the end of the stream, pointing at the newest page. Copies
+    // inside streamed pages are removed, the original footer gets the newest page's links and is
+    // moved below the last streamed page if needed, and navigation above the content is hidden.
+    _updateFooterNavs(footerNavs) {
+      if (!this._rule || !this._rule.replace) return;
+      let live;
+      try { live = Array.from(document.querySelectorAll(this._rule.replace)); } catch (e) { return; }
+      const main = this._findMainContentElement(document);
+      const blocks = document.querySelectorAll('.pagestream-streamed-block');
+      const lastBlock = blocks.length ? blocks[blocks.length - 1] : null;
+      let footerIndex = 0;
+      let moveAfter = document.getElementById('pagestream-continue') || lastBlock;
+      live.forEach(el => {
+        if (el.closest('.pagestream-streamed-block')) {
+          el.remove();
+          return;
+        }
+        if (!main || main === document.body || !this._isFooterOf(el, main)) {
+          el.style.display = 'none';
+          return;
+        }
+        const fresh = footerNavs[footerIndex++];
+        if (!fresh) {
+          // The newest page has no such navigation (often the last page of a book).
+          el.style.display = 'none';
+          return;
+        }
+        el.replaceChildren(...Array.from(fresh.childNodes));
+        el.style.display = '';
+        if (moveAfter && moveAfter.parentNode && !el.contains(lastBlock) &&
+            (el.compareDocumentPosition(lastBlock) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+          moveAfter.parentNode.insertBefore(el, moveAfter.nextSibling);
+          moveAfter = el;
+        }
+      });
     },
 
     _createDivider(pageNum, url, title) {
@@ -5305,7 +5451,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.7.6';
+    static CURRENT_VERSION = '1.7.7';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {

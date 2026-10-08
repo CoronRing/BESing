@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.7.6"
+VERSION = "1.7.7"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
