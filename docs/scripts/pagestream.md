@@ -1,7 +1,7 @@
 # PageStream
 
 **Script Identifier:** `pagestream`  
-**Current Version:** 1.3.0  
+**Current Version:** 1.3.1  
 **Category:** Productivity  
 **Author:** BESing Team  
 **License:** MIT  
@@ -30,7 +30,7 @@ Besides comfort, this reduces full page loads. On iOS, where the userscript mana
 | **History sync** | Pushes each page's URL as you scroll into it; Back/Forward scrolls to that page. |
 | **Rate limiting** | At least 2.5s between streamed pages and 1.5s between fetches, at most 50 pages per session, and streaming stops on HTTP 429, 403 or repeated server errors. |
 | **Graceful stop** | A page with no readable text stops streaming with a message instead of inserting a blank block, and a "Continue reading" link to that page is added. |
-| **Footer navigation** | With a site rule, the site's footer navigation (previous, contents, next) stays at the end of the stream and always points at the newest page (see 3.3). |
+| **Footer navigation** | With a site rule, every page keeps the site's footer navigation (previous, contents, next) right under its text, with that page's own links (see 3.3). |
 | **Turning off keeps your place** | Turning PageStream off only stops further loading. Streamed pages stay on screen, and turning it back on continues after the newest page (see 3.4). |
 
 ### Built-in site rules
@@ -69,19 +69,20 @@ PageStream now resolves such scripts before extracting content:
 2. Only same-origin scripts are fetched (with the user's cookies, as the page itself would).
 3. The script is never executed. PageStream finds the string literals passed to `document.write` / `document.writeln`, decodes their escapes, parses the result as HTML, removes any scripts, iframes, objects and embeds, and puts it in the script's place.
 
-### 3.3 Footer navigation (v1.3.0)
+### 3.3 Footer navigation (v1.3.1)
 
-A site rule's `replace` selector names the site's own page navigation, for example suduguu.com's `.prenext` bar (上一章 / 目录 / 下一页). Only the content container is streamed, so each fetched page's bar is not repeated between pages. Instead there is one bar, at the end of the stream, for the page you reached last:
+A site rule's `replace` selector names the site's own page navigation, for example suduguu.com's `.prenext` bar (上一页 / 目录 / 下一页). Every page keeps its own bar directly under its text:
 
-1. From each fetched page, the `replace` elements inside or after its content are cloned, with scripts removed and links made absolute.
-2. The live page's matching bar below the content gets the newest page's links and is moved below the last streamed page if it is not already there. Copies inside streamed content are removed. Navigation above the content is hidden, since it would point at page 1.
-3. If the newest page has no such bar (often the last page of a book), the live bar is hidden.
+1. Page 1's bar stays where the site put it; the first streamed page is inserted after it rather than between page 1's text and its bar.
+2. From each fetched page, the `replace` elements that follow its content are cloned (scripts removed, links made absolute) and appended to that page's streamed block, under its text. Navigation inside the content is already part of the streamed content.
+
+A single bar at the end of the stream does not work: with streaming on, the next page loads before the reader reaches the end, so that bar is always pushed out of reach.
 
 Without a site rule, the site's pagination is left untouched.
 
 ### 3.4 Turning PageStream off and on (v1.3.0)
 
-Turning PageStream off (or disabling it for the site) stops scrolling triggers, preloads and history sync. Streamed pages, their dividers, any Continue link and the footer navigation stay, so the reader keeps their place and the footer's next link still works. A fetch that finishes after PageStream was turned off is discarded.
+Turning PageStream off (or disabling it for the site) stops scrolling triggers, preloads and history sync. Streamed pages (with their footer navigation), their dividers and any Continue link stay, so the reader keeps their place and the last page's next link still works. A fetch that finishes after PageStream was turned off is discarded.
 
 Each streamed page records its next page's URL (`data-pagestream-next`). When PageStream is turned on again in the same page view, it reads the streamed pages already on screen and continues after the newest one.
 
@@ -100,6 +101,7 @@ Each streamed page records its next page's URL (`data-pagestream-next`). When Pa
 
 | Version | Changes |
 | :--- | :--- |
+| 1.3.1 | Every page keeps its own footer navigation under its text; a single bar at the end of the stream was always pushed out of reach by the next page. |
 | 1.3.0 | Turning off keeps streamed pages and turning on resumes after them; the site's footer navigation stays at the end of the stream, pointing at the newest page; settings changes no longer reset the next link to page 2; a scroll check skipped during the cooldown or a load is re-run, so stopping at the bottom no longer stalls streaming. |
 | 1.2.0 | Script-written content recovery, suduguu.com rule, page 1 container reused on fetched pages, no whole-body splicing, empty-page stop with Continue link, duplicate-page race fix, insert-time page numbering, rule URL check on next links. |
 | 1.1.0 | Page-boundary progress, rate limiting, HTTP 429/403 protection, chronological insertion. |

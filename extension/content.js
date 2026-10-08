@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.7.7
+ * Version 1.7.8
  */
 
 (function () {
@@ -564,7 +564,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.7.7',
+          v: '1.7.8',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -745,7 +745,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.7.7), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.7.8), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -3150,7 +3150,7 @@
       const mod = {
     id: 'pagestream',
     name: 'PageStream',
-    version: '1.3.0',
+    version: '1.3.1',
     description: 'Auto-stream infinite pages by automated click or URL fetch splicing. Supports intelligent pagination detection, history sync, and customizable preload.',
     category: 'Productivity',
 
@@ -4028,6 +4028,8 @@
       streamedWrapper.setAttribute('data-pagestream-title', title);
       if (nextUrl) streamedWrapper.setAttribute('data-pagestream-next', nextUrl);
       streamedWrapper.appendChild(contentNode);
+      // The page's own footer navigation (previous / contents / next) sits right under its text.
+      (footerNavs || []).forEach(nav => streamedWrapper.appendChild(nav));
 
       // 3. Find insertion target: ALWAYS after the latest streamed block if one exists!
       const existingBlocks = document.querySelectorAll('.pagestream-streamed-block');
@@ -4039,19 +4041,17 @@
       } else {
         const currentMain = this._findMainContentElement(document);
         if (currentMain && currentMain.parentNode) {
-          // Insert after main content container
-          currentMain.parentNode.insertBefore(divider, currentMain.nextSibling);
-          currentMain.parentNode.insertBefore(streamedWrapper, divider.nextSibling);
+          // Insert after page 1's content and its footer navigation, so that bar stays with page 1
+          const anchor = this._lastFooterSibling(currentMain);
+          anchor.parentNode.insertBefore(divider, anchor.nextSibling);
+          anchor.parentNode.insertBefore(streamedWrapper, divider.nextSibling);
         } else {
           document.body.appendChild(divider);
           document.body.appendChild(streamedWrapper);
         }
       }
 
-      // 4. Footer navigation (previous / contents / next) follows the newest page
-      this._updateFooterNavs(footerNavs || []);
-
-      // 5. Observe divider and content for History pushState (Requirement 1)
+      // 4. Observe divider and content for History pushState (Requirement 1)
       if (this._observer) {
         this._observer.observe(divider);
         this._observer.observe(streamedWrapper);
@@ -4060,14 +4060,15 @@
       console.log(`[PageStream] Successfully spliced Page ${pageNum}: ${title}`);
     },
 
-    // The rule's `replace` elements in a fetched page (its footer navigation: previous, contents,
-    // next) that sit inside or after its content, cloned into this document with absolute links.
+    // The rule's `replace` elements that follow a fetched page's content (its footer navigation:
+    // previous, contents, next), cloned into this document with scripts removed and absolute links.
+    // Navigation inside the content is already part of the streamed content.
     _extractFooterNavs(doc, mainContent, pageUrl) {
       if (!this._rule || !this._rule.replace || !mainContent) return [];
       let found;
       try { found = Array.from(doc.querySelectorAll(this._rule.replace)); } catch (e) { return []; }
       return found
-        .filter(el => this._isFooterOf(el, mainContent))
+        .filter(el => this._follows(el, mainContent))
         .map(el => {
           const clone = document.importNode(el, true);
           clone.querySelectorAll('script, iframe, object, embed').forEach(n => n.remove());
@@ -4076,52 +4077,31 @@
             if (!raw || raw.startsWith('#') || /^javascript:/i.test(raw)) return;
             try { a.setAttribute('href', new URL(raw, pageUrl).href); } catch (e) {}
           });
+          clone.style.display = '';
           return clone;
         });
     },
 
-    // True when `el` is inside `main` or comes after it; navigation above the content is not a footer.
-    _isFooterOf(el, main) {
-      if (!el || !main || el === main || el.contains(main)) return false;
-      if (main.contains(el)) return true;
+    // True when `el` comes after `main` in the document and is not inside or around it.
+    _follows(el, main) {
+      if (!el || !main || el === main || el.contains(main) || main.contains(el)) return false;
       return !!(main.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
     },
 
-    // Keeps one footer navigation at the end of the stream, pointing at the newest page. Copies
-    // inside streamed pages are removed, the original footer gets the newest page's links and is
-    // moved below the last streamed page if needed, and navigation above the content is hidden.
-    _updateFooterNavs(footerNavs) {
-      if (!this._rule || !this._rule.replace) return;
+    // The last of page 1's footer navigation elements that directly follow its content as siblings,
+    // or the content itself. Streamed pages are inserted after it.
+    _lastFooterSibling(main) {
+      let anchor = main;
+      if (!this._rule || !this._rule.replace) return anchor;
       let live;
-      try { live = Array.from(document.querySelectorAll(this._rule.replace)); } catch (e) { return; }
-      const main = this._findMainContentElement(document);
-      const blocks = document.querySelectorAll('.pagestream-streamed-block');
-      const lastBlock = blocks.length ? blocks[blocks.length - 1] : null;
-      let footerIndex = 0;
-      let moveAfter = document.getElementById('pagestream-continue') || lastBlock;
+      try { live = Array.from(document.querySelectorAll(this._rule.replace)); } catch (e) { return anchor; }
       live.forEach(el => {
-        if (el.closest('.pagestream-streamed-block')) {
-          el.remove();
-          return;
-        }
-        if (!main || main === document.body || !this._isFooterOf(el, main)) {
-          el.style.display = 'none';
-          return;
-        }
-        const fresh = footerNavs[footerIndex++];
-        if (!fresh) {
-          // The newest page has no such navigation (often the last page of a book).
-          el.style.display = 'none';
-          return;
-        }
-        el.replaceChildren(...Array.from(fresh.childNodes));
-        el.style.display = '';
-        if (moveAfter && moveAfter.parentNode && !el.contains(lastBlock) &&
-            (el.compareDocumentPosition(lastBlock) & Node.DOCUMENT_POSITION_FOLLOWING)) {
-          moveAfter.parentNode.insertBefore(el, moveAfter.nextSibling);
-          moveAfter = el;
+        if (el.parentNode === main.parentNode && !el.closest('.pagestream-streamed-block') &&
+            (anchor.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+          anchor = el;
         }
       });
+      return anchor;
     },
 
     _createDivider(pageNum, url, title) {
@@ -5451,7 +5431,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.7.7';
+    static CURRENT_VERSION = '1.7.8';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {

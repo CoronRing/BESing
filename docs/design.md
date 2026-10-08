@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.7.7  
+**Version:** 1.7.8  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -462,3 +462,8 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **PageStream Stall at the Bottom**: A scroll check inside the 2.5s stream cooldown (or during a load) returned without retrying. A reader who reached the bottom in that window and stopped got no further scroll events (at the very bottom, scrolling does not fire one), so the next page never loaded until they scrolled back up and down. Skipped checks now re-run once the cooldown or load ends (`_scheduleRecheck`), and one check runs a second after `init()`.
 - **Prevent Redirect 1.6.0, Same-Site New Tabs**: New tabs were blocked on every route, including same-site "open in new tab" links and PageStream's own ↗ divider link. A same-site, non-ad `http(s)` new tab is now allowed when the user caused it: a trusted click, tap or middle-click, or an active user gesture (`navigator.userActivation.isActive`) for `window.open` and `anchor.click()`, in both the module and the page-world guard. Blank popups and other sites stay blocked. Details in `docs/scripts/prevent-redirect.md`, "Same-Site New Tabs".
 - **Verification**: Playwright in Edge. On a live suduguu.com chapter, pages 2–4 streamed with the `.prenext` bar below the last one, carrying page 4's links (上一页 / 目录 / 下一章); turning PageStream off kept all pages and the scroll position and loaded nothing more; turning it on resumed with page 5 (the next chapter) and page 6, numbered in order with no duplicates. For Prevent Redirect, a tapped same-site `target=_blank` link and a same-site `window.open` from a button opened tabs, while external links, external and blank `window.open`, an ad-pattern URL, a gesture-less `window.open` and a synthetic `click()` were all blocked.
+
+### 7.33 PageStream Per-Page Footer Navigation (v1.7.8)
+- **Problem**: In 7.32 the footer bar followed the newest page at the end of the stream. With streaming on, the next page is inserted before the reader reaches the end (at 90% of the newest page with preload), so the bar was always pushed below the next page and never seen.
+- **PageStream 1.3.1**: Every page keeps its own bar under its text. Page 1's bar stays in place and the first streamed page goes after it (`_lastFooterSibling`); each streamed block appends the fetched page's `replace` elements that follow its content (`_extractFooterNavs`, scripts removed, links absolute). Details in `docs/scripts/pagestream.md` 3.3.
+- **Verification**: Playwright in Edge with the full Packed bundle (all modules on, iPad viewport and user agent, When to Load at Bottom) on a live suduguu.com chapter: page 1's bar (上一章 / 目录 / 下一页) sat directly above page 2's divider, and pages 2 and 3 each ended with their own bar linking to their neighbours; screenshot checked.

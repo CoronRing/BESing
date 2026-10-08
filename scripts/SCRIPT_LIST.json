@@ -98,7 +98,7 @@
   {
     "id": "pagestream",
     "name": "PageStream",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "description": "Continuous page streaming via smart pagination detection and automated clicks for infinite scrolling.",
     "category": "Productivity",
     "author": "BESing Team",
