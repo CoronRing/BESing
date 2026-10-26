@@ -44,7 +44,7 @@ https://raw.githubusercontent.com/CoronRing/BESing/master/userscript/besing-mana
   - 📖 **Reading Assistant**: Word counter, reading duration, heading outline.
   - 🌙 **Night Comfort Dimmer**: Gentle screen tinting and brightness filter.
   - 🔗 **Markdown Link Copier**: Instant `Alt + C` title & URL copier.
-  - 🛡️ **Ad & Banner Cleaner**: Hides floating overlays and newsletter popups.
+  - 🛡️ **Ad Cleaner & Element Zapper**: Aggressive cleaner with a 0 to 4 level (default 3.4) that hides popups, floating and sticky bars, ads and everything around the main content, plus a tap-to-hide Zapper.
   - 🎨 **Color Change**: Dynamic visual background confirmation.
   - 💬 **Grok Exporter**: Copy or download the full Grok conversation as plain text or Markdown, even the parts Grok has not rendered.
 - **Modular Sub-Scripts Catalog**: Every tool lives as a standalone userscript in `scripts/<id>/<id>.user.js` and can run independently or bundled.

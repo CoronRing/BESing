@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.8.0  
+**Version:** 1.9.0  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -490,4 +490,23 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
   - Settings lock: survived every mode change and override removal, and Global discarded it.
   - Detail page: four buttons, lock and strict controls saved to the site only and applied live.
   - Unpacked extension in Chromium: the MAIN-world guard answered `on`, a page-script `window.open` popup was blocked (the 1.7.8 extension let it open a tab), and `SITE OFF` left the guard off.
+  - Not yet verified on iOS (Stay) or with Tampermonkey's own injection.
+
+### 7.35 Ad Cleaner 2.0: Aggressiveness Levels, Isolated Zapper & Per-Site Zaps (v1.9.0)
+- **Problem**: Ad Cleaner 1.3 did little on its own and failed in three ways. On some sites the Zapper clicked the ad: it relied on capture listeners on `window`, which never see taps on cross-origin ad frames and run after page listeners registered earlier. On some sites removal did not work: its `<style>` element is blocked by a strict `style-src` CSP and loses to inline `display: block !important`, and its generic rules matched only a handful of class names. And zaps were saved to the script's global settings unless the site was locked, so a fallback selector such as `div > div:nth-child(3)` zapped on one site applied on every site.
+- **Approach**: find the main content first, then hide what is not content, instead of matching a list of known ads. Popups, fixed and sticky bars, scroll followers, third-party frames, image ads, widgets and sidebars are judged by position, size, links and names relative to the main content. Details in `docs/scripts/ad-cleaner.md`.
+- **Aggressiveness** (`level`, 0 to 4 in steps of 0.1, default 3.4): each rule has a threshold, so higher levels include everything below them. 3.4 hides every fixed and sticky element, third-party frames, image ads, widgets and sidebars. 4 keeps only the main content and page links, without media. Below 3.5, fixed elements that appear right after the user presses a control are kept. The level is a normal script setting, so it can be locked per site.
+- **Hiding**: inline `!important` styles re-asserted by a `MutationObserver`, plus a constructed stylesheet (`adoptedStyleSheets`) that CSP does not block. Hidden ads have their media paused and off-site frames blanked. Wrappers left empty by a hidden ad collapse. Nothing is removed from the DOM, and lowering the level restores everything live.
+- **Zapper**: a transparent same-origin `<iframe>` over the page (top layer via popover where supported) receives every tap, so the page and its ad frames get none. It has Undo and Bigger (replace the pick with its parent) and scrolls the page on wheel and touch drag. Picks expand to a whole fixed or sticky bar, or to the outermost wrapper with the same box. Selectors skip generated class names and are checked to match only the picked element.
+- **Per-site zaps**: `zapped: { host: [selectors] }`. Old `blockedSelectors` lists still apply and are listed as `[all sites]` so they can be removed.
+- **Manager**: the detail page replaces the Auto-Clean switch with the Aggressiveness slider, a live status line (hidden count by reason, released sticky elements, detected main content) and the per-site zap list with both kinds of entries. The module's `describeLevel`, `getZapLists` and `getStats` feed the page. The debug log check line reports `ad L<level> <adopted|style|NO-SHEET> hidden=N(reasons) static=N main=... scans=N/ms` instead of only the `<style>` element's presence.
+- **Standalone script**: now `@run-at document-start`, top frame only, with settings in the site's `localStorage` (`besing-ad-cleaner`).
+- **Verification**: Playwright in Edge with the bundle loaded at document-start through a synchronous `GM_*` shim, on local test pages where `127.0.0.1` and `localhost` are different sites. 311 checks passed:
+  - Twelve levels from 0 to 4, each against 20 test elements (overlay, known ad, fixed bottom bar re-asserting `display: block !important` every 300 ms, a re-injected ad, a scroll follower, in-article and sidebar third-party frames, an "Advertisement" block, an off-site image link, related and newsletter widgets, sidebar, comments, footer, sticky header and sidebar, pager links, the article and its title). Scroll unlock, sticky release and no images at level 4 were checked too.
+  - A user-opened fixed menu was kept at 3.4 and hidden at 3.6.
+  - Zapper with mouse: the ad frame and the page received no click or pointer event, the frame was hidden, the selector was saved under this host only, Bigger, Undo and Escape worked, and the zap survived a reload without hiding the other ad slot. Zapper with touch emulation: the tapped bottom bar was hidden, the page got no tap, and the bar stayed hidden while its script re-asserted its style.
+  - A page served with `style-src 'self'` used the constructed sheet and hid its banner and ad.
+  - A scan of a page with about 16,000 elements took about 70 ms.
+  - Live level changes restored and re-hid elements, and the detail page's slider, status line and zap restore worked.
+  - Real sites at 3.4, desktop and mobile viewports: Wikipedia kept all its article text and lost only the fundraising banner and footer badges, and BBC News kept 99 to 100% of its text with 10 ad slots and 3 ad frames hidden. Several other sites served the headless browser a bot check, so they could not be judged.
   - Not yet verified on iOS (Stay) or with Tampermonkey's own injection.

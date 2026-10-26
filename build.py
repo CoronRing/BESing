@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -803,8 +803,8 @@ def build():
         const running = (app.modules || []).filter(m => m.running).map(m => m.id);
         parts.push(`running[${{running.join(',')}}]`);
         if (running.includes('ad-cleaner')) {{
-          const s = document.getElementById('besing-ad-cleaner-style');
-          parts.push(s && s.isConnected ? 'ad-style-ok' : 'AD-STYLE-MISSING');
+          const ac = (app.modules || []).find(m => m.id === 'ad-cleaner');
+          if (ac && typeof ac.debugStatus === 'function') parts.push(ac.debugStatus());
         }}
         if (running.includes('prevent-redirect')) {{
           const pr = (app.modules || []).find(m => m.id === 'prevent-redirect');
@@ -3335,30 +3335,58 @@ def build():
           </div>
         `;
       }} else if (m.id === 'ad-cleaner') {{
-        const enableAutoClean = cfg.enableAutoClean !== false;
-        const blockedSelectors = Array.isArray(cfg.blockedSelectors) ? cfg.blockedSelectors : [];
+        const level = typeof m._readLevel === 'function' ? m._readLevel(cfg) : 3.4;
+        const levelInfo = typeof m.describeLevel === 'function' ? m.describeLevel(level) : {{ name: '', detail: '' }};
+        const zapLists = typeof m.getZapLists === 'function' ? m.getZapLists(cfg) : {{ site: [], legacy: [] }};
+        const stats = m.running && typeof m.getStats === 'function' ? m.getStats() : null;
+        const escAttr = (v) => String(v).replace(/[&<>"']/g, c => ({{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }}[c]));
+        const zapRows = [
+          ...zapLists.site.map((sel, idx) => ({{ sel, kind: 'site', idx }})),
+          ...zapLists.legacy.map((sel, idx) => ({{ sel, kind: 'legacy', idx }}))
+        ];
         let blockedListHtml = '';
-        if (blockedSelectors.length === 0) {{
-          blockedListHtml = `<div class="besing-zapped-empty">No custom elements zapped on this site yet.</div>`;
+        if (zapRows.length === 0) {{
+          blockedListHtml = `<div class="besing-zapped-empty">No elements zapped on this site yet.</div>`;
         }} else {{
-          blockedListHtml = blockedSelectors.map((sel, idx) => `
+          blockedListHtml = zapRows.map(row => `
             <div class="besing-zapped-item">
-              <code class="besing-zapped-selector" title="${{sel}}">${{sel}}</code>
-              <button type="button" class="besing-btn-restore-zapped" data-index="${{idx}}" title="Restore (unblock) this element">✕</button>
+              <code class="besing-zapped-selector" title="${{escAttr(row.sel)}}">${{row.kind === 'legacy' ? '[all sites] ' : ''}}${{escAttr(row.sel)}}</code>
+              <button type="button" class="besing-btn-restore-zapped" data-kind="${{row.kind}}" data-index="${{row.idx}}" title="Show this element again">✕</button>
             </div>
           `).join('');
         }}
+        let statsText = 'Not running on this page.';
+        if (stats) {{
+          const reasons = Object.entries(stats.byReason).map(([k, v]) => `${{k}} ${{v}}`).join(', ');
+          statsText = `Hidden on this page: ${{stats.hidden}}${{reasons ? ` (${{reasons}})` : ''}}. Unstuck: ${{stats.statics}}. Main content: ${{stats.main}}.`;
+        }}
 
         specificControls = `
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Aggressiveness</span>
+              <span class="besing-brightness-badge" id="ac-level-badge">${{level.toFixed(1)}} · ${{escAttr(levelInfo.name)}}</span>
+            </div>
+            <input type="range" class="besing-slider-range ac-level-range" id="ac-level-range" min="0" max="4" step="0.1" value="${{level}}">
+            <div class="besing-range-ticks">
+              <span>0 Zaps only</span>
+              <span>2 Third-party</span>
+              <span>3.4 Default</span>
+              <span>4 Text only</span>
+            </div>
+            <p id="ac-level-detail" style="font-size:11px;color:#cbd5e1;line-height:1.4;margin:6px 0 0;">${{escAttr(levelInfo.detail)}} Higher levels include everything below them.</p>
+            <p id="ac-stats" style="font-size:10px;color:#94a3b8;line-height:1.35;margin:6px 0 0;">${{escAttr(statsText)}}</p>
+          </div>
+
           <div class="besing-config-section besing-zapper-hero-section">
             <div style="display:flex;align-items:center;justify-content:space-between;">
               <span style="font-size:12px;font-weight:700;color:#f87171;display:flex;align-items:center;gap:6px;">
-                <span>🎯</span> Interactive Element Zapper
+                <span>🎯</span> Element Zapper
               </span>
               <span class="besing-shortcut-badge" title="Global Shortcut: Press Alt + Z anywhere on the webpage">Alt + Z</span>
             </div>
             <p style="font-size:11px;color:#cbd5e1;line-height:1.4;margin:0;">
-              Point and click on any annoying element, banner, or floating sidebar right on this webpage to zap and hide it permanently.
+              Tap or click anything the cleaner missed to hide it on this site. The page cannot receive your taps while the Zapper is open, so ads cannot open. Use Undo or Bigger to fix a pick.
             </p>
             <button type="button" class="besing-btn-zapper-launch" id="btn-launch-zapper">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
@@ -3367,22 +3395,9 @@ def build():
           </div>
 
           <div class="besing-config-section">
-            <div class="besing-toggle-row">
-              <div>
-                <div class="besing-toggle-title">Auto-Clean Cookie & Popup Overlays</div>
-                <div class="besing-toggle-desc">Automatically blocks generic consent banners, modals, and newsletter overlays</div>
-              </div>
-              <label class="besing-switch besing-switch-sm">
-                <input type="checkbox" id="chk-auto-clean" ${{enableAutoClean ? 'checked' : ''}}>
-                <span class="besing-slider"></span>
-              </label>
-            </div>
-          </div>
-
-          <div class="besing-config-section">
             <div class="besing-section-header-row" style="margin-bottom:6px;">
-              <span style="font-size:11px;font-weight:700;color:#cbd5e1;">Zapped Elements on this Website (${{blockedSelectors.length}})</span>
-              ${{blockedSelectors.length > 0 ? '<button type="button" class="besing-btn-sub-action" id="btn-clear-zapped" style="color:#f87171;">Clear All</button>' : ''}}
+              <span style="font-size:11px;font-weight:700;color:#cbd5e1;">Zapped on this Website (${{zapRows.length}})</span>
+              ${{zapRows.length > 0 ? '<button type="button" class="besing-btn-sub-action" id="btn-clear-zapped" style="color:#f87171;">Clear All</button>' : ''}}
             </div>
             <div class="besing-zapped-list">
               ${{blockedListHtml}}
@@ -3921,35 +3936,56 @@ def build():
         if (chkContext) chkContext.onchange = saveForceCopy;
       }} else if (m.id === 'ad-cleaner') {{
         const btnLaunch = body.querySelector('#btn-launch-zapper');
-        const chkAutoClean = body.querySelector('#chk-auto-clean');
+        const levelRange = body.querySelector('#ac-level-range');
+        const levelBadge = body.querySelector('#ac-level-badge');
+        const levelDetail = body.querySelector('#ac-level-detail');
+        const statsEl = body.querySelector('#ac-stats');
         const btnClearAll = body.querySelector('#btn-clear-zapped');
+        const currentHost = this.storage.getCurrentHost();
+        const readCfg = () => this.storage.getScriptConfig(m.id, currentHost);
+
+        const refreshStats = () => {{
+          if (!statsEl || !m.running || typeof m.getStats !== 'function') return;
+          const st = m.getStats();
+          const reasons = Object.entries(st.byReason).map(([k, v]) => `${{k}} ${{v}}`).join(', ');
+          statsEl.textContent = `Hidden on this page: ${{st.hidden}}${{reasons ? ` (${{reasons}})` : ''}}. Unstuck: ${{st.statics}}. Main content: ${{st.main}}.`;
+        }};
+
+        if (levelRange) {{
+          const showLevel = (v) => {{
+            const info = typeof m.describeLevel === 'function' ? m.describeLevel(v) : {{ name: '', detail: '' }};
+            if (levelBadge) levelBadge.textContent = `${{Number(v).toFixed(1)}} · ${{info.name}}`;
+            if (levelDetail) levelDetail.textContent = `${{info.detail}} Higher levels include everything below them.`;
+          }};
+          levelRange.oninput = (e) => showLevel(e.target.value);
+          levelRange.onchange = async (e) => {{
+            showLevel(e.target.value);
+            await this.applyScriptConfig(m.id, {{ level: Number(e.target.value) }});
+            setTimeout(refreshStats, 900);
+          }};
+        }}
 
         if (btnLaunch) {{
           btnLaunch.onclick = () => {{
             this.closeModal();
-            const currentHost = this.storage.getCurrentHost();
-            const currentCfg = this.storage.getScriptConfig(m.id, currentHost);
             if (typeof m.init === 'function' && !m.running) {{
-              m.init(currentCfg);
+              m.init(readCfg());
               m.running = true;
             }}
             if (typeof m.startZapper === 'function') {{
-              m.startZapper(async (sel, currentList) => {{
-                await this.applyScriptConfig(m.id, {{ blockedSelectors: currentList }});
+              m.startZapper(async (patch) => {{
+                await this.applyScriptConfig(m.id, patch);
               }});
             }}
           }};
         }}
 
-        if (chkAutoClean) {{
-          chkAutoClean.onchange = async () => {{
-            await this.applyScriptConfig(m.id, {{ enableAutoClean: chkAutoClean.checked }});
-          }};
-        }}
-
         if (btnClearAll) {{
           btnClearAll.onclick = async () => {{
-            await this.applyScriptConfig(m.id, {{ blockedSelectors: [] }});
+            const cfgNow = readCfg();
+            const zapped = {{ ...(cfgNow.zapped || {{}}) }};
+            delete zapped[currentHost];
+            await this.applyScriptConfig(m.id, {{ zapped, blockedSelectors: [] }});
             this.renderBody();
           }};
         }}
@@ -3958,14 +3994,22 @@ def build():
           btn.onclick = async (e) => {{
             e.stopPropagation();
             const idx = Number(btn.getAttribute('data-index'));
-            const currentHost = this.storage.getCurrentHost();
-            const currentCfg = this.storage.getScriptConfig(m.id, currentHost);
-            const list = Array.isArray(currentCfg.blockedSelectors) ? [...currentCfg.blockedSelectors] : [];
-            if (idx >= 0 && idx < list.length) {{
+            const cfgNow = readCfg();
+            if (btn.getAttribute('data-kind') === 'legacy') {{
+              const list = Array.isArray(cfgNow.blockedSelectors) ? [...cfgNow.blockedSelectors] : [];
+              if (idx < 0 || idx >= list.length) return;
               list.splice(idx, 1);
               await this.applyScriptConfig(m.id, {{ blockedSelectors: list }});
-              this.renderBody();
+            }} else {{
+              const zapped = {{ ...(cfgNow.zapped || {{}}) }};
+              const list = Array.isArray(zapped[currentHost]) ? [...zapped[currentHost]] : [];
+              if (idx < 0 || idx >= list.length) return;
+              list.splice(idx, 1);
+              if (list.length) zapped[currentHost] = list;
+              else delete zapped[currentHost];
+              await this.applyScriptConfig(m.id, {{ zapped }});
             }}
+            this.renderBody();
           }};
         }});
       }} else if (m.id === 'pagestream') {{
@@ -4423,6 +4467,7 @@ def build():
         .besing-stepper-btn:hover {{ background: rgba(99, 102, 241, 0.3); border-color: #818cf8; }}
         .besing-slider-range {{ flex: 1; accent-color: #38bdf8; cursor: pointer; height: 6px; border-radius: 3px; }}
         .besing-slider-range.brightness-range {{ accent-color: #a78bfa; }}
+        .besing-slider-range.ac-level-range {{ accent-color: #ef4444; }}
         .besing-preset-row {{ display: flex; flex-wrap: wrap; gap: 6px; }}
         .besing-zoom-pill {{ background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); color: #cbd5e1; font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease; }}
         .besing-zoom-pill:hover {{ background: rgba(255, 255, 255, 0.08); color: #fff; }}
