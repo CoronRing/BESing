@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.9.0  
+**Version:** 1.9.1  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -510,3 +510,14 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
   - Live level changes restored and re-hid elements, and the detail page's slider, status line and zap restore worked.
   - Real sites at 3.4, desktop and mobile viewports: Wikipedia kept all its article text and lost only the fundraising banner and footer badges, and BBC News kept 99 to 100% of its text with 10 ad slots and 3 ad frames hidden. Several other sites served the headless browser a bot check, so they could not be judged.
   - Not yet verified on iOS (Stay) or with Tampermonkey's own injection.
+
+### 7.36 Ad Cleaner 2.1: Cloaking & Before-Paint Hiding (v1.9.1)
+- **Problem**: on some sites hidden ads kept flashing. Two causes: a re-inserted or replaced ad stayed visible until the next full scan (120 to 400 ms later), and hiding with `display: none` or blanking the ad frame told the ad script its slot failed, so it re-inserted or reloaded the ad and started the loop again.
+- **Cloaking**: ads, popups and fixed or floating elements are moved far off screen (`position: absolute; left/top: -99999px`), made transparent and unclickable instead of removed from layout. They keep a size and an `offsetParent`, so the ad script's own checks find a rendered slot, and refresh-when-visible never fires because the slot is never on screen. Frames are no longer blanked; media inside is muted and paused. Page structure (sidebars, widgets, comments, Main Content Only, emptied wrappers, level 4 media) still uses `display: none`. The stylesheet cloaks zapped and known ad selectors on insertion. Wrapper collapsing now ignores text and media inside hidden elements, since cloaked elements are still rendered.
+- **Before-paint pass**: the `MutationObserver` callback, which runs before the browser paints, now runs the per-element rules on added elements and on elements whose `class`, `style`, `id`, `src` or `open` changed (budget 400 elements, 60 under an attribute change). The scan was split into `_classify` (per-element rules), `_matchSelectors` (zap, known ad and consent selectors, joined into one selector per list), `_applyCtx` (writes) and `_isolateCheck`, so both passes share the same rules.
+- **Verification**: the 311 checks of 7.35 plus 24 more, 335 in all, passed in Edge:
+  - A test page replaces an ad with a fresh node every 400 ms, replaces another whenever it looks hidden (`offsetHeight === 0`, no `offsetParent` or `display: none`), and pins a bar with a class switch every 500 ms. A per-frame probe counted 0 frames on screen for all three at levels 2 and 3.4, and the ad-block check never fired. The v1.9.0 bundle on the same page showed the ads in 232 and 473 frames and re-inserted 23 times in about 4.5 s.
+  - All level checks now treat a cloaked element (transparent or far off screen) as hidden.
+  - A 16,000-element page loaded 0.15 s slower with Ad Cleaner at 3.4 than without BESing, and a full scan took about 70 ms.
+  - Wikipedia, BBC News and the Guardian at 3.4 kept their article text, gained no horizontal scrolling and no new page errors.
+  - Not yet verified on iOS (Stay).

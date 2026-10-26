@@ -74,7 +74,7 @@
   {
     "id": "ad-cleaner",
     "name": "Ad Cleaner & Element Zapper",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "description": "Aggressive cleaner with a 0 to 4 level (default 3.4): hides popups, floating and sticky bars, ads, third-party frames and everything around the main content, plus a tap-to-hide Element Zapper.",
     "category": "Privacy",
     "author": "BESing Team",

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ad Cleaner & Element Zapper
 // @namespace    https://github.com/CoronRing/BESing
-// @version      2.0.0
+// @version      2.1.0
 // @description  Aggressive page cleaner: finds the main content and hides popups, floating and sticky bars, ads, third-party frames and side widgets around it. Includes a tap-to-hide Element Zapper.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const AdCleaner = {
     id: 'ad-cleaner',
     name: 'Ad Cleaner & Element Zapper',
-    version: '2.0.0',
+    version: '2.1.0',
     description: 'Aggressive page cleaner with a 0 to 4 aggressiveness level: hides popups, floating and sticky bars, ads, third-party frames and everything around the main content. Includes a tap-to-hide Element Zapper.',
     category: 'Privacy',
 
@@ -52,6 +52,16 @@
     ],
     // Hide reasons that mean "this was an ad", whose emptied wrappers are collapsed too.
     AD_REASONS: ['zap', 'known-ad', 'iframe', 'ad-class', 'ad-size', 'image-link', 'ad-label'],
+    // Hide reasons for page structure rather than ads or popups; these use display: none. Every other reason cloaks.
+    LAYOUT_REASONS: ['sidebar', 'widget', 'comments', 'isolate', 'ad-shell', 'media'],
+    // Ads and popups are cloaked instead of removed: moved far off screen, transparent and unclickable, but still
+    // laid out with a size. An ad script that checks whether its slot rendered finds that it did, so it does not
+    // re-insert or reload the ad, and a slot that is never on screen never triggers refresh-when-visible.
+    CLOAK_STYLE: [['position', 'absolute'], ['left', '-99999px'], ['top', '-99999px'], ['right', 'auto'], ['bottom', 'auto'],
+      ['opacity', '0'], ['pointer-events', 'none'], ['transition', 'none']],
+    // Elements examined per MutationObserver callback before the rest is left to the next full scan.
+    SYNC_BUDGET: 400,
+    SYNC_ATTRIBUTE_BUDGET: 60,
     // Below this level, a fixed element that appears right after you press a button or menu is kept.
     USER_POPUP_GRACE_BELOW: 3.5,
     USER_POPUP_GRACE_MS: 1500,
@@ -134,6 +144,8 @@
     _main: null,
     _mainAt: 0,
     _mainState: '',
+    _protect: null,
+    _joinedOk: new Map(),
     _listeners: null,
     _shortcutHandler: null,
 
@@ -221,6 +233,7 @@
       const legacyStyle = document.getElementById('besing-ad-cleaner-style');
       if (legacyStyle) legacyStyle.remove();
       this._main = null;
+      this._protect = null;
     },
 
     // ---------- Settings ----------
@@ -300,12 +313,14 @@
     // ---------- Stylesheet ----------
 
     _buildCss() {
-      const rules = ['[data-besing-ac]{display:none!important}'];
+      const rules = ['[data-besing-ac]{opacity:0!important;pointer-events:none!important}'];
+      const cloak = this.CLOAK_STYLE.map(([p, v]) => `${p}:${v}!important`).join(';');
       const selectors = this._zapSelectors().slice();
       if (this._at('knownAds')) selectors.push(...this.KNOWN_AD_SELECTORS);
-      // One rule per selector: an invalid selector only drops its own rule.
+      // One rule per selector: an invalid selector only drops its own rule. The sheet cloaks a matching ad the
+      // moment it is inserted, before any script runs.
       selectors.forEach(sel => {
-        if (sel && !/[{}]/.test(sel)) rules.push(`${sel}:not(html):not(body){display:none!important}`);
+        if (sel && !/[{}]/.test(sel)) rules.push(`${sel}:not(html):not(body){${cloak}}`);
       });
       if (this._at('media')) {
         rules.push('img,picture,video,audio,canvas,embed,object,svg,figure,iframe:not([data-besing-ui]){display:none!important}');
@@ -381,11 +396,11 @@
         return;
       }
       this._observer = new MutationObserver((records) => {
-        let external = false;
+        const fresh = [];
         records.forEach(r => {
           const rec = r.type === 'attributes' ? this._styled.get(r.target) : null;
           if (!rec) {
-            external = true;
+            fresh.push(r);
             return;
           }
           // On elements this module handles, put back any style the page overwrote, without a full scan.
@@ -396,7 +411,14 @@
             }
           });
         });
-        if (external) this._schedule(120);
+        if (!fresh.length || !this._running) return;
+        let complete = false;
+        try {
+          complete = this._handleNow(fresh);
+        } catch (err) {
+          console.warn('[BESing Ad Cleaner] mutation check failed', err);
+        }
+        this._schedule(complete ? 400 : 60);
       });
       this._observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'id', 'open', 'src'] });
     },
@@ -526,9 +548,13 @@
     _hide(el, reason) {
       if (!el || el.nodeType !== 1 || this._hidden.has(el) || this._isOwnUi(el)) return false;
       if (el === document.documentElement || el === document.body || el === document.head) return false;
-      const rec = { reason, frames: [] };
+      const rec = { reason, props: [] };
       this._hidden.set(el, rec);
-      this._setStyle(el, 'display', 'none');
+      const styles = this.LAYOUT_REASONS.includes(reason) ? [['display', 'none']] : this.CLOAK_STYLE;
+      styles.forEach(([prop, value]) => {
+        this._setStyle(el, prop, value);
+        rec.props.push(prop);
+      });
       try { el.setAttribute('data-besing-ac', reason); } catch (e) {}
       // A hidden modal <dialog> or popover would still make the rest of the page inert.
       if (el.localName === 'dialog' && el.open) {
@@ -537,21 +563,19 @@
       try {
         if (el.matches(':popover-open')) el.hidePopover();
       } catch (e) {}
-      this._silence(el, rec);
+      this._silence(el);
       return true;
     },
 
-    // Hidden ads keep running and playing sound, so pause media and blank off-site frames inside.
-    _silence(el, rec) {
+    // Cloaked ads keep running, so mute and pause any media in them. Frames are left loaded: blanking one
+    // makes its ad script reload it.
+    _silence(el) {
       const media = el.matches('video,audio') ? [el] : Array.from(el.querySelectorAll('video,audio'));
-      media.forEach(m => { try { m.pause(); } catch (e) {} });
-      const frames = el.localName === 'iframe' ? [el] : Array.from(el.querySelectorAll('iframe'));
-      frames.forEach(f => {
-        const kind = this._frameKind(f);
-        if (kind === 'blank' || kind === 'first' || f.hasAttribute('data-besing-ui')) return;
-        const src = f.getAttribute('src');
-        rec.frames.push([f, src]);
-        try { f.setAttribute('src', 'about:blank'); } catch (e) {}
+      media.forEach(m => {
+        try {
+          m.muted = true;
+          if (!m.paused) m.pause();
+        } catch (e) {}
       });
     },
 
@@ -559,11 +583,8 @@
       const rec = this._hidden.get(el);
       if (!rec) return;
       this._hidden.delete(el);
-      this._restoreStyle(el, 'display');
+      rec.props.forEach(prop => this._restoreStyle(el, prop));
       try { el.removeAttribute('data-besing-ac'); } catch (e) {}
-      rec.frames.forEach(([f, src]) => {
-        try { if (src) f.setAttribute('src', src); } catch (e) {}
-      });
     },
 
     _restoreAll() {
@@ -659,72 +680,162 @@
         this._mainAt = now;
         this._mainState = state;
       }
-      const main = this._main;
-      const protect = new Set([html, body]);
-      for (let n = main; n; n = n.parentElement) protect.add(n);
+      const protect = this._protectSet();
+      this._protect = protect;
       protect.forEach(n => {
         const rec = this._hidden.get(n);
         if (rec && rec.reason !== 'zap') this._unhide(n);
       });
-
-      const ctx = {
-        main, protect, vw: window.innerWidth, vh: window.innerHeight, text: new Map(), hide: [], statics: [], adLeaves: []
-      };
-      const queue = (el, reason) => { if (el && !protect.has(el)) ctx.hide.push([el, reason]); };
-      ctx.queue = queue;
+      const ctx = this._newCtx(protect);
 
       const querySafe = (sel, fn) => {
         try { document.querySelectorAll(sel).forEach(fn); } catch (e) {}
       };
       this._zapSelectors().forEach(sel => querySafe(sel, el => { if (el !== html && el !== body) ctx.hide.push([el, 'zap']); }));
       if (this._at('knownAds')) {
-        this.KNOWN_AD_SELECTORS.forEach(sel => querySafe(sel, el => queue(el, 'known-ad')));
+        this.KNOWN_AD_SELECTORS.forEach(sel => querySafe(sel, el => ctx.queue(el, 'known-ad')));
         this.CONSENT_SELECTORS.forEach(sel => querySafe(sel, el => {
-          if (this._textLen(el, ctx) <= 3000) queue(el, 'consent');
+          if (this._textLen(el, ctx) <= 3000) ctx.queue(el, 'consent');
         }));
       }
 
       // Read pass: every decision is collected first, so layout is computed once instead of after every write.
-      const walker = document.createTreeWalker(html, NodeFilter.SHOW_ELEMENT, {
-        acceptNode: (el) => {
-          if (el === document.head || this._hidden.has(el) || this._isOwnUi(el)) return NodeFilter.FILTER_REJECT;
-          if (el.namespaceURI === 'http://www.w3.org/2000/svg' && el.localName !== 'svg') return NodeFilter.FILTER_REJECT;
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      });
+      const walker = document.createTreeWalker(html, NodeFilter.SHOW_ELEMENT, { acceptNode: (n) => this._walkFilter(n) });
       let el;
       while ((el = walker.nextNode())) {
-        if (el === body) continue;
-        const cs = window.getComputedStyle(el);
-        const pos = cs.position;
-        if (pos === 'fixed') this._checkFixed(el, cs, ctx, now);
-        else if (pos === 'sticky' || pos === '-webkit-sticky') this._checkSticky(el, ctx);
-        else if (pos === 'absolute' && this._at('floats')) this._checkFollower(el, cs, ctx);
-        const tag = el.localName;
-        if (tag === 'iframe' || tag === 'frame' || tag === 'embed' || tag === 'object') this._checkFrame(el, ctx);
-        if (tag === 'iframe' || tag === 'ins' || tag === 'embed' || tag === 'object' || tag === 'canvas') ctx.adLeaves.push(el);
-        if (this._at('thirdParty')) this._checkTokens(el, ctx);
-        if (this._at('imageLinks')) {
-          if (tag === 'a') this._checkImageLink(el, ctx);
-          if (el.childElementCount === 0) this._checkAdLabel(el, ctx);
-        }
+        if (el !== body) this._classify(el, ctx);
       }
       if (this._at('thirdParty')) this._checkAdSizes(ctx);
-      if (this._at('isolate') && main && document.readyState !== 'loading') this._isolate(ctx);
+      if (this._at('isolate') && ctx.main && document.readyState !== 'loading') this._isolate(ctx);
 
-      // Write pass.
+      this._applyCtx(ctx);
+      if (this._at('overlays')) this._unlockPage(ctx);
+      // Media in cloaked ads can start again on its own.
+      this._hidden.forEach((rec, hiddenEl) => { if (rec.props.length > 1) this._silence(hiddenEl); });
+      if (this._at('media')) {
+        document.querySelectorAll('video,audio').forEach(m => { try { if (!m.paused) m.pause(); } catch (e) {} });
+      }
+    },
+
+    _protectSet() {
+      const set = new Set([document.documentElement, document.body]);
+      for (let n = this._main; n; n = n.parentElement) set.add(n);
+      return set;
+    },
+
+    _newCtx(protect) {
+      const ctx = {
+        main: this._main, protect, vw: window.innerWidth, vh: window.innerHeight, now: Date.now(),
+        text: new Map(), hide: [], statics: [], adLeaves: []
+      };
+      ctx.queue = (el, reason) => { if (el && !protect.has(el)) ctx.hide.push([el, reason]); };
+      return ctx;
+    },
+
+    _walkFilter(el) {
+      if (el === document.head || this._hidden.has(el) || this._isOwnUi(el)) return NodeFilter.FILTER_REJECT;
+      if (el.namespaceURI === 'http://www.w3.org/2000/svg' && el.localName !== 'svg') return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+
+    // Every per-element rule; decisions go into ctx and are applied by _applyCtx.
+    _classify(el, ctx) {
+      const cs = window.getComputedStyle(el);
+      const pos = cs.position;
+      if (pos === 'fixed') this._checkFixed(el, cs, ctx, ctx.now);
+      else if (pos === 'sticky' || pos === '-webkit-sticky') this._checkSticky(el, ctx);
+      else if (pos === 'absolute' && this._at('floats')) this._checkFollower(el, cs, ctx);
+      const tag = el.localName;
+      if (tag === 'iframe' || tag === 'frame' || tag === 'embed' || tag === 'object') this._checkFrame(el, ctx);
+      if (tag === 'iframe' || tag === 'ins' || tag === 'embed' || tag === 'object' || tag === 'canvas') ctx.adLeaves.push(el);
+      if (this._at('thirdParty')) this._checkTokens(el, ctx);
+      if (this._at('imageLinks')) {
+        if (tag === 'a') this._checkImageLink(el, ctx);
+        if (el.childElementCount === 0) this._checkAdLabel(el, ctx);
+      }
+    },
+
+    // Selector rules for a single element; the full scan uses querySelectorAll for these instead.
+    _matchSelectors(el, ctx) {
+      // One joined selector per list; a list holding an invalid selector falls back to testing each one.
+      const matchesAny = (list) => {
+        if (!list.length) return false;
+        const joined = list.join(',');
+        let ok = this._joinedOk.get(joined);
+        if (ok === undefined) {
+          try {
+            document.documentElement.matches(joined);
+            ok = true;
+          } catch (e) {
+            ok = false;
+          }
+          if (this._joinedOk.size > 50) this._joinedOk.clear();
+          this._joinedOk.set(joined, ok);
+        }
+        if (ok) return el.matches(joined);
+        return list.some(sel => {
+          try { return el.matches(sel); } catch (e) { return false; }
+        });
+      };
+      if (matchesAny(this._zapSelectors())) {
+        ctx.hide.push([el, 'zap']);
+        return;
+      }
+      if (!this._at('knownAds')) return;
+      if (matchesAny(this.KNOWN_AD_SELECTORS)) ctx.queue(el, 'known-ad');
+      else if (matchesAny(this.CONSENT_SELECTORS) && this._textLen(el, ctx) <= 3000) ctx.queue(el, 'consent');
+    },
+
+    _applyCtx(ctx) {
       const hiddenAds = [];
       ctx.hide.forEach(([target, reason]) => {
-        if ((reason === 'zap' || !protect.has(target)) && this._hide(target, reason) && this.AD_REASONS.includes(reason)) {
+        if ((reason === 'zap' || !ctx.protect.has(target)) && this._hide(target, reason) && this.AD_REASONS.includes(reason)) {
           hiddenAds.push(target);
         }
       });
       this._collapseShells(hiddenAds, ctx);
       ctx.statics.forEach(target => this._setStyle(target, 'position', 'static'));
-      if (this._at('overlays')) this._unlockPage(ctx);
-      if (this._at('media')) {
-        document.querySelectorAll('video,audio').forEach(m => { try { if (!m.paused) m.pause(); } catch (e) {} });
+    },
+
+    // Runs inside the MutationObserver callback, which the browser runs before it paints, so an ad that is
+    // inserted, re-inserted or switched to fixed is hidden before it is ever drawn. Returns false when the
+    // budget ran out and the next full scan should come soon.
+    _handleNow(records) {
+      if (!document.body || !this._hidden) return false;
+      const ctx = this._newCtx(this._protect || this._protectSet());
+      const isolate = this._at('isolate') && ctx.main && document.readyState !== 'loading';
+      const seen = new Set();
+      let budget = this.SYNC_BUDGET;
+      const visit = (root, limit) => {
+        if (!root || root.nodeType !== 1 || !root.isConnected || seen.has(root)) return;
+        if (this._walkFilter(root) !== NodeFilter.FILTER_ACCEPT || root.closest('[data-besing-ac]')) return;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, { acceptNode: (n) => this._walkFilter(n) });
+        let left = limit;
+        for (let el = root; el && budget > 0 && left > 0; el = walker.nextNode()) {
+          if (seen.has(el)) continue;
+          seen.add(el);
+          budget--;
+          left--;
+          if (el === document.body || el === document.documentElement) continue;
+          this._matchSelectors(el, ctx);
+          this._classify(el, ctx);
+        }
+      };
+      for (const r of records) {
+        if (budget <= 0) break;
+        if (r.type === 'childList') {
+          r.addedNodes.forEach(n => {
+            if (n.nodeType !== 1) return;
+            visit(n, this.SYNC_BUDGET);
+            if (isolate && ctx.protect.has(r.target) && !ctx.protect.has(n)) this._isolateCheck(n, ctx);
+          });
+        } else {
+          visit(r.target, this.SYNC_ATTRIBUTE_BUDGET);
+        }
       }
+      if (this._at('thirdParty')) this._checkAdSizes(ctx);
+      this._applyCtx(ctx);
+      return budget > 0;
     },
 
     _rectOf(el) {
@@ -899,35 +1010,51 @@
     // Ad slots leave their wrappers behind as empty boxes with margins or a fixed height; hide wrappers
     // that show nothing once the ad inside is gone.
     _collapseShells(hiddenAds, ctx) {
-      const visible = (e) => (typeof e.checkVisibility === 'function' ? e.checkVisibility() : e.getClientRects().length > 0);
       const seen = new Set();
       hiddenAds.forEach(el => {
         let cur = el.parentElement;
         for (let i = 0; i < 3 && cur && !ctx.protect.has(cur) && !seen.has(cur); i++) {
           seen.add(cur);
-          if (this._hidden.has(cur) || this._isOwnUi(cur)) break;
-          if ((cur.innerText || '').trim() !== '') break;
-          const content = cur.querySelectorAll('img,picture,video,iframe,canvas,svg,object,embed,input,button,select,textarea');
-          if (Array.from(content).some(visible)) break;
+          if (this._hidden.has(cur) || this._isOwnUi(cur) || this._showsContent(cur)) break;
           this._hide(cur, 'ad-shell');
           cur = cur.parentElement;
         }
       });
     },
 
+    // Whether anything inside, outside the elements this module hid, still shows text or media.
+    _showsContent(root) {
+      const visible = (e) => (typeof e.checkVisibility === 'function' ? e.checkVisibility() : e.getClientRects().length > 0);
+      const mediaTags = /^(img|picture|video|iframe|canvas|svg|object|embed|input|button|select|textarea)$/;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode: (n) => {
+          if (n.nodeType === 3) {
+            return n.nodeValue.trim() && n.parentElement && visible(n.parentElement) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+          }
+          if (this._hidden.has(n) || /^(script|style|noscript|template)$/.test(n.localName)) return NodeFilter.FILTER_REJECT;
+          if (mediaTags.test(n.localName)) return visible(n) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_SKIP;
+        }
+      });
+      return !!walker.nextNode();
+    },
+
     // Hide every sibling along the path from <body> to the main content.
     _isolate(ctx) {
-      const keepNav = !this._at('media');
       for (let n = ctx.main; n && n !== document.body && n.parentElement; n = n.parentElement) {
         Array.from(n.parentElement.children).forEach(s => {
-          if (s === n || ctx.protect.has(s) || this._isOwnUi(s)) return;
-          if (/^(script|style|link|meta|noscript|template)$/.test(s.localName)) return;
-          if (keepNav && (/^(header|nav)$/.test(s.localName) || /^(banner|navigation)$/.test(s.getAttribute('role') || '') ||
-              this._hasToken(this._tokens(s), this.NAV_TOKENS))) return;
-          if (this._isPager(s, ctx)) return;
-          ctx.queue(s, 'isolate');
+          if (s !== n) this._isolateCheck(s, ctx);
         });
       }
+    },
+
+    _isolateCheck(s, ctx) {
+      if (ctx.protect.has(s) || this._isOwnUi(s)) return;
+      if (/^(script|style|link|meta|noscript|template)$/.test(s.localName)) return;
+      if (!this._at('media') && (/^(header|nav)$/.test(s.localName) || /^(banner|navigation)$/.test(s.getAttribute('role') || '') ||
+          this._hasToken(this._tokens(s), this.NAV_TOKENS))) return;
+      if (this._isPager(s, ctx)) return;
+      ctx.queue(s, 'isolate');
     },
 
     // Popups lock scrolling, blur the page or disable clicks on it; undo that.
@@ -957,7 +1084,11 @@
       const byReason = {};
       if (this._hidden) this._hidden.forEach(rec => { byReason[rec.reason] = (byReason[rec.reason] || 0) + 1; });
       let statics = 0;
-      if (this._styled) this._styled.forEach((rec, el) => { if (rec.has('position') && el !== document.body) statics++; });
+      if (this._styled) {
+        this._styled.forEach((rec, el) => {
+          if (rec.has('position') && rec.get('position').value === 'static' && el !== document.body) statics++;
+        });
+      }
       const main = this._main;
       let mainLabel = 'none';
       if (main) {

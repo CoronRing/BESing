@@ -1,7 +1,7 @@
 # Ad Cleaner & Element Zapper
 
 **Script Identifier:** `ad-cleaner`  
-**Current Version:** 2.0.0  
+**Current Version:** 2.1.0  
 **Category:** Privacy  
 **Author:** BESing Team  
 **License:** MIT  
@@ -53,15 +53,23 @@ The main content and all its ancestors are never hidden, except by a zap. If the
 
 ### Hiding
 
-- **Inline `display: none !important`** on each element. It beats the site's own stylesheets and inline styles. If a script writes the style back, a `MutationObserver` puts it back right away.
-- **A constructed stylesheet** (`document.adoptedStyleSheets`) for zapped selectors, known ad selectors and level 4 media rules. A strict `style-src` Content Security Policy blocks `<style>` elements but not constructed sheets. If constructed sheets are unavailable it falls back to a `<style>` element.
-- **Hidden ads are silenced.** Videos and audio inside are paused, and off-site frames inside are pointed at `about:blank` (restored when shown again).
-- **Empty wrappers collapse.** After an ad is hidden, up to three parents that no longer show any text or media are hidden too, so no gap is left behind.
+There are two ways to hide an element, depending on why it is hidden:
+
+- **Cloaking, for ads and popups.** Hiding an ad with `display: none`, or blanking its frame, tells the ad script its slot failed, and many scripts then re-insert or reload the ad. That is a loop the user sees as a flashing ad. So ads, popups and fixed or floating elements are cloaked instead: `position: absolute`, moved 99,999 px up and to the left, `opacity: 0`, `pointer-events: none` and no transitions. The element keeps its size and still counts as rendered (non-zero `offsetHeight`, an `offsetParent`, `display` unchanged), so ad-block checks pass. Because it is never on screen, refresh-when-visible logic never fires. Frames inside keep running off screen, and video and audio inside are muted and paused.
+- **`display: none`, for page structure:** sidebars, widgets, comments, the parts hidden by Main Content Only, emptied ad wrappers and level 4 media. Nothing reloads these, so they come out of the layout entirely.
+
+Both are inline `!important` styles, which beat the site's own stylesheets and inline styles. If a script writes the style back, a `MutationObserver` puts it back before the next paint.
+
+- **A constructed stylesheet** (`document.adoptedStyleSheets`) cloaks zapped selectors and known ad selectors the moment a matching element is inserted, and holds the level 4 media rules. A strict `style-src` Content Security Policy blocks `<style>` elements but not constructed sheets. If constructed sheets are unavailable it falls back to a `<style>` element.
+- **Empty wrappers collapse.** After an ad is hidden, up to three parents that no longer show any text or media outside hidden elements are hidden too, so no gap is left behind.
 - Elements are hidden, never removed, so sites built with React and similar frameworks do not break when they update the page.
 
 ### Scanning
 
-A scan runs at start, at `DOMContentLoaded` and `load`, after page changes, and after scrolling or resizing. It reads every element's computed position and size first, then applies all changes at once, so layout is calculated once per scan. Scans are spaced at least 250 ms apart, or eight times the last scan's duration on heavy pages. On a test page with about 16,000 elements a scan took about 70 ms. Main content detection reruns every 2 seconds, and when the page finishes parsing.
+Two passes keep the page clean:
+
+- **Before paint.** The `MutationObserver` callback runs after a script changes the page and before the browser draws it. It runs every rule on added elements, and on elements whose `class`, `style`, `id`, `src` or `open` changed. An ad that is inserted, replaced with a fresh node or switched to `position: fixed` by a class is therefore hidden before it is ever drawn. It looks at up to 400 elements per callback (60 under a changed attribute); anything beyond that is left to the next full scan, which is then brought forward.
+- **Full scan.** Runs at start, at `DOMContentLoaded` and `load`, after page changes, and after scrolling or resizing, for rules that need the whole page: main content, scroll followers, scroll unlocking and Main Content Only. It reads every element's computed position and size first, then applies all changes at once, so layout is calculated once per scan. Scans are spaced at least 250 ms apart (400 ms when the before-paint pass handled everything), or eight times the last scan's duration on heavy pages. On a test page with about 16,000 elements a scan took about 70 ms. Main content detection reruns every 2 seconds, and when the page finishes parsing.
 
 BESing's own elements (`besing-*`, PageStream pages and controls) are never touched.
 
