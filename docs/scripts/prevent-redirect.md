@@ -1,7 +1,7 @@
 # Prevent Redirect & Tab Hijack
 
 **Script Identifier:** `prevent-redirect`  
-**Current Version:** 1.6.0  
+**Current Version:** 1.7.0  
 **Category:** Security  
 **Author:** BESing Team  
 **License:** MIT  
@@ -33,9 +33,12 @@ Prevent Redirect & Tab Hijack shields users from deceptive redirects, forced new
 | **Programmatic Click Interception** | Blocks deceptive JavaScript triggers that invoke `.click()` on hidden external anchor tags. | Wraps `HTMLAnchorElement.prototype.click` and `HTMLElement.prototype.click` |
 | **Location Assign Interception** | Blocks scripts attempting to force-redirect the current page to another domain via `location.assign` or `location.replace`. | API proxy guard on `Location.prototype` |
 | **Same-Host Whitelisting** | Automatically allows valid same-origin and sub-domain links, intra-page anchors (`#`), and protocol links (`mailto:`, `tel:`). | Sub-domain and hostname evaluation |
-| **Main-World Page Context Guard** | Injects an active prototype guard into the page's native window scope to neutralize main-world inline scripts. | Document-start `<script>` injection with automatic self-cleanup |
+| **Main-World Page Context Guard** | Hooks the page's own `window.open`, `Function`, timers, listeners, WebSocket and script loading, which an isolated JS world cannot reach. Follows the module: turning Prevent Redirect off switches the guard's hooks off too. | Userscript: document-start `<script>` injection. Extension: MAIN-world content script `pr-main.js` (see "Extension Page-World Guard") |
 | **Late-Start Navigation Guard** | Cancels script-driven navigations that leave the site (or go to known ad URLs) at the moment they start, including redirects scheduled by timers or tap handlers registered before BESing was injected. Tapped links, form posts, reloads, back/forward and downloads pass through. Needs the Navigation API (Chrome/Edge, Firefox 147, Safari and iOS 26.2+). | `navigation` `navigate` event with `preventDefault()` |
 | **Existing Trap Sweep** | Removes invisible tap overlays and ad iframes that were already in the page when the module started, at init and again at `DOMContentLoaded`. | `querySelectorAll` sweep (`_sweepExisting`) |
+| **Strict: Block Page Scripts** | Off by default. Stops scripts from other sites, or all page scripts, before they run. | DOM observer at document-start, `appendChild`/`insertBefore` and `script.src` hooks |
+| **Strict: Late Start** | Off by default. When BESing starts after the page, cancels the page's pending timers, or also swaps in a script-free copy of the page. | Timer id sweep, sanitized `cloneNode` of `<html>` |
+| **Missed Navigation Report** | Off-site navigations the browser would not let the guard cancel are written to the debug log as `MISSED`. | `navigate` event with `cancelable: false` |
 
 ---
 
@@ -77,12 +80,33 @@ Blank popups (`window.open()` with no URL, later pointed at an ad) are still blo
 
 ---
 
+### Strict Protection (v1.7.0)
+Some sites still redirect, on desktop as well as mobile. The strict options trade site features for protection, so all are off by default. Use them together with **Lock Settings to This Site** (the script's detail page) so they apply to the problem site only.
+
+| Option | Values | What it does |
+| :--- | :--- | :--- |
+| **Block Page Scripts** (`blockScripts`) | Off, Other Sites (`third-party`), All Scripts (`all`) | Stops scripts before they run. Other Sites stops scripts whose host is a different site from the page (`img.example.com` and `www.example.com` count as the same site, and so do `a.example.co.uk` and `b.example.co.uk`). All Scripts stops every page script, inline ones included, leaving the server-rendered page. |
+| **Always allow scripts from** (`scriptAllowlist`) | Host names, comma separated | Hosts the gate never stops, subdomains included (for example `cdnjs.cloudflare.com`). |
+| **If BESing Starts Late** (`lateStart`) | Off, Cancel Timers (`purge-timers`), Rebuild Page (`rebuild`) | Applies only when BESing starts after the page has parsed, in the top frame. Cancel Timers clears every timer and interval the page scheduled, so redirects set for later never fire. Rebuild Page also replaces the page with a sanitized copy of itself. |
+
+**How the gate stops a script.** Browsers run a microtask checkpoint before preparing each parser-inserted `<script>`, which is when BESing's DOM observer runs. The observer changes the element's `type` to `javascript/blocked`, so the browser never prepares it. Scripts that page code inserts are caught by the `appendChild`, `insertBefore` and `script.src` hooks. The browser's preload scanner may still download a blocked file, but it is not executed. The gate needs BESing to start before the page's scripts, which is normal on desktop and not guaranteed on iOS (see "Late Injection"). Stops are counted in the debug log (`gate=third-party gated=N`, plus up to 5 `gated script` events) and shown on the detail page as "Stopped on this page".
+
+**How Rebuild Page works.** It does not download the page again. It copies the live `<html>` (`cloneNode`), so text that scripts already wrote, such as suduguu.com's `document.write` chapter pages, is kept. From the copy it removes scripts, iframes, objects, embeds, meta refresh, script preloads, inline `on*` handlers, `javascript:` URLs and invisible tap-trap overlays. It fills `data-src`, `data-original` and `data-lazy-src` images that lazy loaders had not reached, then swaps the copy in. Listeners the page attached to elements stay with the discarded originals. Listeners on `window` and `document` survive, which is why the timer purge, click guard and navigation guard keep running. BESing re-mounts its widget and restarts its other running modules on the new page. Canvas content, shadow DOM and anything else that needs page scripts is lost.
+
+**When settings are read.** At document-start the manager reads modes and settings synchronously (userscript manager storage, or the extension's localStorage mirror for the site) and arms the module with them, so a site lock and the strict options are in force before the page's first script. In the extension the mirror for a site exists after its first visit; on a first visit the gate starts once extension storage answers. The late-start options are applied once, at boot, so a change takes effect from the next page load.
+
+### Extension Page-World Guard (v1.7.0)
+Manifest V3 applies the extension's own CSP (`script-src 'self'`) to inline scripts that a content script inserts. The page-world guard, which the module injected as an inline `<script>`, therefore never ran in the extension, on any site. The extension only had the defenses that work through the DOM (click and touch guards, navigation guard, DOM observer, trap sweep), and page code could still call `window.open`, schedule redirect timers, build payloads with `new Function` and open WebSocket tunnels. The userscript was not affected.
+
+The guard now lives in `_guardMain`, a self-contained function between the `<besing-guard>` markers in the module source. The userscript injects it with `toString()`. `build.py` copies it into `extension/pr-main.js`, which the manifest loads as a `"world": "MAIN"` content script before `content.js` (Chrome and Edge 111+). It starts inactive. The module finds it with a `besing:pr-ping` / `besing:pr-pong` event pair (events on `document` reach every JS world), skips the inline injection, and switches it on with `besing:pr-config`, which carries `{ active, mode, allow }` as a JSON string. A site where Prevent Redirect is off never switches it on, and turning the module off live sends `active: false`. The debug log reports `page-guard-ok`, `page-guard-OFF` or `page-guard-MISSING`.
+
 ## 4. Standalone Userscript Usage
 
 To run standalone without the BESing manager:
 1. Install [prevent-redirect.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/prevent-redirect/prevent-redirect.user.js) in Tampermonkey or Violentmonkey.
 2. The script runs at `@run-at document-start` on `*://*/*`.
 3. Inspect blocked redirects in the browser developer console under `[BESing Prevent Redirect] Blocked ...`.
+4. The standalone script has no settings storage, so the strict options stay off. They need the BESing manager.
 
 ---
 
@@ -90,5 +114,6 @@ To run standalone without the BESing manager:
 
 | Version | Changes |
 | :--- | :--- |
+| 1.7.0 | Strict Protection (script gate with allowlist, late-start timer purge and page rebuild); the extension's page-world guard runs as a MAIN-world content script; the guard follows the module on and off; navigations that cannot be cancelled are logged. |
 | 1.6.0 | Same-site new tabs are allowed when the user tapped or clicked. |
 | 1.5.0 | Navigation API guard and existing-trap sweep for late injection; the DOM observer skips the module's own guard script. |

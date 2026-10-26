@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Prevent Redirect & Tab Hijack
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.6.0
+// @version      1.7.0
 // @description  Prevents unwanted automatic redirects, mobile touch/sensor traps, popups, and malicious ad network script injections while preserving normal site navigation.
 // @author       BESing Team
 // @license      MIT
@@ -16,9 +16,12 @@
   const PreventRedirect = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.6.0',
+    version: '1.7.0',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
+    _cfg: null,
+    _gateCount: 0,
+    _lateHandled: false,
     _origOpen: null,
     _origUnsafeOpen: null,
     _origWebSocket: null,
@@ -253,7 +256,6 @@
       const self = this;
       this._navigateHandler = function (e) {
         try {
-          if (!e.cancelable) return;
           if (e.navigationType === 'reload' || e.navigationType === 'traverse') return;
           if (e.downloadRequest !== null && e.downloadRequest !== undefined) return;
           // Form posts (logins, payment confirmations) are left alone; ad scripts do not use them.
@@ -262,6 +264,17 @@
           const isAd = self._isAdOrRedirectUrl(url);
           const isExternal = !self._isSameHost(url);
           if (!isAd && !isExternal) return;
+          if (!e.cancelable) {
+            // The browser does not let this one be stopped. Reported so the debug log shows it.
+            if (!e.userInitiated || isAd) {
+              try {
+                window.dispatchEvent(new CustomEvent('besing:redirect-missed', {
+                  detail: { url, reason: 'navigation not cancelable' }
+                }));
+              } catch (err) {}
+            }
+            return;
+          }
           // Links the user tapped are judged by the click guard instead.
           if (e.userInitiated && !isAd) return;
           e.preventDefault();
@@ -284,6 +297,181 @@
       if (!this._isSameHost(parsed.href) || this._isAdOrRedirectUrl(parsed.href)) return false;
       const ua = typeof navigator !== 'undefined' ? navigator.userActivation : null;
       return !!(ua && ua.isActive);
+    },
+
+    // Strict options. All are off unless the user turns them on, because each one breaks sites
+    // that need their scripts. See docs/scripts/prevent-redirect.md, "Strict Protection".
+    //   blockScripts:    'off' | 'third-party' | 'all'   script gate, effective when BESing starts first
+    //   scriptAllowlist: hosts whose scripts the gate always allows (string, one per line or comma separated)
+    //   lateStart:       'off' | 'purge-timers' | 'rebuild'   what to undo when BESing starts after the page
+    _normalizeConfig(cfg) {
+      const c = (cfg && typeof cfg === 'object') ? cfg : {};
+      const blockScripts = (c.blockScripts === 'third-party' || c.blockScripts === 'all') ? c.blockScripts : 'off';
+      const lateStart = (c.lateStart === 'purge-timers' || c.lateStart === 'rebuild') ? c.lateStart : 'off';
+      const rawList = Array.isArray(c.scriptAllowlist) ? c.scriptAllowlist : String(c.scriptAllowlist || '').split(/[\s,]+/);
+      const scriptAllowlist = rawList
+        .map(h => String(h).trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/[/?#].*$/, '').replace(/^\*\./, '').replace(/:\d+$/, ''))
+        .filter(h => /^[a-z0-9.-]+$/.test(h));
+      return { blockScripts, lateStart, scriptAllowlist };
+    },
+
+    // Registrable-domain approximation: `img.example.com` and `www.example.com` are the same site,
+    // as are `a.example.co.uk` and `b.example.co.uk`. IP addresses compare whole.
+    _siteKey(host) {
+      const h = String(host || '').toLowerCase().replace(/\.$/, '');
+      if (!h || /^[\d.]+$/.test(h) || h.includes(':')) return h;
+      const parts = h.split('.');
+      if (parts.length <= 2) return h;
+      const sld = parts[parts.length - 2];
+      const tld = parts[parts.length - 1];
+      const keep = (tld.length === 2 && /^(co|com|net|org|gov|edu|ac|or|ne|go)$/.test(sld)) ? 3 : 2;
+      return parts.slice(-keep).join('.');
+    },
+
+    _isAllowlistedHost(host) {
+      const list = (this._cfg && this._cfg.scriptAllowlist) || [];
+      const h = String(host || '').toLowerCase();
+      return list.some(a => h === a || h.endsWith('.' + a));
+    },
+
+    // Whether the script gate stops a script with this `src` ('' for an inline script).
+    _gateBlocksScript(src) {
+      const mode = this._cfg ? this._cfg.blockScripts : 'off';
+      if (mode === 'off') return false;
+      const raw = typeof src === 'string' ? src.trim() : '';
+      if (!raw) return mode === 'all';
+      let parsed;
+      try { parsed = new URL(raw, window.location.href); } catch (e) { return mode === 'all'; }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return mode === 'all';
+      const host = parsed.hostname.toLowerCase();
+      if (this._isAllowlistedHost(host)) return false;
+      if (mode === 'all') return true;
+      return this._siteKey(host) !== this._siteKey(window.location.hostname);
+    },
+
+    _isExecutableScript(node) {
+      if (!node || node.tagName !== 'SCRIPT' || node.id === '__besing_pr_guard__') return false;
+      const t = (node.getAttribute('type') || '').trim().toLowerCase();
+      if (t === 'javascript/blocked') return false;
+      return !t || t === 'module' || /(java|ecma)script/.test(t);
+    },
+
+    // Neutralizes a script element the gate stops. Changing `type` before the browser prepares the
+    // element is what keeps it from running; parsers prepare a script only after a microtask
+    // checkpoint, which is when the DOM observer runs.
+    _gateScriptNode(node) {
+      if (!this._isExecutableScript(node)) return false;
+      const src = node.getAttribute('src') || '';
+      if (!this._gateBlocksScript(src)) return false;
+      try { node.type = 'javascript/blocked'; } catch (e) {}
+      this._noteGated(src || 'inline script');
+      return true;
+    },
+
+    // Gate blocks are counted and reported on their own event, not as redirects, so a page with many
+    // third-party scripts does not flood the redirect alert.
+    _noteGated(src) {
+      this._gateCount++;
+      console.info('[BESing Prevent Redirect] Script gate stopped:', src);
+      try {
+        window.dispatchEvent(new CustomEvent('besing:scripts-gated', { detail: { url: String(src), count: this._gateCount } }));
+      } catch (e) {}
+    },
+
+    // Cancels every timer and interval the given window has scheduled so far. Timer ids are
+    // sequential, so every id below a fresh one covers them all. Returns the highest id cleared.
+    _purgeTimers(win) {
+      try {
+        const newest = Number(win.setTimeout(function () {}, 0)) || 0;
+        const last = Math.min(newest, 500000);
+        for (let id = last; id > 0; id--) {
+          win.clearTimeout(id);
+          win.clearInterval(id);
+        }
+        return last;
+      } catch (e) {
+        return 0;
+      }
+    },
+
+    // Strips everything that can run code or hold a tap trap from a detached copy of the page.
+    _sanitizeTree(root) {
+      const drop = [
+        'script', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet', 'portal',
+        'besing-host', 'besing-log-viewer', '[id^="besing-"]', '[id^="__besing"]',
+        'meta[http-equiv="refresh" i]', 'link[rel="modulepreload"]', 'link[rel~="preload"][as="script"]'
+      ].join(', ');
+      root.querySelectorAll(drop).forEach(el => el.remove());
+
+      const urlAttrs = new Set(['href', 'src', 'action', 'formaction', 'xlink:href']);
+      const lazyAttrs = ['data-src', 'data-original', 'data-lazy-src'];
+      const traps = [];
+      [root, ...root.querySelectorAll('*')].forEach(el => {
+        for (const attr of Array.from(el.attributes)) {
+          const name = attr.name.toLowerCase();
+          if (name.startsWith('on') || (urlAttrs.has(name) && /^\s*javascript:/i.test(attr.value))) {
+            el.removeAttribute(attr.name);
+          }
+        }
+        // Lazy loaders are page scripts, so images they had not reached yet would stay blank.
+        if (el.tagName === 'IMG') {
+          const cur = el.getAttribute('src') || '';
+          if (!cur || cur.startsWith('data:')) {
+            const lazy = lazyAttrs.map(a => el.getAttribute(a)).find(Boolean);
+            if (lazy) el.setAttribute('src', lazy);
+          }
+        }
+        if (el !== root && this._isTrapStyle(el.getAttribute('style') || '')) traps.push(el);
+      });
+      traps.forEach(el => el.remove());
+    },
+
+    // Replaces the live page with a script-free copy of itself. Listeners the page attached to its
+    // elements stay with the discarded originals, and the copy keeps text that scripts wrote
+    // (document.write chapters, rendered content), which a re-fetch of the HTML would lose.
+    _rebuildPage() {
+      const oldRoot = document.documentElement;
+      if (!oldRoot) return false;
+      try { window.stop(); } catch (e) {}
+      try {
+        const copy = oldRoot.cloneNode(true);
+        this._sanitizeTree(copy);
+        document.replaceChild(copy, oldRoot);
+        return true;
+      } catch (e) {
+        console.warn('[BESing Prevent Redirect] Page rebuild failed:', e);
+        return false;
+      }
+    },
+
+    // Called once by the manager right after the boot-time init (and by the standalone script).
+    // A late start means the page's scripts already ran; the `lateStart` option decides how much of
+    // their work to undo. Child frames are left alone.
+    handleLateStart() {
+      if (this._lateHandled) return null;
+      this._lateHandled = true;
+      const action = this._cfg ? this._cfg.lateStart : 'off';
+      if (action === 'off' || document.readyState === 'loading') return null;
+      let isTop = false;
+      try { isTop = window.top === window.self; } catch (e) {}
+      if (!isTop) return null;
+
+      const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+      let timersUpTo = this._purgeTimers(window);
+      if (unsafeWin !== window) timersUpTo = Math.max(timersUpTo, this._purgeTimers(unsafeWin));
+      // The page-world guard purges the page's own timers, which an isolated world cannot reach.
+      try { document.dispatchEvent(new CustomEvent('besing:pr-purge')); } catch (e) {}
+
+      const rebuilt = action === 'rebuild' ? this._rebuildPage() : false;
+      const result = { action, timersUpTo, rebuilt, ready: document.readyState };
+      console.warn('[BESing Prevent Redirect] Late start handled:', result);
+      try { window.dispatchEvent(new CustomEvent('besing:late-start-handled', { detail: result })); } catch (e) {}
+      return result;
+    },
+
+    onConfigChange(cfg) {
+      this._cfg = this._normalizeConfig(cfg);
+      this._sendGuardConfig(true);
     },
 
     notifyBlocked(targetUrl, reason) {
@@ -316,8 +504,9 @@
       }
     },
 
-    init() {
+    init(cfg) {
       this.destroy();
+      this._cfg = this._normalizeConfig(cfg);
       const self = this;
       const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
 
@@ -456,6 +645,10 @@
                 self.notifyBlocked(val, 'ad script injection');
                 return origSet.call(this, 'data:text/javascript,/*besing-blocked*/');
               }
+              if (this.id !== '__besing_pr_guard__' && self._gateBlocksScript(String(val || ''))) {
+                self._noteGated(val);
+                return origSet.call(this, 'data:text/javascript,/*besing-gated*/');
+              }
               return origSet.call(this, val);
             },
             get: scriptDesc.get,
@@ -496,6 +689,7 @@
               self.notifyBlocked(src, 'injected ' + node.tagName.toLowerCase());
               return node;
             }
+            if (self._gateScriptNode(node)) return node;
           }
           return self._origAppendChild.call(this, node);
         };
@@ -508,6 +702,7 @@
               self.notifyBlocked(src, 'injected ' + node.tagName.toLowerCase());
               return node;
             }
+            if (self._gateScriptNode(node)) return node;
           }
           return self._origInsertBefore.call(this, node, ref);
         };
@@ -662,9 +857,10 @@
         }
       } catch (e) {}
 
-      // Synchronously scan and intercept script tags and invisible overlay tiles added to DOM
+      // Synchronously scan and intercept script tags and invisible overlay tiles added to DOM.
+      // Observing the document (not <html>) keeps working after a late-start page rebuild swaps <html>.
       try {
-        const root = document.documentElement || document;
+        const root = document;
         if (root) {
           const observer = new MutationObserver((mutations) => {
             for (let m = 0; m < mutations.length; m++) {
@@ -674,6 +870,10 @@
                 if (!node || node.nodeType !== 1) continue;
                 // Our own page-world guard quotes the ad patterns it hooks, so it would match itself.
                 if (node.id === '__besing_pr_guard__') continue;
+                if (node.tagName === 'SCRIPT' && self._gateScriptNode(node)) {
+                  node.remove();
+                  continue;
+                }
                 if (node.tagName === 'SCRIPT') {
                   const src = node.getAttribute('src') || node.src || '';
                   const text = node.textContent || '';
@@ -764,174 +964,20 @@
         document.addEventListener('DOMContentLoaded', this._sweepHandler, { once: true });
       }
 
-      // 13. Inject comprehensive page-context guard for page scripts in main execution world
+      // 13. Page-world guard. The extension ships it as a MAIN-world content script that is already
+      // waiting here; the userscript injects it. Either way it is switched on with this init's settings.
+      if (this._pingGuard() === null) this._injectGuard();
+      if (typeof window !== 'undefined') window.__BESING_PREVENT_REDIRECT__ = this;
+      this._sendGuardConfig(true);
+    },
+
+    // Injects the guard as an inline <script> so it runs in the page's own JS world. A strict site
+    // CSP blocks this; the debug log then reports `page-guard-MISSING`.
+    _injectGuard() {
       try {
         const guardScript = document.createElement('script');
         guardScript.id = '__besing_pr_guard__';
-        guardScript.textContent = `
-          (function() {
-            if (window.__besing_pr_active__) return;
-            window.__besing_pr_active__ = true;
-            var curHost = (window.location.hostname || '').toLowerCase();
-
-            function isSame(u) {
-              if (!u || typeof u !== 'string') return true;
-              var t = u.trim();
-              if (!t || t.indexOf('#') === 0 || t.indexOf('javascript:') === 0) return true;
-              try {
-                var p = new URL(t, window.location.href);
-                var h = (p.hostname || '').toLowerCase();
-                return h === curHost || h.endsWith('.' + curHost) || curHost.endsWith('.' + h);
-              } catch(e) { return false; }
-            }
-
-            function isAd(u) {
-              if (!u || typeof u !== 'string') return false;
-              var s = u.toLowerCase();
-              if (/(?:^|\\/)(?:config\\/)?(?:v\\d+|tj|fumeiti|ads?|union|pop|float|jump|tongji|statistics)\\.js(?:$|\\?)/i.test(s)) return true;
-              if (/:(8001|8002|8003|8080|8081|8887|8888|9999|20091|20092|20093)\\b/.test(s) && !isSame(s)) return true;
-              if (/(lkg6odg|kt6th8f|fumeiti|comprelu|dsygc|uuysi5|uuysi6|5bjoeih|xq04k6u|qq26oeg|adzxdimq|vdxqxca|oybhpsij|popcash|propellerads|exoclick|adsterra|clickadu|richpush|trafficjunky|adservice|adnetwork|7461c|7461m)/.test(s)) return true;
-              if (/(\\/sc\\/\\d+|\\/cc\\/\\d+|\\/d\\/\\d+|\\/mj1\\/\\d+|\\/stats\\/\\d+|\\/push\\/|\\/stat\\/|\\/click\\/)/.test(s) && !isSame(s)) return true;
-              if (s.indexOf('?n=') !== -1 || s.indexOf('&target=1') !== -1 || s.indexOf('is_not=1') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1) {
-                if (!isSame(s)) return true;
-              }
-              return false;
-            }
-
-            function isAdCode(str) {
-              if (!str || typeof str !== 'string') return false;
-              var s = str.toLowerCase();
-              if (/(top\\.location|window\\.location|location\\.href)\\s*(!=|==|=)/.test(s) && (s.indexOf('http') !== -1 || s.indexOf('target=1') !== -1 || s.indexOf('purl') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1 || s.indexOf(':800') !== -1 || s.indexOf(':888') !== -1 || s.indexOf('7461') !== -1 || s.indexOf('comprelu') !== -1 || s.indexOf('kt6th8f') !== -1 || s.indexOf('lkg6odg') !== -1 || s.indexOf('adzxdimq') !== -1 || s.indexOf('dsygc') !== -1)) return true;
-              if ((s.indexOf('touchend') !== -1 || s.indexOf('touchstart') !== -1 || s.indexOf('changedtouches') !== -1 || s.indexOf('clientheight') !== -1) && (s.indexOf('location.href') !== -1 || s.indexOf('top.location') !== -1 || s.indexOf('window.location') !== -1)) return true;
-              if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij|7461c|7461m)/.test(s)) return true;
-              if (s.indexOf('new function') !== -1 && (s.indexOf('_tdcs') !== -1 || s.indexOf('wvsyru') !== -1 || s.indexOf('nnkqek') !== -1 || s.indexOf('7461') !== -1)) return true;
-              return false;
-            }
-
-            function fakeWin(u) {
-              var f = {
-                closed: false, name: '', opener: window, parent: window, top: window, frames: [], length: 0,
-                close: function() { this.closed = true; }, focus: function(){}, blur: function(){},
-                postMessage: function(){}, print: function(){}, stop: function(){},
-                location: { href: u || 'about:blank', assign: function(){}, replace: function(){}, reload: function(){} },
-                document: { open: function(){ return this; }, close: function(){}, write: function(){}, writeln: function(){} }
-              };
-              f.window = f;
-              return f;
-            }
-
-            // Same-site new tab during a user gesture is allowed; everything else that opens a window is not.
-            function userSameSiteTab(u) {
-              if (!u || typeof u !== 'string') return false;
-              try {
-                var p = new URL(u.trim(), window.location.href);
-                if (p.protocol !== 'http:' && p.protocol !== 'https:') return false;
-                if (!isSame(p.href) || isAd(p.href)) return false;
-              } catch(e) { return false; }
-              var ua = navigator.userActivation;
-              return !!(ua && ua.isActive);
-            }
-
-            // Hook window.open in page context
-            var origOpen = window.open;
-            window.open = function(url, target, feat) {
-              if ((isAd(url) || (url && !isSame(url)) || target === '_blank' || target === '_new' || !target) && !userSameSiteTab(url)) {
-                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script window.open' } }));
-                return fakeWin(url);
-              }
-              return origOpen.call(this || window, url, target, feat);
-            };
-
-            var fnVerdicts = (typeof WeakMap === 'function') ? new WeakMap() : null;
-            var isAdFn = function(f) {
-              if (fnVerdicts) {
-                var hit = fnVerdicts.get(f);
-                if (hit !== undefined) return hit;
-              }
-              var verdict = false;
-              try { verdict = isAdCode(Function.prototype.toString.call(f)); } catch(e) {}
-              if (fnVerdicts) fnVerdicts.set(f, verdict);
-              return verdict;
-            };
-
-            // Hook Function constructor in page context
-            var OrigFunction = window.Function;
-            window.Function = function(...args) {
-              var code = args[args.length - 1] || '';
-              if (typeof code === 'string' && isAdCode(code)) {
-                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: 'payload', reason: 'page-script new Function' } }));
-                return function() {};
-              }
-              return OrigFunction.apply(this, args);
-            };
-            window.Function.prototype = OrigFunction.prototype;
-
-            // Hook EventTarget.prototype.addEventListener in page context
-            var origAEL = EventTarget.prototype.addEventListener;
-            EventTarget.prototype.addEventListener = function(t, l, o) {
-              if (t === 'devicemotion' || t === 'deviceorientation') return;
-              if (typeof l === 'function' && isAdFn(l)) {
-                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: t, reason: 'page-script addEventListener' } }));
-                return;
-              }
-              return origAEL.call(this, t, l, o);
-            };
-
-            // Hook setTimeout & setInterval in page context
-            var origSetTimeout = window.setTimeout;
-            window.setTimeout = function(h, d, ...args) {
-              if (typeof h === 'function' && isAdFn(h)) return 0;
-              return origSetTimeout.call(this, h, d, ...args);
-            };
-
-            var origSetInterval = window.setInterval;
-            window.setInterval = function(h, d, ...args) {
-              if (typeof h === 'function' && isAdFn(h)) return 0;
-              return origSetInterval.call(this, h, d, ...args);
-            };
-
-            // Hook WebSocket in page context
-            var OrigWS = window.WebSocket;
-            if (OrigWS) {
-              window.WebSocket = function(url, proto) {
-                if (isAd(url)) {
-                  window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script WebSocket' } }));
-                  return { url: url, readyState: 3, send: function(){}, close: function(){}, addEventListener: function(){}, removeEventListener: function(){} };
-                }
-                return new OrigWS(url, proto);
-              };
-              window.WebSocket.prototype = OrigWS.prototype;
-            }
-
-            // Hook HTMLScriptElement.prototype.src in page context
-            try {
-              var sDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
-              if (sDesc && sDesc.set) {
-                var oSet = sDesc.set;
-                Object.defineProperty(HTMLScriptElement.prototype, 'src', {
-                  set: function(v) {
-                    if (isAd(v)) {
-                      window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: v, reason: 'page-script script.src' } }));
-                      return oSet.call(this, 'data:text/javascript,/*besing-blocked*/');
-                    }
-                    return oSet.call(this, v);
-                  },
-                  get: sDesc.get,
-                  configurable: true
-                });
-              }
-            } catch(e){}
-
-            // Hook insertAdjacentHTML in page context
-            var oInsert = Element.prototype.insertAdjacentHTML;
-            Element.prototype.insertAdjacentHTML = function(p, h) {
-              if (typeof h === 'string' && h.indexOf('position:fixed') !== -1 && (h.indexOf('opacity:0.01') !== -1 || h.indexOf('opacity: 0.01') !== -1 || h.indexOf('opacity:0;') !== -1)) {
-                return;
-              }
-              return oInsert.call(this, p, h);
-            };
-          })();
-        `;
+        guardScript.textContent = '(' + this._guardMain.toString() + ')(' + JSON.stringify(this._guardState(true)) + ');';
         const root = document.head || document.documentElement;
         if (root) {
           root.appendChild(guardScript);
@@ -948,9 +994,272 @@
           });
           docObs.observe(document, { childList: true, subtree: true });
         }
-        if (typeof window !== 'undefined') window.__BESING_PREVENT_REDIRECT__ = this;
       } catch (e) {}
     },
+
+    // 'on' or 'off' from the page-world guard, or null when no guard answered. Events on `document`
+    // reach every JS world, so this works from an isolated extension world too.
+    _pingGuard() {
+      let answer = null;
+      const onPong = (e) => { answer = typeof e.detail === 'string' ? e.detail : 'on'; };
+      try {
+        document.addEventListener('besing:pr-pong', onPong);
+        document.dispatchEvent(new CustomEvent('besing:pr-ping'));
+      } catch (e) {}
+      try { document.removeEventListener('besing:pr-pong', onPong); } catch (e) {}
+      return answer;
+    },
+
+    _guardState(active) {
+      const c = this._cfg || this._normalizeConfig(null);
+      return { active: !!active, mode: c.blockScripts, allow: c.scriptAllowlist };
+    },
+
+    _sendGuardConfig(active) {
+      try {
+        document.dispatchEvent(new CustomEvent('besing:pr-config', { detail: JSON.stringify(this._guardState(active)) }));
+      } catch (e) {}
+    },
+
+    // Page-world guard: hooks the page's own globals, which an isolated JS world cannot reach. It is
+    // serialized with toString(), so it must not use anything outside its own body. The userscript
+    // injects it inline (_injectGuard); build.py copies the code between the markers below into
+    // extension/pr-main.js, a MAIN-world content script, because MV3 applies the extension's own CSP
+    // to inline scripts that a content script inserts. `initial` and later 'besing:pr-config' events
+    // carry { active, mode, allow }; every hook passes through while `active` is false.
+    // <besing-guard>
+    _guardMain: function (initial) {
+      if (window.__besing_pr_active__) return;
+      window.__besing_pr_active__ = true;
+      var curHost = (window.location.hostname || '').toLowerCase();
+      var STATE = initial || { active: false, mode: 'off', allow: [] };
+
+      document.addEventListener('besing:pr-config', function (e) {
+        try {
+          var next = JSON.parse(e.detail);
+          if (next && typeof next === 'object') STATE = next;
+        } catch (err) {}
+      });
+      document.addEventListener('besing:pr-ping', function () {
+        document.dispatchEvent(new CustomEvent('besing:pr-pong', { detail: STATE.active ? 'on' : 'off' }));
+      });
+      // Late start: cancel the timers the page scheduled before BESing started.
+      document.addEventListener('besing:pr-purge', function () {
+        if (!STATE.active) return;
+        try {
+          var newest = Math.min(Number(setTimeout(function () {}, 0)) || 0, 500000);
+          for (var id = newest; id > 0; id--) { clearTimeout(id); clearInterval(id); }
+        } catch (err) {}
+      });
+
+      function siteKey(h) {
+        h = String(h || '').toLowerCase();
+        if (!h || /^[\d.]+$/.test(h) || h.indexOf(':') !== -1) return h;
+        var p = h.split('.');
+        if (p.length <= 2) return h;
+        var sld = p[p.length - 2], tld = p[p.length - 1];
+        var keep = (tld.length === 2 && /^(co|com|net|org|gov|edu|ac|or|ne|go)$/.test(sld)) ? 3 : 2;
+        return p.slice(-keep).join('.');
+      }
+
+      function gateBlocks(src) {
+        if (!STATE.active || (STATE.mode !== 'third-party' && STATE.mode !== 'all')) return false;
+        var raw = typeof src === 'string' ? src.trim() : '';
+        if (!raw) return STATE.mode === 'all';
+        var u;
+        try { u = new URL(raw, window.location.href); } catch (e) { return STATE.mode === 'all'; }
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return STATE.mode === 'all';
+        var h = u.hostname.toLowerCase();
+        var allow = STATE.allow || [];
+        for (var i = 0; i < allow.length; i++) {
+          if (h === allow[i] || h.endsWith('.' + allow[i])) return false;
+        }
+        if (STATE.mode === 'all') return true;
+        return siteKey(h) !== siteKey(curHost);
+      }
+
+      function isExecScript(n) {
+        if (!n || n.tagName !== 'SCRIPT' || n.id === '__besing_pr_guard__') return false;
+        var t = (n.getAttribute('type') || '').trim().toLowerCase();
+        if (t === 'javascript/blocked') return false;
+        return !t || t === 'module' || /(java|ecma)script/.test(t);
+      }
+
+      function noteGated(src) {
+        window.dispatchEvent(new CustomEvent('besing:scripts-gated', { detail: { url: String(src || 'inline script') } }));
+      }
+
+      function isSame(u) {
+        if (!u || typeof u !== 'string') return true;
+        var t = u.trim();
+        if (!t || t.indexOf('#') === 0 || t.indexOf('javascript:') === 0) return true;
+        try {
+          var p = new URL(t, window.location.href);
+          var h = (p.hostname || '').toLowerCase();
+          return h === curHost || h.endsWith('.' + curHost) || curHost.endsWith('.' + h);
+        } catch (e) { return false; }
+      }
+
+      function isAd(u) {
+        if (!u || typeof u !== 'string') return false;
+        var s = u.toLowerCase();
+        if (/(?:^|\/)(?:config\/)?(?:v\d+|tj|fumeiti|ads?|union|pop|float|jump|tongji|statistics)\.js(?:$|\?)/i.test(s)) return true;
+        if (/:(8001|8002|8003|8080|8081|8887|8888|9999|20091|20092|20093)\b/.test(s) && !isSame(s)) return true;
+        if (/(lkg6odg|kt6th8f|fumeiti|comprelu|dsygc|uuysi5|uuysi6|5bjoeih|xq04k6u|qq26oeg|adzxdimq|vdxqxca|oybhpsij|popcash|propellerads|exoclick|adsterra|clickadu|richpush|trafficjunky|adservice|adnetwork|7461c|7461m)/.test(s)) return true;
+        if (/(\/sc\/\d+|\/cc\/\d+|\/d\/\d+|\/mj1\/\d+|\/stats\/\d+|\/push\/|\/stat\/|\/click\/)/.test(s) && !isSame(s)) return true;
+        if (s.indexOf('?n=') !== -1 || s.indexOf('&target=1') !== -1 || s.indexOf('is_not=1') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1) {
+          if (!isSame(s)) return true;
+        }
+        return false;
+      }
+
+      function isAdCode(str) {
+        if (!str || typeof str !== 'string') return false;
+        var s = str.toLowerCase();
+        if (/(top\.location|window\.location|location\.href)\s*(!=|==|=)/.test(s) && (s.indexOf('http') !== -1 || s.indexOf('target=1') !== -1 || s.indexOf('purl') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1 || s.indexOf(':800') !== -1 || s.indexOf(':888') !== -1 || s.indexOf('7461') !== -1 || s.indexOf('comprelu') !== -1 || s.indexOf('kt6th8f') !== -1 || s.indexOf('lkg6odg') !== -1 || s.indexOf('adzxdimq') !== -1 || s.indexOf('dsygc') !== -1)) return true;
+        if ((s.indexOf('touchend') !== -1 || s.indexOf('touchstart') !== -1 || s.indexOf('changedtouches') !== -1 || s.indexOf('clientheight') !== -1) && (s.indexOf('location.href') !== -1 || s.indexOf('top.location') !== -1 || s.indexOf('window.location') !== -1)) return true;
+        if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij|7461c|7461m)/.test(s)) return true;
+        if (s.indexOf('new function') !== -1 && (s.indexOf('_tdcs') !== -1 || s.indexOf('wvsyru') !== -1 || s.indexOf('nnkqek') !== -1 || s.indexOf('7461') !== -1)) return true;
+        return false;
+      }
+
+      function fakeWin(u) {
+        var f = {
+          closed: false, name: '', opener: window, parent: window, top: window, frames: [], length: 0,
+          close: function () { this.closed = true; }, focus: function () {}, blur: function () {},
+          postMessage: function () {}, print: function () {}, stop: function () {},
+          location: { href: u || 'about:blank', assign: function () {}, replace: function () {}, reload: function () {} },
+          document: { open: function () { return this; }, close: function () {}, write: function () {}, writeln: function () {} }
+        };
+        f.window = f;
+        return f;
+      }
+
+      // Same-site new tab during a user gesture is allowed; everything else that opens a window is not.
+      function userSameSiteTab(u) {
+        if (!u || typeof u !== 'string') return false;
+        try {
+          var p = new URL(u.trim(), window.location.href);
+          if (p.protocol !== 'http:' && p.protocol !== 'https:') return false;
+          if (!isSame(p.href) || isAd(p.href)) return false;
+        } catch (e) { return false; }
+        var ua = navigator.userActivation;
+        return !!(ua && ua.isActive);
+      }
+
+      var origOpen = window.open;
+      window.open = function (url, target, feat) {
+        if (STATE.active && (isAd(url) || (url && !isSame(url)) || target === '_blank' || target === '_new' || !target) && !userSameSiteTab(url)) {
+          window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script window.open' } }));
+          return fakeWin(url);
+        }
+        return origOpen.call(this || window, url, target, feat);
+      };
+
+      var fnVerdicts = (typeof WeakMap === 'function') ? new WeakMap() : null;
+      var isAdFn = function (f) {
+        if (fnVerdicts) {
+          var hit = fnVerdicts.get(f);
+          if (hit !== undefined) return hit;
+        }
+        var verdict = false;
+        try { verdict = isAdCode(Function.prototype.toString.call(f)); } catch (e) {}
+        if (fnVerdicts) fnVerdicts.set(f, verdict);
+        return verdict;
+      };
+
+      var OrigFunction = window.Function;
+      window.Function = function (...args) {
+        var code = args[args.length - 1] || '';
+        if (STATE.active && typeof code === 'string' && isAdCode(code)) {
+          window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: 'payload', reason: 'page-script new Function' } }));
+          return function () {};
+        }
+        return OrigFunction.apply(this, args);
+      };
+      window.Function.prototype = OrigFunction.prototype;
+
+      var origAEL = EventTarget.prototype.addEventListener;
+      EventTarget.prototype.addEventListener = function (t, l, o) {
+        if (STATE.active) {
+          if (t === 'devicemotion' || t === 'deviceorientation') return;
+          if (typeof l === 'function' && isAdFn(l)) {
+            window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: t, reason: 'page-script addEventListener' } }));
+            return;
+          }
+        }
+        return origAEL.call(this, t, l, o);
+      };
+
+      var origSetTimeout = window.setTimeout;
+      window.setTimeout = function (h, d, ...args) {
+        if (STATE.active && typeof h === 'function' && isAdFn(h)) return 0;
+        return origSetTimeout.call(this, h, d, ...args);
+      };
+
+      var origSetInterval = window.setInterval;
+      window.setInterval = function (h, d, ...args) {
+        if (STATE.active && typeof h === 'function' && isAdFn(h)) return 0;
+        return origSetInterval.call(this, h, d, ...args);
+      };
+
+      var OrigWS = window.WebSocket;
+      if (OrigWS) {
+        window.WebSocket = function (url, proto) {
+          if (STATE.active && isAd(url)) {
+            window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script WebSocket' } }));
+            return { url: url, readyState: 3, send: function () {}, close: function () {}, addEventListener: function () {}, removeEventListener: function () {} };
+          }
+          return proto === undefined ? new OrigWS(url) : new OrigWS(url, proto);
+        };
+        window.WebSocket.prototype = OrigWS.prototype;
+      }
+
+      try {
+        var sDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+        if (sDesc && sDesc.set) {
+          var oSet = sDesc.set;
+          Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+            set: function (v) {
+              if (STATE.active && isAd(v)) {
+                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: v, reason: 'page-script script.src' } }));
+                return oSet.call(this, 'data:text/javascript,/*besing-blocked*/');
+              }
+              if (this.id !== '__besing_pr_guard__' && gateBlocks(String(v || ''))) {
+                noteGated(v);
+                return oSet.call(this, 'data:text/javascript,/*besing-gated*/');
+              }
+              return oSet.call(this, v);
+            },
+            get: sDesc.get,
+            configurable: true
+          });
+        }
+      } catch (e) {}
+
+      // Script gate for scripts that page code inserts.
+      ['appendChild', 'insertBefore'].forEach(function (name) {
+        var orig = Node.prototype[name];
+        Node.prototype[name] = function (node) {
+          if (node && node.tagName === 'SCRIPT' && isExecScript(node) && gateBlocks(node.getAttribute('src') || '')) {
+            try { node.type = 'javascript/blocked'; } catch (e) {}
+            noteGated(node.getAttribute('src'));
+            return node;
+          }
+          return orig.apply(this, arguments);
+        };
+      });
+
+      var oInsert = Element.prototype.insertAdjacentHTML;
+      Element.prototype.insertAdjacentHTML = function (p, h) {
+        if (STATE.active && typeof h === 'string' && h.indexOf('position:fixed') !== -1 && (h.indexOf('opacity:0.01') !== -1 || h.indexOf('opacity: 0.01') !== -1 || h.indexOf('opacity:0;') !== -1)) {
+          return;
+        }
+        return oInsert.call(this, p, h);
+      };
+    },
+    // </besing-guard>
+
 
     destroy() {
       const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -1090,6 +1399,8 @@
         this._sweepHandler = null;
       }
       this._userIntentionalClick = false;
+      // The page-world guard stays installed for the life of the page; switch all of its hooks off.
+      this._sendGuardConfig(false);
     }
   };
 
@@ -1098,6 +1409,7 @@
     window.__BESING_SCRIPTS__['prevent-redirect'] = PreventRedirect;
     if (!window.__BESING_EMBEDDED__) {
       PreventRedirect.init();
+      PreventRedirect.handleLateStart();
     }
   }
 })();

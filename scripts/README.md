@@ -16,7 +16,7 @@ Collection of modular, plug-and-play userscripts designed for the **BESing** fra
 | **[Night Comfort Dimmer](./dark-dimmer/dark-dimmer.user.js)** | 1.0.0 | Accessibility | Gentle, contrast-preserving dark backdrop filter for late-night viewing comfort. | [dark-dimmer.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/dark-dimmer.md) |
 | **[Markdown Link Copier](./quick-copy/quick-copy.user.js)** | 1.0.0 | Tools | Shortcut `Alt + C` captures page title and URL formatted as Markdown `[Title](URL)` with toast. | [quick-copy.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/quick-copy.md) |
 | **[Grok Exporter](./grok-exporter/grok-exporter.user.js)** | 1.1.0 | Tools | Copies or downloads the full Grok conversation as plain text or Markdown, including messages Grok has not rendered yet. | [grok-exporter.md](../docs/scripts/grok-exporter.md) |
-| **[Prevent Redirect](./prevent-redirect/prevent-redirect.user.js)** | 1.4.1 | Security | Blocks unwanted automatic navigation, popup spam, and tab hijacking by returning mock window objects. | [prevent-redirect.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/prevent-redirect.md) |
+| **[Prevent Redirect](./prevent-redirect/prevent-redirect.user.js)** | 1.7.0 | Security | Blocks unwanted automatic navigation, popup spam, and tab hijacking by returning mock window objects. | [prevent-redirect.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/prevent-redirect.md) |
 
 ---
 

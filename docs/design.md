@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.7.8  
+**Version:** 1.8.0  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -197,6 +197,7 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
   - Configurations are stored exclusively under `siteRules[hostname].configs[scriptId]`, completely bypassing global defaults for that site.
   - A visual badge indicates `[📍 hostname Config]` in the secondary menu.
   - **Automatic Wiping on `OFF`**: When a script is toggled to `OFF`, any custom site-specific configuration under `siteRules[hostname].configs[scriptId]` is **immediately wiped**. When switched back to `SITE` or `ON`, the script starts fresh from defaults, ensuring no stale configurations persist.
+  - **Superseded in v1.8.0**: site settings are now a separate lock that no mode change wipes (section 7.34).
 
 ### 7.3 Text Size Enhancer Script (`text-size-control`)
 - **Problem**: Modern high-resolution monitors and poorly formatted websites often leave fonts unreadably small even at standard browser 200% system zoom limits.
@@ -467,3 +468,26 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Problem**: In 7.32 the footer bar followed the newest page at the end of the stream. With streaming on, the next page is inserted before the reader reaches the end (at 90% of the newest page with preload), so the bar was always pushed below the next page and never seen.
 - **PageStream 1.3.1**: Every page keeps its own bar under its text. Page 1's bar stays in place and the first streamed page goes after it (`_lastFooterSibling`); each streamed block appends the fetched page's `replace` elements that follow its content (`_extractFooterNavs`, scripts removed, links absolute). Details in `docs/scripts/pagestream.md` 3.3.
 - **Verification**: Playwright in Edge with the full Packed bundle (all modules on, iPad viewport and user agent, When to Load at Bottom) on a live suduguu.com chapter: page 1's bar (上一章 / 目录 / 下一页) sat directly above page 2's divider, and pages 2 and 3 each ended with their own bar linking to their neighbours; screenshot checked.
+
+### 7.34 Four Modes on the Detail Page, Settings Locked to a Site & Prevent Redirect Strict Protection (v1.8.0)
+- **Problem**: Prevent Redirect still missed redirects on some sites, on Windows as well as iOS. Settings could only be per-site while a script was in `SITE` mode, and switching the script `OFF` or to `SITE OFF` wiped them. `SITE OFF` was only reachable from the detail page when the script happened to be globally on.
+- **Four Modes (Detail Page)**: The detail page always shows `OFF`, `SITE OFF`, `SITE ONLY` and `ON`. The script list keeps its three-step cycle (off, on, site on).
+- **Settings Lock (`Lock Settings to This Site`)**: A segmented control on the detail page of every script with settings, Global or the current host. The lock is the existence of `siteRules[host].configs[scriptId]`, so site settings saved by earlier versions are already locked.
+  - **Lock** copies the current global settings to the site (`lockConfigToSite`), so later global changes do not move the site.
+  - While locked, `getScriptConfig` returns global settings overlaid with the site copy in every mode, and `setScriptConfig` writes to the site copy only.
+  - `setScriptMode`, `setSiteOverride`, `removeSiteOverride` and removing a script rule in Settings no longer touch locked settings. Choosing `SITE ONLY` locks automatically.
+  - **Unlock** (Global, or ✕ on the "Settings Locked" row in Settings > Site Specific Rules) discards the site copy. Removing the whole site in Settings still removes everything for it.
+  - `pushConfigToModule` hands the settings that now apply to the running module, through `onConfigChange` or a restart.
+  - Rest Reminder (`GLOBAL_ONLY_SETTINGS`) cannot be locked, because its timer state is shared by every site.
+- **Document-Start Settings**: `BESStorage`'s constructor reads `GM_getValue` synchronously when a userscript manager is present, and otherwise this site's localStorage mirror of extension storage. `initPreemptiveShields` arms Prevent Redirect with the site's real settings and skips it on sites where it is off, instead of always arming it with empty settings and tearing it down after storage loaded.
+- **Prevent Redirect 1.7.0**: Strict Protection, off by default. A script gate (other sites' scripts or all scripts, with a host allowlist) and a late-start action (cancel the page's pending timers, or also rebuild the page as a sanitized copy of itself). The manager runs `handleLateStart()` once after the boot-time init; the result is logged as `late start (...)`, and a rebuild triggers `onPageRebuilt()` (DOM observer re-attached to the new `<html>`, widget re-mounted, other running modules restarted). A timer purge also cancels the boot log's pending write, so the listener calls `BESBootLog.rearm()` first. Details in `docs/scripts/prevent-redirect.md`, "Strict Protection".
+- **Extension Page-World Guard (Root Cause)**: MV3 applies the extension's own CSP to inline scripts that a content script inserts, so Prevent Redirect's page-world guard never ran in the extension. Page code could call `window.open`, schedule redirect timers and use `new Function` unhindered. The guard is now `_guardMain` in the module source; `build.py` (`build_guard_script`) writes it to `extension/pr-main.js`, a `"world": "MAIN"` content script that starts inactive and is switched on by the module over DOM events. The guard also follows the module off now. Details in `docs/scripts/prevent-redirect.md`, "Extension Page-World Guard".
+- **Debug Log**: `page-guard-ok` / `page-guard-OFF` / `page-guard-MISSING` (asked over a DOM event, so it works across JS worlds), `gate=... gated=N` with up to 5 `gated script` events, `late start (...)`, and `MISSED navigation not cancelable` for off-site navigations the browser would not let Prevent Redirect cancel.
+- **Verification**: Playwright in Edge, with BESing loaded as a userscript (a synchronous `GM_*` shim) at document-start or after load, on local test pages where `127.0.0.1` and `localhost` are two different sites. 41 checks passed:
+  - Script gate: other-site scripts stopped, both parser-inserted and page-inserted; first-party and inline scripts still ran; allowlisted hosts ran; All Scripts ran nothing and left the content.
+  - A locked site setting applied at document-start, and `SITE OFF` left the page untouched.
+  - Late start: Cancel Timers stopped a pending timer. Rebuild Page dropped an element's click trap, kept `document.write` text, filled a lazy image, re-mounted the widget, and kept same-site links working. With late start off, the navigation guard still blocked an off-site redirect.
+  - Settings lock: survived every mode change and override removal, and Global discarded it.
+  - Detail page: four buttons, lock and strict controls saved to the site only and applied live.
+  - Unpacked extension in Chromium: the MAIN-world guard answered `on`, a page-script `window.open` popup was blocked (the 1.7.8 extension let it open a tab), and `SITE OFF` left the guard off.
+  - Not yet verified on iOS (Stay) or with Tampermonkey's own injection.

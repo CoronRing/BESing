@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.7.8
+ * Version 1.8.0
  */
 
 (function () {
@@ -12,6 +12,8 @@
     try { return window.top === window.self; } catch (e) { return false; }
   })();
   const FRAME_SAFE_MODULES = new Set(['prevent-redirect', 'force-copy']);
+  // Modules whose settings drive state shared by every site, so they cannot be locked to one site.
+  const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder']);
 
   // Ownership claim shared by every JS world (userscript sandboxes, extension content scripts, page).
   // Worlds do not share globals, and <html> may not exist yet at document-start, but they do share
@@ -232,8 +234,17 @@
 
   // 2. Storage Manager
   class BESStorage {
+    // Reads synchronously so code that must run at document-start (Prevent Redirect's shields) sees
+    // the user's real modes and settings: userscript manager storage is synchronous, and extension
+    // storage is mirrored into this site's localStorage on every read and write.
     constructor() {
       const readLocal = (k, def) => {
+        if (BESAdapter.isGM) {
+          try {
+            const val = GM_getValue(k, undefined);
+            if (val !== undefined && val !== null) return val;
+          } catch (e) {}
+        }
         try {
           const item = window.localStorage.getItem('besing_' + k);
           return (item !== null && item !== undefined) ? JSON.parse(item) : def;
@@ -349,6 +360,8 @@
       return false;
     }
 
+    // Modes only decide where a script runs. Settings locked to a site (see isConfigLocked) are never
+    // touched here; the only way to drop them is to switch the lock back to global.
     async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {
       const h = (host || '').toLowerCase().trim();
       if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
@@ -359,28 +372,51 @@
         this.enabledScripts[scriptId] = true;
         delete this.siteRules[h].scripts[scriptId];
       } else if (mode === 'site') {
-        // Active on this site only; globally OFF elsewhere
+        // Active on this site only; globally OFF elsewhere. Its settings follow it to this site.
         this.siteRules[h].scripts[scriptId] = true;
         this.enabledScripts[scriptId] = false;
+        this.lockConfigToSite(scriptId, h);
       } else if (mode === 'site-off') {
         // Explicitly disabled on this site only (e.g. RBC), global stays enabled
         this.siteRules[h].scripts[scriptId] = false;
-        if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
-          delete this.siteRules[h].configs[scriptId];
-        }
       } else {
         // OFF: Remove site override if present, and disable globally
-        if (this.siteRules[h].scripts[scriptId] !== undefined) {
-          delete this.siteRules[h].scripts[scriptId];
-          if (this.siteRules[h].configs && this.siteRules[h].configs[scriptId]) {
-            delete this.siteRules[h].configs[scriptId];
-          }
-        }
+        delete this.siteRules[h].scripts[scriptId];
         this.enabledScripts[scriptId] = false;
       }
 
       this.cleanupSiteRule(h);
       await BESAdapter.set('enabled_scripts', this.enabledScripts);
+      await BESAdapter.set('site_rules', this.siteRules);
+    }
+
+    // Settings are locked to a site when `siteRules[host].configs[scriptId]` exists. Data saved by
+    // earlier versions in that place (site-only mode) is therefore already locked.
+    isConfigLocked(scriptId, host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      const rule = this.siteRules[h];
+      return !!(rule && rule.configs && rule.configs[scriptId] && typeof rule.configs[scriptId] === 'object');
+    }
+
+    // Starts a site lock from a copy of the current global settings, so the site keeps today's values
+    // when the global settings change later. Does not persist; callers save `site_rules`.
+    lockConfigToSite(scriptId, host) {
+      if (GLOBAL_ONLY_SETTINGS.has(scriptId) || this.isConfigLocked(scriptId, host)) return;
+      if (!this.siteRules[host]) this.siteRules[host] = { disableAll: false, scripts: {}, configs: {} };
+      if (!this.siteRules[host].configs) this.siteRules[host].configs = {};
+      this.siteRules[host].configs[scriptId] = JSON.parse(JSON.stringify(this.scriptConfigs[scriptId] || {}));
+    }
+
+    // Locking copies the global settings to the site; unlocking discards the site's settings.
+    async setConfigLock(scriptId, locked, host = this.getCurrentHost()) {
+      const h = (host || '').toLowerCase().trim();
+      if (!h) return;
+      if (locked) {
+        this.lockConfigToSite(scriptId, h);
+      } else if (this.siteRules[h] && this.siteRules[h].configs) {
+        delete this.siteRules[h].configs[scriptId];
+        this.cleanupSiteRule(h);
+      }
       await BESAdapter.set('site_rules', this.siteRules);
     }
 
@@ -410,10 +446,8 @@
         this.siteRules[h].scripts[scriptId] = true;
       } else if (mode === 'site-off' || mode === false) {
         this.siteRules[h].scripts[scriptId] = false;
-        if (this.siteRules[h].configs) delete this.siteRules[h].configs[scriptId];
       } else {
         delete this.siteRules[h].scripts[scriptId];
-        if (this.siteRules[h].configs) delete this.siteRules[h].configs[scriptId];
       }
 
       this.cleanupSiteRule(h);
@@ -424,34 +458,24 @@
       const h = (host || '').toLowerCase().trim();
       if (!h || !this.siteRules[h]) return;
       if (this.siteRules[h].scripts) delete this.siteRules[h].scripts[scriptId];
-      if (this.siteRules[h].configs) delete this.siteRules[h].configs[scriptId];
       this.cleanupSiteRule(h);
       await BESAdapter.set('site_rules', this.siteRules);
     }
 
-    // Script Configs: Site-Isolated vs Global
+    // Script settings: the site's locked copy when one exists (whatever the script's mode), else global.
     getScriptConfig(scriptId, host = this.getCurrentHost()) {
       const h = (host || '').toLowerCase().trim();
-      const mode = this.getScriptMode(scriptId, h);
-
-      if (mode === 'site') {
-        if (this.siteRules[h] && this.siteRules[h].configs && this.siteRules[h].configs[scriptId] !== undefined) {
-          return { ...(this.scriptConfigs[scriptId] || {}), ...this.siteRules[h].configs[scriptId] };
-        }
-        return { ...(this.scriptConfigs[scriptId] || {}) };
+      if (this.isConfigLocked(scriptId, h)) {
+        return { ...(this.scriptConfigs[scriptId] || {}), ...this.siteRules[h].configs[scriptId] };
       }
-
       return { ...(this.scriptConfigs[scriptId] || {}) };
     }
 
     async setScriptConfig(scriptId, patch, host = this.getCurrentHost()) {
       const h = (host || '').toLowerCase().trim();
-      const mode = this.getScriptMode(scriptId, h);
 
-      if (mode === 'site') {
-        if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
-        if (!this.siteRules[h].configs) this.siteRules[h].configs = {};
-        this.siteRules[h].configs[scriptId] = { ...(this.siteRules[h].configs[scriptId] || {}), ...patch };
+      if (this.isConfigLocked(scriptId, h)) {
+        this.siteRules[h].configs[scriptId] = { ...this.siteRules[h].configs[scriptId], ...patch };
         await BESAdapter.set('site_rules', this.siteRules);
       } else {
         this.scriptConfigs[scriptId] = { ...(this.scriptConfigs[scriptId] || {}), ...patch };
@@ -494,8 +518,8 @@
         this.siteRules[h].disableAll = false;
         this.cleanupSiteRule(h);
       } else if (this.siteRules[h].scripts) {
+        // Removes the mode rule only; locked settings stay until unlocked.
         delete this.siteRules[h].scripts[ruleKey];
-        if (this.siteRules[h].configs) delete this.siteRules[h].configs[ruleKey];
         this.cleanupSiteRule(h);
       }
 
@@ -546,6 +570,8 @@
     startedAt: (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0,
     _persistTimer: 0,
     _writing: Promise.resolve(),
+    // Scripts stopped by Prevent Redirect's script gate on this load, from every JS world.
+    gated: 0,
 
     elapsed() {
       const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
@@ -564,7 +590,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.7.8',
+          v: '1.8.0',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -647,12 +673,12 @@
           parts.push(s && s.isConnected ? 'ad-style-ok' : 'AD-STYLE-MISSING');
         }
         if (running.includes('prevent-redirect')) {
-          const pageWin = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
-          let guard = 'unknown';
-          try { guard = pageWin.__besing_pr_active__ ? 'ok' : 'MISSING'; } catch (e) {}
-          parts.push(`page-guard-${guard}`);
           const pr = (app.modules || []).find(m => m.id === 'prevent-redirect');
+          // Asked over a DOM event, which also reaches a guard living in another JS world.
+          const answer = pr && typeof pr._pingGuard === 'function' ? pr._pingGuard() : null;
+          parts.push(`page-guard-${answer === 'on' ? 'ok' : (answer === 'off' ? 'OFF' : 'MISSING')}`);
           parts.push(pr && pr._navigateHandler ? 'nav-guard-on' : 'NAV-GUARD-OFF');
+          if (pr && pr._cfg && pr._cfg.blockScripts !== 'off') parts.push(`gate=${pr._cfg.blockScripts} gated=${this.gated}`);
         }
         parts.push(`vis=${document.visibilityState}`);
         this.event(`${label}: ${parts.join(' ')}`);
@@ -667,6 +693,12 @@
         this._persistTimer = 0;
         this.persist();
       }, 150);
+    },
+
+    // A late-start timer purge can cancel the pending write; forget its id and schedule a new one.
+    rearm() {
+      this._persistTimer = 0;
+      if (this.entry) this.schedulePersist();
     },
 
     // Writes are chained so one page never interleaves two read-modify-write cycles.
@@ -745,7 +777,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.7.8), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.8.0), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -2063,9 +2095,12 @@
       const mod = {
     id: 'prevent-redirect',
     name: 'Prevent Redirect',
-    version: '1.6.0',
+    version: '1.7.0',
     description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
     category: 'Security',
+    _cfg: null,
+    _gateCount: 0,
+    _lateHandled: false,
     _origOpen: null,
     _origUnsafeOpen: null,
     _origWebSocket: null,
@@ -2300,7 +2335,6 @@
       const self = this;
       this._navigateHandler = function (e) {
         try {
-          if (!e.cancelable) return;
           if (e.navigationType === 'reload' || e.navigationType === 'traverse') return;
           if (e.downloadRequest !== null && e.downloadRequest !== undefined) return;
           // Form posts (logins, payment confirmations) are left alone; ad scripts do not use them.
@@ -2309,6 +2343,17 @@
           const isAd = self._isAdOrRedirectUrl(url);
           const isExternal = !self._isSameHost(url);
           if (!isAd && !isExternal) return;
+          if (!e.cancelable) {
+            // The browser does not let this one be stopped. Reported so the debug log shows it.
+            if (!e.userInitiated || isAd) {
+              try {
+                window.dispatchEvent(new CustomEvent('besing:redirect-missed', {
+                  detail: { url, reason: 'navigation not cancelable' }
+                }));
+              } catch (err) {}
+            }
+            return;
+          }
           // Links the user tapped are judged by the click guard instead.
           if (e.userInitiated && !isAd) return;
           e.preventDefault();
@@ -2331,6 +2376,181 @@
       if (!this._isSameHost(parsed.href) || this._isAdOrRedirectUrl(parsed.href)) return false;
       const ua = typeof navigator !== 'undefined' ? navigator.userActivation : null;
       return !!(ua && ua.isActive);
+    },
+
+    // Strict options. All are off unless the user turns them on, because each one breaks sites
+    // that need their scripts. See docs/scripts/prevent-redirect.md, "Strict Protection".
+    //   blockScripts:    'off' | 'third-party' | 'all'   script gate, effective when BESing starts first
+    //   scriptAllowlist: hosts whose scripts the gate always allows (string, one per line or comma separated)
+    //   lateStart:       'off' | 'purge-timers' | 'rebuild'   what to undo when BESing starts after the page
+    _normalizeConfig(cfg) {
+      const c = (cfg && typeof cfg === 'object') ? cfg : {};
+      const blockScripts = (c.blockScripts === 'third-party' || c.blockScripts === 'all') ? c.blockScripts : 'off';
+      const lateStart = (c.lateStart === 'purge-timers' || c.lateStart === 'rebuild') ? c.lateStart : 'off';
+      const rawList = Array.isArray(c.scriptAllowlist) ? c.scriptAllowlist : String(c.scriptAllowlist || '').split(/[\s,]+/);
+      const scriptAllowlist = rawList
+        .map(h => String(h).trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/[/?#].*$/, '').replace(/^\*\./, '').replace(/:\d+$/, ''))
+        .filter(h => /^[a-z0-9.-]+$/.test(h));
+      return { blockScripts, lateStart, scriptAllowlist };
+    },
+
+    // Registrable-domain approximation: `img.example.com` and `www.example.com` are the same site,
+    // as are `a.example.co.uk` and `b.example.co.uk`. IP addresses compare whole.
+    _siteKey(host) {
+      const h = String(host || '').toLowerCase().replace(/\.$/, '');
+      if (!h || /^[\d.]+$/.test(h) || h.includes(':')) return h;
+      const parts = h.split('.');
+      if (parts.length <= 2) return h;
+      const sld = parts[parts.length - 2];
+      const tld = parts[parts.length - 1];
+      const keep = (tld.length === 2 && /^(co|com|net|org|gov|edu|ac|or|ne|go)$/.test(sld)) ? 3 : 2;
+      return parts.slice(-keep).join('.');
+    },
+
+    _isAllowlistedHost(host) {
+      const list = (this._cfg && this._cfg.scriptAllowlist) || [];
+      const h = String(host || '').toLowerCase();
+      return list.some(a => h === a || h.endsWith('.' + a));
+    },
+
+    // Whether the script gate stops a script with this `src` ('' for an inline script).
+    _gateBlocksScript(src) {
+      const mode = this._cfg ? this._cfg.blockScripts : 'off';
+      if (mode === 'off') return false;
+      const raw = typeof src === 'string' ? src.trim() : '';
+      if (!raw) return mode === 'all';
+      let parsed;
+      try { parsed = new URL(raw, window.location.href); } catch (e) { return mode === 'all'; }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return mode === 'all';
+      const host = parsed.hostname.toLowerCase();
+      if (this._isAllowlistedHost(host)) return false;
+      if (mode === 'all') return true;
+      return this._siteKey(host) !== this._siteKey(window.location.hostname);
+    },
+
+    _isExecutableScript(node) {
+      if (!node || node.tagName !== 'SCRIPT' || node.id === '__besing_pr_guard__') return false;
+      const t = (node.getAttribute('type') || '').trim().toLowerCase();
+      if (t === 'javascript/blocked') return false;
+      return !t || t === 'module' || /(java|ecma)script/.test(t);
+    },
+
+    // Neutralizes a script element the gate stops. Changing `type` before the browser prepares the
+    // element is what keeps it from running; parsers prepare a script only after a microtask
+    // checkpoint, which is when the DOM observer runs.
+    _gateScriptNode(node) {
+      if (!this._isExecutableScript(node)) return false;
+      const src = node.getAttribute('src') || '';
+      if (!this._gateBlocksScript(src)) return false;
+      try { node.type = 'javascript/blocked'; } catch (e) {}
+      this._noteGated(src || 'inline script');
+      return true;
+    },
+
+    // Gate blocks are counted and reported on their own event, not as redirects, so a page with many
+    // third-party scripts does not flood the redirect alert.
+    _noteGated(src) {
+      this._gateCount++;
+      console.info('[BESing Prevent Redirect] Script gate stopped:', src);
+      try {
+        window.dispatchEvent(new CustomEvent('besing:scripts-gated', { detail: { url: String(src), count: this._gateCount } }));
+      } catch (e) {}
+    },
+
+    // Cancels every timer and interval the given window has scheduled so far. Timer ids are
+    // sequential, so every id below a fresh one covers them all. Returns the highest id cleared.
+    _purgeTimers(win) {
+      try {
+        const newest = Number(win.setTimeout(function () {}, 0)) || 0;
+        const last = Math.min(newest, 500000);
+        for (let id = last; id > 0; id--) {
+          win.clearTimeout(id);
+          win.clearInterval(id);
+        }
+        return last;
+      } catch (e) {
+        return 0;
+      }
+    },
+
+    // Strips everything that can run code or hold a tap trap from a detached copy of the page.
+    _sanitizeTree(root) {
+      const drop = [
+        'script', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet', 'portal',
+        'besing-host', 'besing-log-viewer', '[id^="besing-"]', '[id^="__besing"]',
+        'meta[http-equiv="refresh" i]', 'link[rel="modulepreload"]', 'link[rel~="preload"][as="script"]'
+      ].join(', ');
+      root.querySelectorAll(drop).forEach(el => el.remove());
+
+      const urlAttrs = new Set(['href', 'src', 'action', 'formaction', 'xlink:href']);
+      const lazyAttrs = ['data-src', 'data-original', 'data-lazy-src'];
+      const traps = [];
+      [root, ...root.querySelectorAll('*')].forEach(el => {
+        for (const attr of Array.from(el.attributes)) {
+          const name = attr.name.toLowerCase();
+          if (name.startsWith('on') || (urlAttrs.has(name) && /^\s*javascript:/i.test(attr.value))) {
+            el.removeAttribute(attr.name);
+          }
+        }
+        // Lazy loaders are page scripts, so images they had not reached yet would stay blank.
+        if (el.tagName === 'IMG') {
+          const cur = el.getAttribute('src') || '';
+          if (!cur || cur.startsWith('data:')) {
+            const lazy = lazyAttrs.map(a => el.getAttribute(a)).find(Boolean);
+            if (lazy) el.setAttribute('src', lazy);
+          }
+        }
+        if (el !== root && this._isTrapStyle(el.getAttribute('style') || '')) traps.push(el);
+      });
+      traps.forEach(el => el.remove());
+    },
+
+    // Replaces the live page with a script-free copy of itself. Listeners the page attached to its
+    // elements stay with the discarded originals, and the copy keeps text that scripts wrote
+    // (document.write chapters, rendered content), which a re-fetch of the HTML would lose.
+    _rebuildPage() {
+      const oldRoot = document.documentElement;
+      if (!oldRoot) return false;
+      try { window.stop(); } catch (e) {}
+      try {
+        const copy = oldRoot.cloneNode(true);
+        this._sanitizeTree(copy);
+        document.replaceChild(copy, oldRoot);
+        return true;
+      } catch (e) {
+        console.warn('[BESing Prevent Redirect] Page rebuild failed:', e);
+        return false;
+      }
+    },
+
+    // Called once by the manager right after the boot-time init (and by the standalone script).
+    // A late start means the page's scripts already ran; the `lateStart` option decides how much of
+    // their work to undo. Child frames are left alone.
+    handleLateStart() {
+      if (this._lateHandled) return null;
+      this._lateHandled = true;
+      const action = this._cfg ? this._cfg.lateStart : 'off';
+      if (action === 'off' || document.readyState === 'loading') return null;
+      let isTop = false;
+      try { isTop = window.top === window.self; } catch (e) {}
+      if (!isTop) return null;
+
+      const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+      let timersUpTo = this._purgeTimers(window);
+      if (unsafeWin !== window) timersUpTo = Math.max(timersUpTo, this._purgeTimers(unsafeWin));
+      // The page-world guard purges the page's own timers, which an isolated world cannot reach.
+      try { document.dispatchEvent(new CustomEvent('besing:pr-purge')); } catch (e) {}
+
+      const rebuilt = action === 'rebuild' ? this._rebuildPage() : false;
+      const result = { action, timersUpTo, rebuilt, ready: document.readyState };
+      console.warn('[BESing Prevent Redirect] Late start handled:', result);
+      try { window.dispatchEvent(new CustomEvent('besing:late-start-handled', { detail: result })); } catch (e) {}
+      return result;
+    },
+
+    onConfigChange(cfg) {
+      this._cfg = this._normalizeConfig(cfg);
+      this._sendGuardConfig(true);
     },
 
     notifyBlocked(targetUrl, reason) {
@@ -2363,8 +2583,9 @@
       }
     },
 
-    init() {
+    init(cfg) {
       this.destroy();
+      this._cfg = this._normalizeConfig(cfg);
       const self = this;
       const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
 
@@ -2503,6 +2724,10 @@
                 self.notifyBlocked(val, 'ad script injection');
                 return origSet.call(this, 'data:text/javascript,/*besing-blocked*/');
               }
+              if (this.id !== '__besing_pr_guard__' && self._gateBlocksScript(String(val || ''))) {
+                self._noteGated(val);
+                return origSet.call(this, 'data:text/javascript,/*besing-gated*/');
+              }
               return origSet.call(this, val);
             },
             get: scriptDesc.get,
@@ -2543,6 +2768,7 @@
               self.notifyBlocked(src, 'injected ' + node.tagName.toLowerCase());
               return node;
             }
+            if (self._gateScriptNode(node)) return node;
           }
           return self._origAppendChild.call(this, node);
         };
@@ -2555,6 +2781,7 @@
               self.notifyBlocked(src, 'injected ' + node.tagName.toLowerCase());
               return node;
             }
+            if (self._gateScriptNode(node)) return node;
           }
           return self._origInsertBefore.call(this, node, ref);
         };
@@ -2709,9 +2936,10 @@
         }
       } catch (e) {}
 
-      // Synchronously scan and intercept script tags and invisible overlay tiles added to DOM
+      // Synchronously scan and intercept script tags and invisible overlay tiles added to DOM.
+      // Observing the document (not <html>) keeps working after a late-start page rebuild swaps <html>.
       try {
-        const root = document.documentElement || document;
+        const root = document;
         if (root) {
           const observer = new MutationObserver((mutations) => {
             for (let m = 0; m < mutations.length; m++) {
@@ -2721,6 +2949,10 @@
                 if (!node || node.nodeType !== 1) continue;
                 // Our own page-world guard quotes the ad patterns it hooks, so it would match itself.
                 if (node.id === '__besing_pr_guard__') continue;
+                if (node.tagName === 'SCRIPT' && self._gateScriptNode(node)) {
+                  node.remove();
+                  continue;
+                }
                 if (node.tagName === 'SCRIPT') {
                   const src = node.getAttribute('src') || node.src || '';
                   const text = node.textContent || '';
@@ -2811,174 +3043,20 @@
         document.addEventListener('DOMContentLoaded', this._sweepHandler, { once: true });
       }
 
-      // 13. Inject comprehensive page-context guard for page scripts in main execution world
+      // 13. Page-world guard. The extension ships it as a MAIN-world content script that is already
+      // waiting here; the userscript injects it. Either way it is switched on with this init's settings.
+      if (this._pingGuard() === null) this._injectGuard();
+      if (typeof window !== 'undefined') window.__BESING_PREVENT_REDIRECT__ = this;
+      this._sendGuardConfig(true);
+    },
+
+    // Injects the guard as an inline <script> so it runs in the page's own JS world. A strict site
+    // CSP blocks this; the debug log then reports `page-guard-MISSING`.
+    _injectGuard() {
       try {
         const guardScript = document.createElement('script');
         guardScript.id = '__besing_pr_guard__';
-        guardScript.textContent = `
-          (function() {
-            if (window.__besing_pr_active__) return;
-            window.__besing_pr_active__ = true;
-            var curHost = (window.location.hostname || '').toLowerCase();
-
-            function isSame(u) {
-              if (!u || typeof u !== 'string') return true;
-              var t = u.trim();
-              if (!t || t.indexOf('#') === 0 || t.indexOf('javascript:') === 0) return true;
-              try {
-                var p = new URL(t, window.location.href);
-                var h = (p.hostname || '').toLowerCase();
-                return h === curHost || h.endsWith('.' + curHost) || curHost.endsWith('.' + h);
-              } catch(e) { return false; }
-            }
-
-            function isAd(u) {
-              if (!u || typeof u !== 'string') return false;
-              var s = u.toLowerCase();
-              if (/(?:^|\\/)(?:config\\/)?(?:v\\d+|tj|fumeiti|ads?|union|pop|float|jump|tongji|statistics)\\.js(?:$|\\?)/i.test(s)) return true;
-              if (/:(8001|8002|8003|8080|8081|8887|8888|9999|20091|20092|20093)\\b/.test(s) && !isSame(s)) return true;
-              if (/(lkg6odg|kt6th8f|fumeiti|comprelu|dsygc|uuysi5|uuysi6|5bjoeih|xq04k6u|qq26oeg|adzxdimq|vdxqxca|oybhpsij|popcash|propellerads|exoclick|adsterra|clickadu|richpush|trafficjunky|adservice|adnetwork|7461c|7461m)/.test(s)) return true;
-              if (/(\\/sc\\/\\d+|\\/cc\\/\\d+|\\/d\\/\\d+|\\/mj1\\/\\d+|\\/stats\\/\\d+|\\/push\\/|\\/stat\\/|\\/click\\/)/.test(s) && !isSame(s)) return true;
-              if (s.indexOf('?n=') !== -1 || s.indexOf('&target=1') !== -1 || s.indexOf('is_not=1') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1) {
-                if (!isSame(s)) return true;
-              }
-              return false;
-            }
-
-            function isAdCode(str) {
-              if (!str || typeof str !== 'string') return false;
-              var s = str.toLowerCase();
-              if (/(top\\.location|window\\.location|location\\.href)\\s*(!=|==|=)/.test(s) && (s.indexOf('http') !== -1 || s.indexOf('target=1') !== -1 || s.indexOf('purl') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1 || s.indexOf(':800') !== -1 || s.indexOf(':888') !== -1 || s.indexOf('7461') !== -1 || s.indexOf('comprelu') !== -1 || s.indexOf('kt6th8f') !== -1 || s.indexOf('lkg6odg') !== -1 || s.indexOf('adzxdimq') !== -1 || s.indexOf('dsygc') !== -1)) return true;
-              if ((s.indexOf('touchend') !== -1 || s.indexOf('touchstart') !== -1 || s.indexOf('changedtouches') !== -1 || s.indexOf('clientheight') !== -1) && (s.indexOf('location.href') !== -1 || s.indexOf('top.location') !== -1 || s.indexOf('window.location') !== -1)) return true;
-              if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij|7461c|7461m)/.test(s)) return true;
-              if (s.indexOf('new function') !== -1 && (s.indexOf('_tdcs') !== -1 || s.indexOf('wvsyru') !== -1 || s.indexOf('nnkqek') !== -1 || s.indexOf('7461') !== -1)) return true;
-              return false;
-            }
-
-            function fakeWin(u) {
-              var f = {
-                closed: false, name: '', opener: window, parent: window, top: window, frames: [], length: 0,
-                close: function() { this.closed = true; }, focus: function(){}, blur: function(){},
-                postMessage: function(){}, print: function(){}, stop: function(){},
-                location: { href: u || 'about:blank', assign: function(){}, replace: function(){}, reload: function(){} },
-                document: { open: function(){ return this; }, close: function(){}, write: function(){}, writeln: function(){} }
-              };
-              f.window = f;
-              return f;
-            }
-
-            // Same-site new tab during a user gesture is allowed; everything else that opens a window is not.
-            function userSameSiteTab(u) {
-              if (!u || typeof u !== 'string') return false;
-              try {
-                var p = new URL(u.trim(), window.location.href);
-                if (p.protocol !== 'http:' && p.protocol !== 'https:') return false;
-                if (!isSame(p.href) || isAd(p.href)) return false;
-              } catch(e) { return false; }
-              var ua = navigator.userActivation;
-              return !!(ua && ua.isActive);
-            }
-
-            // Hook window.open in page context
-            var origOpen = window.open;
-            window.open = function(url, target, feat) {
-              if ((isAd(url) || (url && !isSame(url)) || target === '_blank' || target === '_new' || !target) && !userSameSiteTab(url)) {
-                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script window.open' } }));
-                return fakeWin(url);
-              }
-              return origOpen.call(this || window, url, target, feat);
-            };
-
-            var fnVerdicts = (typeof WeakMap === 'function') ? new WeakMap() : null;
-            var isAdFn = function(f) {
-              if (fnVerdicts) {
-                var hit = fnVerdicts.get(f);
-                if (hit !== undefined) return hit;
-              }
-              var verdict = false;
-              try { verdict = isAdCode(Function.prototype.toString.call(f)); } catch(e) {}
-              if (fnVerdicts) fnVerdicts.set(f, verdict);
-              return verdict;
-            };
-
-            // Hook Function constructor in page context
-            var OrigFunction = window.Function;
-            window.Function = function(...args) {
-              var code = args[args.length - 1] || '';
-              if (typeof code === 'string' && isAdCode(code)) {
-                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: 'payload', reason: 'page-script new Function' } }));
-                return function() {};
-              }
-              return OrigFunction.apply(this, args);
-            };
-            window.Function.prototype = OrigFunction.prototype;
-
-            // Hook EventTarget.prototype.addEventListener in page context
-            var origAEL = EventTarget.prototype.addEventListener;
-            EventTarget.prototype.addEventListener = function(t, l, o) {
-              if (t === 'devicemotion' || t === 'deviceorientation') return;
-              if (typeof l === 'function' && isAdFn(l)) {
-                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: t, reason: 'page-script addEventListener' } }));
-                return;
-              }
-              return origAEL.call(this, t, l, o);
-            };
-
-            // Hook setTimeout & setInterval in page context
-            var origSetTimeout = window.setTimeout;
-            window.setTimeout = function(h, d, ...args) {
-              if (typeof h === 'function' && isAdFn(h)) return 0;
-              return origSetTimeout.call(this, h, d, ...args);
-            };
-
-            var origSetInterval = window.setInterval;
-            window.setInterval = function(h, d, ...args) {
-              if (typeof h === 'function' && isAdFn(h)) return 0;
-              return origSetInterval.call(this, h, d, ...args);
-            };
-
-            // Hook WebSocket in page context
-            var OrigWS = window.WebSocket;
-            if (OrigWS) {
-              window.WebSocket = function(url, proto) {
-                if (isAd(url)) {
-                  window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script WebSocket' } }));
-                  return { url: url, readyState: 3, send: function(){}, close: function(){}, addEventListener: function(){}, removeEventListener: function(){} };
-                }
-                return new OrigWS(url, proto);
-              };
-              window.WebSocket.prototype = OrigWS.prototype;
-            }
-
-            // Hook HTMLScriptElement.prototype.src in page context
-            try {
-              var sDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
-              if (sDesc && sDesc.set) {
-                var oSet = sDesc.set;
-                Object.defineProperty(HTMLScriptElement.prototype, 'src', {
-                  set: function(v) {
-                    if (isAd(v)) {
-                      window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: v, reason: 'page-script script.src' } }));
-                      return oSet.call(this, 'data:text/javascript,/*besing-blocked*/');
-                    }
-                    return oSet.call(this, v);
-                  },
-                  get: sDesc.get,
-                  configurable: true
-                });
-              }
-            } catch(e){}
-
-            // Hook insertAdjacentHTML in page context
-            var oInsert = Element.prototype.insertAdjacentHTML;
-            Element.prototype.insertAdjacentHTML = function(p, h) {
-              if (typeof h === 'string' && h.indexOf('position:fixed') !== -1 && (h.indexOf('opacity:0.01') !== -1 || h.indexOf('opacity: 0.01') !== -1 || h.indexOf('opacity:0;') !== -1)) {
-                return;
-              }
-              return oInsert.call(this, p, h);
-            };
-          })();
-        `;
+        guardScript.textContent = '(' + this._guardMain.toString() + ')(' + JSON.stringify(this._guardState(true)) + ');';
         const root = document.head || document.documentElement;
         if (root) {
           root.appendChild(guardScript);
@@ -2995,9 +3073,272 @@
           });
           docObs.observe(document, { childList: true, subtree: true });
         }
-        if (typeof window !== 'undefined') window.__BESING_PREVENT_REDIRECT__ = this;
       } catch (e) {}
     },
+
+    // 'on' or 'off' from the page-world guard, or null when no guard answered. Events on `document`
+    // reach every JS world, so this works from an isolated extension world too.
+    _pingGuard() {
+      let answer = null;
+      const onPong = (e) => { answer = typeof e.detail === 'string' ? e.detail : 'on'; };
+      try {
+        document.addEventListener('besing:pr-pong', onPong);
+        document.dispatchEvent(new CustomEvent('besing:pr-ping'));
+      } catch (e) {}
+      try { document.removeEventListener('besing:pr-pong', onPong); } catch (e) {}
+      return answer;
+    },
+
+    _guardState(active) {
+      const c = this._cfg || this._normalizeConfig(null);
+      return { active: !!active, mode: c.blockScripts, allow: c.scriptAllowlist };
+    },
+
+    _sendGuardConfig(active) {
+      try {
+        document.dispatchEvent(new CustomEvent('besing:pr-config', { detail: JSON.stringify(this._guardState(active)) }));
+      } catch (e) {}
+    },
+
+    // Page-world guard: hooks the page's own globals, which an isolated JS world cannot reach. It is
+    // serialized with toString(), so it must not use anything outside its own body. The userscript
+    // injects it inline (_injectGuard); build.py copies the code between the markers below into
+    // extension/pr-main.js, a MAIN-world content script, because MV3 applies the extension's own CSP
+    // to inline scripts that a content script inserts. `initial` and later 'besing:pr-config' events
+    // carry { active, mode, allow }; every hook passes through while `active` is false.
+    // <besing-guard>
+    _guardMain: function (initial) {
+      if (window.__besing_pr_active__) return;
+      window.__besing_pr_active__ = true;
+      var curHost = (window.location.hostname || '').toLowerCase();
+      var STATE = initial || { active: false, mode: 'off', allow: [] };
+
+      document.addEventListener('besing:pr-config', function (e) {
+        try {
+          var next = JSON.parse(e.detail);
+          if (next && typeof next === 'object') STATE = next;
+        } catch (err) {}
+      });
+      document.addEventListener('besing:pr-ping', function () {
+        document.dispatchEvent(new CustomEvent('besing:pr-pong', { detail: STATE.active ? 'on' : 'off' }));
+      });
+      // Late start: cancel the timers the page scheduled before BESing started.
+      document.addEventListener('besing:pr-purge', function () {
+        if (!STATE.active) return;
+        try {
+          var newest = Math.min(Number(setTimeout(function () {}, 0)) || 0, 500000);
+          for (var id = newest; id > 0; id--) { clearTimeout(id); clearInterval(id); }
+        } catch (err) {}
+      });
+
+      function siteKey(h) {
+        h = String(h || '').toLowerCase();
+        if (!h || /^[\d.]+$/.test(h) || h.indexOf(':') !== -1) return h;
+        var p = h.split('.');
+        if (p.length <= 2) return h;
+        var sld = p[p.length - 2], tld = p[p.length - 1];
+        var keep = (tld.length === 2 && /^(co|com|net|org|gov|edu|ac|or|ne|go)$/.test(sld)) ? 3 : 2;
+        return p.slice(-keep).join('.');
+      }
+
+      function gateBlocks(src) {
+        if (!STATE.active || (STATE.mode !== 'third-party' && STATE.mode !== 'all')) return false;
+        var raw = typeof src === 'string' ? src.trim() : '';
+        if (!raw) return STATE.mode === 'all';
+        var u;
+        try { u = new URL(raw, window.location.href); } catch (e) { return STATE.mode === 'all'; }
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return STATE.mode === 'all';
+        var h = u.hostname.toLowerCase();
+        var allow = STATE.allow || [];
+        for (var i = 0; i < allow.length; i++) {
+          if (h === allow[i] || h.endsWith('.' + allow[i])) return false;
+        }
+        if (STATE.mode === 'all') return true;
+        return siteKey(h) !== siteKey(curHost);
+      }
+
+      function isExecScript(n) {
+        if (!n || n.tagName !== 'SCRIPT' || n.id === '__besing_pr_guard__') return false;
+        var t = (n.getAttribute('type') || '').trim().toLowerCase();
+        if (t === 'javascript/blocked') return false;
+        return !t || t === 'module' || /(java|ecma)script/.test(t);
+      }
+
+      function noteGated(src) {
+        window.dispatchEvent(new CustomEvent('besing:scripts-gated', { detail: { url: String(src || 'inline script') } }));
+      }
+
+      function isSame(u) {
+        if (!u || typeof u !== 'string') return true;
+        var t = u.trim();
+        if (!t || t.indexOf('#') === 0 || t.indexOf('javascript:') === 0) return true;
+        try {
+          var p = new URL(t, window.location.href);
+          var h = (p.hostname || '').toLowerCase();
+          return h === curHost || h.endsWith('.' + curHost) || curHost.endsWith('.' + h);
+        } catch (e) { return false; }
+      }
+
+      function isAd(u) {
+        if (!u || typeof u !== 'string') return false;
+        var s = u.toLowerCase();
+        if (/(?:^|\/)(?:config\/)?(?:v\d+|tj|fumeiti|ads?|union|pop|float|jump|tongji|statistics)\.js(?:$|\?)/i.test(s)) return true;
+        if (/:(8001|8002|8003|8080|8081|8887|8888|9999|20091|20092|20093)\b/.test(s) && !isSame(s)) return true;
+        if (/(lkg6odg|kt6th8f|fumeiti|comprelu|dsygc|uuysi5|uuysi6|5bjoeih|xq04k6u|qq26oeg|adzxdimq|vdxqxca|oybhpsij|popcash|propellerads|exoclick|adsterra|clickadu|richpush|trafficjunky|adservice|adnetwork|7461c|7461m)/.test(s)) return true;
+        if (/(\/sc\/\d+|\/cc\/\d+|\/d\/\d+|\/mj1\/\d+|\/stats\/\d+|\/push\/|\/stat\/|\/click\/)/.test(s) && !isSame(s)) return true;
+        if (s.indexOf('?n=') !== -1 || s.indexOf('&target=1') !== -1 || s.indexOf('is_not=1') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1) {
+          if (!isSame(s)) return true;
+        }
+        return false;
+      }
+
+      function isAdCode(str) {
+        if (!str || typeof str !== 'string') return false;
+        var s = str.toLowerCase();
+        if (/(top\.location|window\.location|location\.href)\s*(!=|==|=)/.test(s) && (s.indexOf('http') !== -1 || s.indexOf('target=1') !== -1 || s.indexOf('purl') !== -1 || s.indexOf('ikooenpn') !== -1 || s.indexOf('srisnadi') !== -1 || s.indexOf(':800') !== -1 || s.indexOf(':888') !== -1 || s.indexOf('7461') !== -1 || s.indexOf('comprelu') !== -1 || s.indexOf('kt6th8f') !== -1 || s.indexOf('lkg6odg') !== -1 || s.indexOf('adzxdimq') !== -1 || s.indexOf('dsygc') !== -1)) return true;
+        if ((s.indexOf('touchend') !== -1 || s.indexOf('touchstart') !== -1 || s.indexOf('changedtouches') !== -1 || s.indexOf('clientheight') !== -1) && (s.indexOf('location.href') !== -1 || s.indexOf('top.location') !== -1 || s.indexOf('window.location') !== -1)) return true;
+        if (/(compel_skip_delay|seo_skip_delay|compel_click|ikooenpn_m|srisnadi_m|wsxg|adzxdimq|oybhpsij|7461c|7461m)/.test(s)) return true;
+        if (s.indexOf('new function') !== -1 && (s.indexOf('_tdcs') !== -1 || s.indexOf('wvsyru') !== -1 || s.indexOf('nnkqek') !== -1 || s.indexOf('7461') !== -1)) return true;
+        return false;
+      }
+
+      function fakeWin(u) {
+        var f = {
+          closed: false, name: '', opener: window, parent: window, top: window, frames: [], length: 0,
+          close: function () { this.closed = true; }, focus: function () {}, blur: function () {},
+          postMessage: function () {}, print: function () {}, stop: function () {},
+          location: { href: u || 'about:blank', assign: function () {}, replace: function () {}, reload: function () {} },
+          document: { open: function () { return this; }, close: function () {}, write: function () {}, writeln: function () {} }
+        };
+        f.window = f;
+        return f;
+      }
+
+      // Same-site new tab during a user gesture is allowed; everything else that opens a window is not.
+      function userSameSiteTab(u) {
+        if (!u || typeof u !== 'string') return false;
+        try {
+          var p = new URL(u.trim(), window.location.href);
+          if (p.protocol !== 'http:' && p.protocol !== 'https:') return false;
+          if (!isSame(p.href) || isAd(p.href)) return false;
+        } catch (e) { return false; }
+        var ua = navigator.userActivation;
+        return !!(ua && ua.isActive);
+      }
+
+      var origOpen = window.open;
+      window.open = function (url, target, feat) {
+        if (STATE.active && (isAd(url) || (url && !isSame(url)) || target === '_blank' || target === '_new' || !target) && !userSameSiteTab(url)) {
+          window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script window.open' } }));
+          return fakeWin(url);
+        }
+        return origOpen.call(this || window, url, target, feat);
+      };
+
+      var fnVerdicts = (typeof WeakMap === 'function') ? new WeakMap() : null;
+      var isAdFn = function (f) {
+        if (fnVerdicts) {
+          var hit = fnVerdicts.get(f);
+          if (hit !== undefined) return hit;
+        }
+        var verdict = false;
+        try { verdict = isAdCode(Function.prototype.toString.call(f)); } catch (e) {}
+        if (fnVerdicts) fnVerdicts.set(f, verdict);
+        return verdict;
+      };
+
+      var OrigFunction = window.Function;
+      window.Function = function (...args) {
+        var code = args[args.length - 1] || '';
+        if (STATE.active && typeof code === 'string' && isAdCode(code)) {
+          window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: 'payload', reason: 'page-script new Function' } }));
+          return function () {};
+        }
+        return OrigFunction.apply(this, args);
+      };
+      window.Function.prototype = OrigFunction.prototype;
+
+      var origAEL = EventTarget.prototype.addEventListener;
+      EventTarget.prototype.addEventListener = function (t, l, o) {
+        if (STATE.active) {
+          if (t === 'devicemotion' || t === 'deviceorientation') return;
+          if (typeof l === 'function' && isAdFn(l)) {
+            window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: t, reason: 'page-script addEventListener' } }));
+            return;
+          }
+        }
+        return origAEL.call(this, t, l, o);
+      };
+
+      var origSetTimeout = window.setTimeout;
+      window.setTimeout = function (h, d, ...args) {
+        if (STATE.active && typeof h === 'function' && isAdFn(h)) return 0;
+        return origSetTimeout.call(this, h, d, ...args);
+      };
+
+      var origSetInterval = window.setInterval;
+      window.setInterval = function (h, d, ...args) {
+        if (STATE.active && typeof h === 'function' && isAdFn(h)) return 0;
+        return origSetInterval.call(this, h, d, ...args);
+      };
+
+      var OrigWS = window.WebSocket;
+      if (OrigWS) {
+        window.WebSocket = function (url, proto) {
+          if (STATE.active && isAd(url)) {
+            window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: url, reason: 'page-script WebSocket' } }));
+            return { url: url, readyState: 3, send: function () {}, close: function () {}, addEventListener: function () {}, removeEventListener: function () {} };
+          }
+          return proto === undefined ? new OrigWS(url) : new OrigWS(url, proto);
+        };
+        window.WebSocket.prototype = OrigWS.prototype;
+      }
+
+      try {
+        var sDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+        if (sDesc && sDesc.set) {
+          var oSet = sDesc.set;
+          Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+            set: function (v) {
+              if (STATE.active && isAd(v)) {
+                window.dispatchEvent(new CustomEvent('besing:redirect-blocked', { detail: { url: v, reason: 'page-script script.src' } }));
+                return oSet.call(this, 'data:text/javascript,/*besing-blocked*/');
+              }
+              if (this.id !== '__besing_pr_guard__' && gateBlocks(String(v || ''))) {
+                noteGated(v);
+                return oSet.call(this, 'data:text/javascript,/*besing-gated*/');
+              }
+              return oSet.call(this, v);
+            },
+            get: sDesc.get,
+            configurable: true
+          });
+        }
+      } catch (e) {}
+
+      // Script gate for scripts that page code inserts.
+      ['appendChild', 'insertBefore'].forEach(function (name) {
+        var orig = Node.prototype[name];
+        Node.prototype[name] = function (node) {
+          if (node && node.tagName === 'SCRIPT' && isExecScript(node) && gateBlocks(node.getAttribute('src') || '')) {
+            try { node.type = 'javascript/blocked'; } catch (e) {}
+            noteGated(node.getAttribute('src'));
+            return node;
+          }
+          return orig.apply(this, arguments);
+        };
+      });
+
+      var oInsert = Element.prototype.insertAdjacentHTML;
+      Element.prototype.insertAdjacentHTML = function (p, h) {
+        if (STATE.active && typeof h === 'string' && h.indexOf('position:fixed') !== -1 && (h.indexOf('opacity:0.01') !== -1 || h.indexOf('opacity: 0.01') !== -1 || h.indexOf('opacity:0;') !== -1)) {
+          return;
+        }
+        return oInsert.call(this, p, h);
+      };
+    },
+    // </besing-guard>
+
 
     destroy() {
       const unsafeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -3137,6 +3478,8 @@
         this._sweepHandler = null;
       }
       this._userIntentionalClick = false;
+      // The page-world guard stays installed for the life of the page; switch all of its hooks off.
+      this._sendGuardConfig(false);
     }
   };
       mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><rect x=\"3\" y=\"11\" width=\"18\" height=\"11\" rx=\"2\" ry=\"2\"></rect><path d=\"M7 11V7a5 5 0 0 1 10 0v4\"></path></svg>";
@@ -5431,7 +5774,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.7.8';
+    static CURRENT_VERSION = '1.8.0';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -5630,14 +5973,19 @@
         }));
       }
 
+      // The constructor read modes and settings synchronously, so the shield starts with this site's
+      // settings (strict options included) and stays off where the user turned it off.
       const prModule = this.modules.find(m => m.id === 'prevent-redirect');
-      if (prModule && typeof prModule.init === 'function') {
+      const host = this.storage.getCurrentHost();
+      if (prModule && typeof prModule.init === 'function' && this.storage.isScriptActiveOnSite(prModule.id, host)) {
         try {
-          prModule.init({});
+          prModule.init(this.storage.getScriptConfig(prModule.id, host));
           prModule.running = true;
           console.log('[BESing] Preemptive security shield synchronously armed at document-start.');
+          if (typeof prModule.handleLateStart === 'function') prModule.handleLateStart();
         } catch (e) {
           console.warn('[BESing] Preemptive shield init error:', e);
+          BESBootLog.error('preemptive prevent-redirect', e);
         }
       }
     }
@@ -5881,10 +6229,39 @@
       this.updateBadge();
     }
 
+    // Prevent Redirect's late-start rebuild replaced <html>. Re-observe the new root and remount;
+    // other running modules restart so they hold the new page's elements instead of the old ones.
+    onPageRebuilt() {
+      if (this.disposed) return;
+      if (this._domObserver && document.documentElement) {
+        try {
+          this._domObserver.disconnect();
+          this._domObserver.observe(document.documentElement, { childList: true, subtree: false });
+        } catch (e) {}
+      }
+      const currentHost = this.storage.getCurrentHost();
+      this.modules.forEach(m => {
+        if (m.id === 'prevent-redirect' || !m.running) return;
+        try {
+          m.destroy();
+          m.init(this.storage.getScriptConfig(m.id, currentHost));
+        } catch (err) {
+          BESBootLog.error(`restart ${m.id}`, err);
+        }
+      });
+      this.ensureMounted('page-rebuilt');
+    }
+
     async applyScriptConfig(scriptId, patch) {
       const currentHost = this.storage.getCurrentHost();
       await this.storage.setScriptConfig(scriptId, patch, currentHost);
-      const updatedCfg = this.storage.getScriptConfig(scriptId, currentHost);
+      this.pushConfigToModule(scriptId);
+    }
+
+    // Hands the settings that apply on this site to a running module, restarting modules that
+    // cannot take settings live.
+    pushConfigToModule(scriptId) {
+      const updatedCfg = this.storage.getScriptConfig(scriptId, this.storage.getCurrentHost());
       const m = this.modules.find(mod => mod.id === scriptId);
       if (m && m.running) {
         if (typeof m.onConfigChange === 'function') {
@@ -7012,11 +7389,7 @@
             let ruleCount = 0;
             if (rule.disableAll) ruleCount++;
             if (rule.scripts) ruleCount += Object.keys(rule.scripts).length;
-            if (rule.configs) {
-              Object.keys(rule.configs).forEach(sid => {
-                if (!rule.scripts || rule.scripts[sid] === undefined) ruleCount++;
-              });
-            }
+            if (rule.configs) ruleCount += Object.keys(rule.configs).length;
 
             const groupHeader = document.createElement('div');
             groupHeader.className = 'besing-site-group-header';
@@ -7115,26 +7488,23 @@
 
             if (rule.configs) {
               Object.keys(rule.configs).forEach(scriptId => {
-                if (rule.scripts && rule.scripts[scriptId] !== undefined) return;
                 const m = this.modules.find(mod => mod.id === scriptId) || { name: scriptId };
                 const row = document.createElement('div');
                 row.className = 'besing-site-rule-row';
                 this.setSafeHTML(row, `
                   <div class="besing-site-rule-info">
                     <span class="besing-site-rule-name">${m.name}</span>
-                    <span class="besing-site-rule-tag" style="background:rgba(167,139,250,0.15);color:#a78bfa;">Custom Settings</span>
+                    <span class="besing-site-rule-tag" style="background:rgba(167,139,250,0.15);color:#a78bfa;">Settings Locked</span>
                   </div>
                   <div class="besing-site-rule-actions">
-                    <button class="besing-rule-remove" title="Reset site settings">✕</button>
+                    <button class="besing-rule-remove" title="Unlock: discard this site's settings and use the global ones">✕</button>
                   </div>
                 `);
                 row.querySelector('.besing-rule-remove').onclick = async (e) => {
                   e.stopPropagation();
-                  delete rule.configs[scriptId];
-                  this.storage.cleanupSiteRule(host);
-                  await BESAdapter.set('site_rules', this.storage.siteRules);
+                  await this.storage.setConfigLock(scriptId, false, host);
                   renderSiteRulesList();
-                  this.refreshCurrentSiteModules();
+                  if (host === this.storage.getCurrentHost()) this.pushConfigToModule(scriptId);
                 };
                 rulesList.appendChild(row);
               });
@@ -7358,13 +7728,12 @@
       const currentMode = this.storage.getScriptMode(m.id, currentHost);
       const cfg = this.storage.getScriptConfig(m.id, currentHost);
 
-      const isGloballyOn = !!this.storage.enabledScripts[m.id];
       let scopeNotice = '';
       if (currentMode === 'site') {
         scopeNotice = `
           <div class="besing-config-scope site">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></svg>
-            <div><strong>Site-Only Config (${currentHost}):</strong> Settings are saved exclusively for this site and bypass global settings. Switching to OFF wipes this site's custom settings.</div>
+            <div><strong>Site Only (${currentHost}):</strong> Runs on this site only and is off on other sites.</div>
           </div>
         `;
       } else if (currentMode === 'site-off') {
@@ -7378,18 +7747,19 @@
         scopeNotice = `
           <div class="besing-config-scope global">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/></svg>
-            <div><strong>Global Config:</strong> Saved globally across all websites (unless a site-only override exists).</div>
+            <div><strong>On Everywhere:</strong> Runs on every site except those where it is set to Site Off.</div>
           </div>
         `;
       } else {
         scopeNotice = `
           <div class="besing-config-scope off">
-            <div>⚪ <strong>Script is currently OFF.</strong> Switch toggle to <strong>${isGloballyOn ? 'ON (GLOBAL)' : 'SITE ONLY'}</strong> to activate.</div>
+            <div>⚪ <strong>Script is currently OFF.</strong> Choose <strong>ON</strong> to run it everywhere or <strong>SITE ONLY</strong> to run it here.</div>
           </div>
         `;
       }
 
       let specificControls = '';
+      let hasSettings = true;
 
       if (m.id === 'text-size-control') {
         const curZoom = Math.max(70, Math.min(400, Number(cfg.fontSizePercent) || 125));
@@ -7880,7 +8250,61 @@
             </div>
           </div>
         `;
+      } else if (m.id === 'prevent-redirect') {
+        const blockScripts = (cfg.blockScripts === 'third-party' || cfg.blockScripts === 'all') ? cfg.blockScripts : 'off';
+        const lateStart = (cfg.lateStart === 'purge-timers' || cfg.lateStart === 'rebuild') ? cfg.lateStart : 'off';
+        const allowlist = String(cfg.scriptAllowlist || '').replace(/[&<>"']/g, '');
+
+        specificControls = `
+          <div class="besing-config-section">
+            <p style="font-size:11px;color:#94a3b8;line-height:1.4;margin:0;">${m.description || ''}</p>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Strict Protection</span>
+              <span class="besing-shortcut-badge" style="color:#fbbf24;">Can break sites</span>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;margin:6px 0 0;line-height:1.35;">
+              Off by default. For sites that still redirect. Turn on <strong>Lock Settings to This Site</strong> above first so other sites are not affected.
+            </p>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Block Page Scripts</span>
+              <span style="font-size:10px;color:#64748b;">Stopped on this page: ${BESBootLog.gated}</span>
+            </div>
+            <div class="besing-segmented-group" id="group-pr-gate" style="margin-top:8px;">
+              <button type="button" class="besing-segmented-btn ${blockScripts === 'off' ? 'active' : ''}" data-gate="off">Off</button>
+              <button type="button" class="besing-segmented-btn ${blockScripts === 'third-party' ? 'active' : ''}" data-gate="third-party">Other Sites</button>
+              <button type="button" class="besing-segmented-btn ${blockScripts === 'all' ? 'active' : ''}" data-gate="all">All Scripts</button>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.35;">
+              <strong>Other Sites</strong> stops scripts loaded from other domains, where most ad networks live. <strong>All Scripts</strong> runs the page with no scripts at all. Scripts are stopped before they run, so this works when BESing starts before the page does.
+            </p>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">
+              <input type="text" class="besing-test-input" id="input-pr-allowlist" placeholder="Always allow scripts from (e.g. cdnjs.cloudflare.com)" value="${allowlist}">
+              <button type="button" class="besing-btn-sub-action" id="btn-save-pr-allowlist" style="align-self:flex-end;">Save Allowed Hosts</button>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">If BESing Starts Late</span>
+            </div>
+            <div class="besing-segmented-group" id="group-pr-late" style="margin-top:8px;">
+              <button type="button" class="besing-segmented-btn ${lateStart === 'off' ? 'active' : ''}" data-late="off">Off</button>
+              <button type="button" class="besing-segmented-btn ${lateStart === 'purge-timers' ? 'active' : ''}" data-late="purge-timers">Cancel Timers</button>
+              <button type="button" class="besing-segmented-btn ${lateStart === 'rebuild' ? 'active' : ''}" data-late="rebuild">Rebuild Page</button>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.35;">
+              When the browser starts BESing after the page has loaded, the page's scripts have already run. <strong>Cancel Timers</strong> stops the redirects they scheduled for later. <strong>Rebuild Page</strong> also swaps in a script-free copy of the page, which drops tap traps; site features that need scripts stop working. Applies from the next page load.
+            </p>
+          </div>
+        `;
       } else {
+        hasSettings = false;
         specificControls = `
           <div class="besing-config-section">
             <p style="font-size:11px;color:#94a3b8;line-height:1.4;">${m.description || 'No additional custom options for this script.'}</p>
@@ -7891,20 +8315,33 @@
         `;
       }
 
-      let triButtonsHtml = '';
-      if (isGloballyOn) {
-        triButtonsHtml = `
-          <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off" title="Turn OFF globally on all sites">OFF (ALL)</button>
-          <button type="button" class="besing-tri-btn ${currentMode === 'site-off' ? 'active active-site-off' : ''}" data-mode="site-off" title="Disable only on ${currentHost}">OFF (SITE)</button>
-          <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on" title="Active on all sites">ON (GLOBAL)</button>
-        `;
-      } else {
-        triButtonsHtml = `
-          <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off" title="Turn OFF completely">OFF</button>
-          <button type="button" class="besing-tri-btn ${currentMode === 'site' ? 'active active-site' : ''}" data-mode="site" title="Active only on ${currentHost}">SITE ONLY</button>
-          <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on" title="Turn ON globally across all sites">ON (GLOBAL)</button>
-        `;
-      }
+      // All four modes live here; the script list keeps its simpler off / on / site on cycle.
+      const triButtonsHtml = `
+        <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off" title="Turn off on every site">OFF</button>
+        <button type="button" class="besing-tri-btn ${currentMode === 'site-off' ? 'active active-site-off' : ''}" data-mode="site-off" title="Turn off on ${currentHost} only; other sites keep their setting">SITE OFF</button>
+        <button type="button" class="besing-tri-btn ${currentMode === 'site' ? 'active active-site' : ''}" data-mode="site" title="Run on ${currentHost} only; off on other sites">SITE ONLY</button>
+        <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on" title="Run on every site">ON</button>
+      `;
+
+      // Settings lock: where this script's settings are read from and saved to on this site.
+      const canLock = hasSettings && !GLOBAL_ONLY_SETTINGS.has(m.id);
+      const isLocked = canLock && this.storage.isConfigLocked(m.id, currentHost);
+      const lockHtml = canLock ? `
+        <div class="besing-config-section">
+          <div class="besing-section-header-row">
+            <span class="besing-section-title">Lock Settings to This Site</span>
+          </div>
+          <div class="besing-segmented-group" id="group-config-scope" style="margin-top:8px;">
+            <button type="button" class="besing-segmented-btn ${isLocked ? '' : 'active'}" data-scope="global">Global</button>
+            <button type="button" class="besing-segmented-btn ${isLocked ? 'active' : ''}" data-scope="site">${currentHost}</button>
+          </div>
+          <p style="font-size:10px;color:#94a3b8;margin-top:6px;line-height:1.35;">
+            ${isLocked
+              ? `Settings below are saved for <strong>${currentHost}</strong> only. They stay even when the script is turned off, until you switch back to Global, which discards them.`
+              : 'Settings below apply on every site. Choose this site to give it its own copy.'}
+          </p>
+        </div>
+      ` : '';
 
       this.setSafeHTML(body, `
         <div class="besing-secondary-header">
@@ -7929,6 +8366,7 @@
         ${scopeNotice}
 
         <div class="besing-secondary-content" style="display:flex;flex-direction:column;gap:10px;">
+          ${lockHtml}
           ${specificControls}
         </div>
       `);
@@ -7958,6 +8396,21 @@
       if (btnSite) btnSite.onclick = (e) => { e.stopPropagation(); handleModeChange('site'); };
       if (btnSiteOff) btnSiteOff.onclick = (e) => { e.stopPropagation(); handleModeChange('site-off'); };
       if (btnOn) btnOn.onclick = (e) => { e.stopPropagation(); handleModeChange('on'); };
+
+      // Settings lock. The running module is given the settings that now apply on this site.
+      const groupScope = body.querySelector('#group-config-scope');
+      if (groupScope) {
+        groupScope.querySelectorAll('.besing-segmented-btn').forEach(btn => {
+          btn.onclick = async (e) => {
+            e.stopPropagation();
+            const lock = btn.getAttribute('data-scope') === 'site';
+            if (lock === this.storage.isConfigLocked(m.id, currentHost)) return;
+            await this.storage.setConfigLock(m.id, lock, currentHost);
+            this.pushConfigToModule(m.id);
+            this.renderBody();
+          };
+        });
+      }
 
       // Bind Handlers
       if (m.id === 'text-size-control') {
@@ -8405,6 +8858,35 @@
         bindToggle('#chk-grok-thinking', 'includeThinking');
         bindToggle('#chk-grok-timestamps', 'includeTimestamps');
         bindToggle('#chk-grok-sources', 'includeSources');
+      } else if (m.id === 'prevent-redirect') {
+        const bindChoice = (groupSelector, attr, key) => {
+          const group = body.querySelector(groupSelector);
+          if (!group) return;
+          group.querySelectorAll('.besing-segmented-btn').forEach(btn => {
+            btn.onclick = async () => {
+              group.querySelectorAll('.besing-segmented-btn').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              await this.applyScriptConfig(m.id, { [key]: btn.getAttribute(attr) });
+            };
+          });
+        };
+        bindChoice('#group-pr-gate', 'data-gate', 'blockScripts');
+        bindChoice('#group-pr-late', 'data-late', 'lateStart');
+
+        // Saved in the module's own normalized form, so the field shows exactly what the gate uses.
+        const inAllow = body.querySelector('#input-pr-allowlist');
+        const btnAllow = body.querySelector('#btn-save-pr-allowlist');
+        if (inAllow && btnAllow) {
+          btnAllow.onclick = async () => {
+            const hosts = typeof m._normalizeConfig === 'function'
+              ? m._normalizeConfig({ scriptAllowlist: inAllow.value }).scriptAllowlist
+              : [];
+            inAllow.value = hosts.join(', ');
+            await this.applyScriptConfig(m.id, { scriptAllowlist: inAllow.value });
+            btnAllow.textContent = 'Saved!';
+            setTimeout(() => { btnAllow.textContent = 'Save Allowed Hosts'; }, 1500);
+          };
+        }
       }
     }
 
@@ -8558,7 +9040,7 @@
         .besing-btn-script-gear { background: transparent; border: none; color: #64748b; width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; }
         .besing-btn-script-gear:hover { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; transform: rotate(30deg); }
         .besing-secondary-header { display: flex; flex-direction: column; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
-        .besing-secondary-top-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
+        .besing-secondary-top-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 8px; width: 100%; }
         .besing-btn-back { display: inline-flex; align-items: center; gap: 6px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #cbd5e1; padding: 5px 10px; border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.15s ease; }
         .besing-btn-back:hover { background: rgba(99, 102, 241, 0.2); border-color: #818cf8; color: #fff; }
         .besing-tri-toggle { display: inline-flex; align-items: center; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 2px; gap: 2px; }
@@ -8720,6 +9202,38 @@
       try { where = new URL(where, location.href).host || where; } catch (x) {}
       BESBootLog.event(`blocked ${d.reason || '?'}: ${where.slice(0, 60)}`);
     } catch (err) {}
+  });
+
+  const hostOf = (url) => {
+    let where = String(url || '');
+    try { where = new URL(where, location.href).host || where; } catch (x) {}
+    return where.slice(0, 60);
+  };
+
+  // Script gate (strict mode): counted from every JS world, the first few logged by host.
+  window.addEventListener('besing:scripts-gated', (e) => {
+    BESBootLog.gated++;
+    if (BESBootLog.gated > 5) return;
+    try { BESBootLog.event(`gated script: ${hostOf(e && e.detail && e.detail.url)}`); } catch (err) {}
+  });
+
+  // Off-site navigations the browser would not let Prevent Redirect cancel.
+  let missedLogged = 0;
+  window.addEventListener('besing:redirect-missed', (e) => {
+    if (++missedLogged > 5) return;
+    try {
+      const d = (e && e.detail) || {};
+      BESBootLog.event(`MISSED ${d.reason || 'redirect'}: ${hostOf(d.url)}`);
+    } catch (err) {}
+  });
+
+  // Strict late-start handling. A timer purge also cancels the boot log's pending write, and a page
+  // rebuild replaces <html>, so the DOM observer and the widget are re-attached to the new page.
+  window.addEventListener('besing:late-start-handled', (e) => {
+    const d = (e && e.detail) || {};
+    BESBootLog.rearm();
+    BESBootLog.event(`late start (${d.ready || '?'}): ${d.action}, timers up to id ${d.timersUpTo}${d.rebuilt ? ', page rebuilt without scripts' : ''}`);
+    if (d.rebuilt) app.onPageRebuilt();
   });
 
   // 1. Synchronously arm security shields at document-start before yielding to event loop

@@ -19,7 +19,7 @@ Each bundled script provides specialized browser enhancements and includes its o
 | **Reading Assistant** | Productivity | 1.0.0 | Tallies body word count, estimates reading duration, and provides a floating heading outline navigation drawer. | [reading-assistant.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/reading-assistant.md) | [reading-assistant.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/reading-assistant/reading-assistant.user.js) |
 | **Night Comfort Dimmer** | Accessibility | 1.0.0 | Hardware-accelerated contrast-preserving dark backdrop filter for late-night viewing comfort. | [dark-dimmer.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/dark-dimmer.md) | [dark-dimmer.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/dark-dimmer/dark-dimmer.user.js) |
 | **Markdown Link Copier** | Tools | 1.0.0 | Global shortcut `Alt + C` captures page title and URL formatted as `[Title](URL)` with confirmation toast. | [quick-copy.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/quick-copy.md) | [quick-copy.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/quick-copy/quick-copy.user.js) |
-| **Prevent Redirect** | Security | 1.6.0 | Blocks unwanted automatic navigation, popup spam, and tab hijacking, including redirects scheduled before a late userscript injection. | [prevent-redirect.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/prevent-redirect.md) | [prevent-redirect.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/prevent-redirect/prevent-redirect.user.js) |
+| **Prevent Redirect** | Security | 1.7.0 | Blocks unwanted automatic navigation, popup spam, and tab hijacking, including redirects scheduled before a late userscript injection. Optional strict protection blocks page scripts or rebuilds a page that loaded before BESing. | [prevent-redirect.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/prevent-redirect.md) | [prevent-redirect.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/prevent-redirect/prevent-redirect.user.js) |
 | **PageStream** | Productivity | 1.3.1 | Continuous page streaming via smart pagination detection, history tracking, and HTTP 429 flood protection. | [pagestream.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/pagestream.md) | [pagestream.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/pagestream/pagestream.user.js) |
 | **Rest Reminder** | Productivity | 1.0.0 | Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls. | [rest-reminder.md](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/docs/scripts/rest-reminder.md) | [rest-reminder.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/scripts/rest-reminder/rest-reminder.user.js) |
 
@@ -42,10 +42,19 @@ BESing provides two distinct installation channels depending on your update pref
 - An expand button in the upper right allows switching to full modal mode when desired.
 
 ### Multi-Tier Configuration & Site Isolation
-- **Global Mode (`ON`):** Settings apply across all websites.
-- **Site-Only Mode (`SITE`):** Settings apply exclusively to the current domain and bypass global settings. Switching a script to `OFF` automatically wipes custom site settings, preventing stale configurations.
-- **Domain Exclusion (`OFF (SITE)`):** Disables a script specifically on one domain (such as banking portals) while keeping it active everywhere else.
-- **Centralized Settings:** All domain overrides across all scripts can be reviewed, toggled, or removed from the **Site Specific Rules** section in Settings.
+Each script has a **mode** (where it runs) and, separately, a **settings scope** (which settings it uses on a site).
+
+Modes. The script list cycles OFF, ON and SITE ONLY; the script's detail page has all four:
+- **`ON`:** Runs on every site, except sites set to `SITE OFF`.
+- **`SITE ONLY`:** Runs on the current site only and is off everywhere else.
+- **`SITE OFF`:** Disabled on the current site only (such as banking portals) while the global setting stays as it is.
+- **`OFF`:** Off everywhere.
+
+Settings scope (detail page, **Lock Settings to This Site**):
+- **Global:** The script's settings apply on every site.
+- **This site:** The site gets its own copy of the settings, starting from the global ones. Changes are saved for that site only and stay through any mode change, including `OFF`. Switching back to **Global** is the only way to discard them. Choosing `SITE ONLY` locks the settings to the site automatically. Rest Reminder has no site scope, because its timer is shared by every site.
+
+**Centralized Settings:** All mode overrides and locked settings across all scripts can be reviewed, toggled, or removed from the **Site Specific Rules** section in Settings.
 
 ---
 
@@ -66,7 +75,7 @@ BESing provides two distinct installation channels depending on your update pref
   - [besing-manager.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/userscript/besing-manager.user.js): Monolithic userscript distribution.
   - [besing-stable.user.js](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/userscript/besing-stable.user.js): GitHub stable automatic bootstrapper.
 - [extension/](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/extension)
-  - Chrome Manifest V3 extension bundle (`manifest.json`, `content.js`, `background.js`, `popup.html`).
+  - Chrome Manifest V3 extension bundle (`manifest.json`, `content.js`, `pr-main.js`, `popup.html`, `popup.js`). `content.js` and `pr-main.js` are generated by `build.py`; `pr-main.js` is Prevent Redirect's page-world guard, which runs as a MAIN-world content script (Chrome and Edge 111+).
 - [demo/](file:///c:/Users/guanz/Desktop/project-py-NLP%20toolbox/nlp_application_toolbox/BESing/demo)
   - Interactive live testing sandbox with rich sample webpage and local preview server.
 
