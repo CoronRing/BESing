@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageStream
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.3.1
+// @version      1.4.0
 // @description  Continuous page streaming via smart pagination detection and automated clicks for infinite scrolling with rate limiting and IP flood protection.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const PageStream = {
     id: 'pagestream',
     name: 'PageStream',
-    version: '1.3.1',
+    version: '1.4.0',
     description: 'Auto-stream infinite pages by automated click or URL fetch splicing. Supports intelligent pagination detection, history sync, and customizable preload.',
     category: 'Productivity',
 
@@ -76,6 +76,16 @@
         nextLink: '.prenext a:contains("下一页"), .prenext a:contains("下一章")',
         pageElement: '.con',
         replace: '.prenext'
+      },
+      {
+        // GB2312, declared only in <meta>. One page per chapter, so the forward link is 下一章;
+        // the breadcrumb and chapter heading sit outside .read_chapterDetail and would otherwise
+        // be spliced in again on every page.
+        name: 'trxs',
+        url: '^https?://(?:www\\.)?trxs\\.cc/[a-z]+/\\d+/\\d+\\.html',
+        nextLink: '.pageNav a:contains("下一章")',
+        pageElement: '.read_chapterDetail',
+        replace: '.pageNav'
       },
       {
         name: 'biquge',
@@ -455,12 +465,78 @@
       return el.tagName.toLowerCase() + classes.map(c => `.${esc(c)}`).join('');
     },
 
+    // `fetch(...).text()` decodes as UTF-8 unless the Content-Type header names a charset. Many
+    // Chinese novel sites serve GBK or Big5 and declare it only in a <meta> tag, so every
+    // multi-byte character would come back as U+FFFD (a page of question marks) even though the
+    // browser renders the same document correctly. These read the bytes and pick the encoding the
+    // browser itself would have used.
+    //
+    // `fallbacks` are tried in order after the BOM, the response header and (with `sniffMeta`) the
+    // document's own declaration; `utf-8` is the last resort. Returns the text and the label that
+    // produced it, so a document can pass its encoding on to the scripts it loads.
+    _decodeResponse(buffer, resp, { sniffMeta = false, fallbacks = [] } = {}) {
+      const bytes = new Uint8Array(buffer);
+      const labels = [];
+
+      const bom = this._charsetFromBom(bytes);
+      if (bom) labels.push(bom);
+
+      let header = '';
+      try {
+        header = this._charsetFromContentType(resp && resp.headers && resp.headers.get('content-type'));
+      } catch (e) {}
+      if (header) labels.push(header);
+
+      if (sniffMeta) {
+        const meta = this._charsetFromMeta(bytes);
+        if (meta) labels.push(meta);
+      }
+
+      fallbacks.forEach(label => { if (label) labels.push(label); });
+      labels.push('utf-8');
+
+      for (const label of labels) {
+        try {
+          // Throws RangeError for a label TextDecoder does not know; 'utf-8' always succeeds.
+          return { text: new TextDecoder(label).decode(bytes), charset: label };
+        } catch (e) {}
+      }
+      return { text: '', charset: 'utf-8' };
+    },
+
+    _charsetFromBom(bytes) {
+      if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return 'utf-8';
+      if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) return 'utf-16le';
+      if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) return 'utf-16be';
+      return '';
+    },
+
+    _charsetFromContentType(value) {
+      const m = /charset\s*=\s*"?([\w.:+-]+)"?/i.exec(value || '');
+      return m ? m[1].trim() : '';
+    },
+
+    // Reads <meta charset> or <meta http-equiv="Content-Type" content="...; charset=..."> out of
+    // the start of the document. Decoding that prescan as windows-1252 is safe: every encoding
+    // this has to recognise leaves ASCII bytes in place, so the declaration cannot be hidden by
+    // reading it in the wrong encoding.
+    _charsetFromMeta(bytes) {
+      let head;
+      try {
+        head = new TextDecoder('windows-1252').decode(bytes.subarray(0, Math.min(bytes.length, 4096)));
+      } catch (e) {
+        return '';
+      }
+      const m = /<meta[^>]*?charset\s*=\s*["']?\s*([\w.:+-]+)/i.exec(head);
+      return m ? m[1].trim() : '';
+    },
+
     // Some sites (many novel sites) write the page text from a script, e.g.
     // <div class="con"><script src="/i/a.aspx?id=1&p=2"></script></div> answering document.write("<p>...</p>").
     // Fetched pages never run scripts, so the text would be missing. This finds such scripts inside
     // content containers, reads the string literals they would write (never executing them), and
     // puts the resulting HTML in the script's place. Only same-origin scripts are fetched.
-    async _resolveWrittenContent(doc, pageUrl) {
+    async _resolveWrittenContent(doc, pageUrl, pageCharset) {
       const containers = [];
       const ruleEl = (this._config.customPageSelector && this._queryBySelector(this._config.customPageSelector, doc)) ||
         (this._rule && this._rule.pageElement && this._queryBySelector(this._rule.pageElement, doc));
@@ -486,7 +562,11 @@
           try {
             const resp = await fetch(abs.href, { credentials: 'include' });
             if (!resp.ok) continue;
-            code = await resp.text();
+            // A script carries no <meta>, so its encoding comes from the response header, its
+            // own charset attribute, or the encoding of the page that loads it.
+            code = this._decodeResponse(await resp.arrayBuffer(), resp, {
+              fallbacks: [sc.getAttribute('charset'), pageCharset, document.characterSet]
+            }).text;
           } catch (e) {
             continue;
           }
@@ -801,11 +881,14 @@
         // Successful response - reset error counter
         this._consecutiveErrors = 0;
 
-        const text = await resp.text();
+        const decoded = this._decodeResponse(await resp.arrayBuffer(), resp, {
+          sniffMeta: true,
+          fallbacks: [document.characterSet]
+        });
         const parser = new DOMParser();
-        const doc = parser.parseFromString(text, 'text/html');
+        const doc = parser.parseFromString(decoded.text, 'text/html');
 
-        await this._resolveWrittenContent(doc, url);
+        await this._resolveWrittenContent(doc, url, decoded.charset);
 
         const title = (doc.querySelector('title') ? doc.querySelector('title').textContent : '') || `Page ${this._curPageNum + 1}`;
         const mainContent = this._findMainContentElement(doc);

@@ -1,7 +1,7 @@
 # PageStream
 
 **Script Identifier:** `pagestream`  
-**Current Version:** 1.3.1  
+**Current Version:** 1.4.0  
 **Category:** Productivity  
 **Author:** BESing Team  
 **License:** MIT  
@@ -38,6 +38,7 @@ Besides comfort, this reduces full page loads. On iOS, where the userscript mana
 | Rule | Sites | Content | Next link |
 | :--- | :--- | :--- | :--- |
 | `suduguu` | suduguu.com chapter pages (`/<book>/<chapter>[-<page>].html`) | `.con` | 下一页, then 下一章 inside `.prenext` |
+| `trxs` | trxs.cc chapter pages (`/<category>/<book>/<chapter>.html`) | `.read_chapterDetail` | 下一章 inside `.pageNav` |
 | `shudugu` | shudugu.org | `#content`, `#txtContent`, `.chaptercontent` | `#next_url`, 下一页, 下一章 |
 | `biquge` | biquge-style mirrors | `#content`, `#htmlContent`, `.showtxt` | `#next_url`, 下一页, 下一章 |
 | `generic-novel` | URLs containing `novel` | common novel containers | `rel="next"`, 下一章, 下一页 |
@@ -69,7 +70,21 @@ PageStream now resolves such scripts before extracting content:
 2. Only same-origin scripts are fetched (with the user's cookies, as the page itself would).
 3. The script is never executed. PageStream finds the string literals passed to `document.write` / `document.writeln`, decodes their escapes, parses the result as HTML, removes any scripts, iframes, objects and embeds, and puts it in the script's place.
 
-### 3.3 Footer navigation (v1.3.1)
+### 3.3 Character encoding (v1.4.0)
+
+A browser reads a page's encoding from the HTTP `Content-Type` header, and, when the header does not name one, from the `<meta charset>` declaration inside the document. `fetch(...).then(r => r.text())` only does the first half: with no charset in the header it decodes as UTF-8 regardless of what the document says. On a site that serves GBK or Big5 and declares it only in a `<meta>` tag, every multi-byte character came back as U+FFFD, so a streamed page was a wall of question marks even though the same document rendered correctly when the browser loaded it itself. trxs.cc is one such site: `Content-Type: text/html`, `<meta http-equiv="Content-Type" content="text/html; charset=gb2312" />`.
+
+PageStream now reads the response as bytes and decodes them with the encoding the browser would have used. Candidates are tried in this order, and the first one `TextDecoder` accepts wins:
+
+1. A byte order mark (UTF-8, UTF-16LE, UTF-16BE).
+2. The `charset` parameter of the response's `Content-Type` header.
+3. For documents, the `<meta charset>` or `<meta http-equiv="Content-Type">` declaration in the first 4096 bytes. That prescan is decoded as windows-1252, which is safe because every encoding involved leaves ASCII bytes in place.
+4. The encoding of the page the reader is on (`document.characterSet`), since the next page comes from the same server.
+5. UTF-8.
+
+The same applies to the scripts resolved in 3.2. A script carries no `<meta>`, so step 3 is skipped and its `charset` attribute and the encoding of the page that loads it are used instead; the encoding chosen for a fetched document is passed down to the scripts inside it.
+
+### 3.4 Footer navigation (v1.3.1)
 
 A site rule's `replace` selector names the site's own page navigation, for example suduguu.com's `.prenext` bar (上一页 / 目录 / 下一页). Every page keeps its own bar directly under its text:
 
@@ -80,7 +95,7 @@ A single bar at the end of the stream does not work: with streaming on, the next
 
 Without a site rule, the site's pagination is left untouched.
 
-### 3.4 Turning PageStream off and on (v1.3.0)
+### 3.5 Turning PageStream off and on (v1.3.0)
 
 Turning PageStream off (or disabling it for the site) stops scrolling triggers, preloads and history sync. Streamed pages (with their footer navigation), their dividers and any Continue link stay, so the reader keeps their place and the last page's next link still works. A fetch that finishes after PageStream was turned off is discarded.
 
@@ -101,6 +116,7 @@ Each streamed page records its next page's URL (`data-pagestream-next`). When Pa
 
 | Version | Changes |
 | :--- | :--- |
+| 1.4.0 | Fetched pages are decoded with the encoding the browser would have used instead of always UTF-8, so sites that declare GBK or Big5 only in a `<meta>` tag no longer stream as question marks; trxs.cc rule. |
 | 1.3.1 | Every page keeps its own footer navigation under its text; a single bar at the end of the stream was always pushed out of reach by the next page. |
 | 1.3.0 | Turning off keeps streamed pages and turning on resumes after them; the site's footer navigation stays at the end of the stream, pointing at the newest page; settings changes no longer reset the next link to page 2; a scroll check skipped during the cooldown or a load is re-run, so stopping at the bottom no longer stalls streaming. |
 | 1.2.0 | Script-written content recovery, suduguu.com rule, page 1 container reused on fetched pages, no whole-body splicing, empty-page stop with Continue link, duplicate-page race fix, insert-time page numbering, rule URL check on next links. |
