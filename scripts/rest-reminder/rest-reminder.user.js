@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rest Reminder
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.1.0
+// @version      1.2.0
 // @description  Repeating rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.
 // @author       BESing Team
 // @license      MIT
@@ -22,7 +22,7 @@
   const RestReminder = {
     id: 'rest-reminder',
     name: 'Rest Reminder',
-    version: '1.1.0',
+    version: '1.2.0',
     description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
     category: 'Productivity',
     SHARED_KEY: 'rest_reminder',
@@ -35,6 +35,7 @@
     _timer: null,
     _syncInterval: null,
     _syncing: false,
+    _resyncPending: false,
     _chatBoxEl: null,
     _preview: false,
     _boundReposition: null,
@@ -60,16 +61,22 @@
       this._sync(true);
     },
 
-    onConfigChange(newConfig) {
+    onConfigChange(newConfig, meta = {}) {
       const prevInterval = this._getIntervalMinutes();
       this._config = newConfig || {};
-      if (this._active && prevInterval !== this._getIntervalMinutes()) {
+      const nextInterval = this._getIntervalMinutes();
+      this._syncChatBoxLabels();
+      if (!this._active) return;
+      if (meta && meta.local === true && prevInterval !== nextInterval) {
         this._startCycle();
+      } else if (prevInterval !== nextInterval) {
+        this._sync();
       }
     },
 
     destroy() {
       this._active = false;
+      this._resyncPending = false;
       if (this._timer) {
         clearTimeout(this._timer);
         this._timer = null;
@@ -102,13 +109,15 @@
       return inst && !inst.disposed ? inst : null;
     },
 
-    /** @returns {Promise<RestReminderState | null>} */
+    /** @returns {Promise<RestReminderState | null | undefined>} */
     async _readState() {
       const appMgr = this._manager();
       if (appMgr && typeof appMgr.readSharedState === 'function') {
         try {
           return await appMgr.readSharedState(this.SHARED_KEY, null);
-        } catch (e) {}
+        } catch (e) {
+          return undefined;
+        }
       }
       try {
         const raw = window.localStorage.getItem(this.LOCAL_KEY);
@@ -137,15 +146,20 @@
     },
 
     // Reads the shared state and brings this page in line with it.
-    // On init, a missing or "off" state starts a fresh cycle: the script only runs when enabled,
-    // so being initialized after Off means the user switched it back on.
+    // Inside BESing, the manager clears `off` when the user turns the script back on, so `off: true`
+    // always means dormant (preventing a loading tab from overwriting a concurrent Off action).
+    // Standalone installs have no manager UI, so a page reload (isInit) starts a fresh cycle.
     async _sync(isInit = false) {
-      if (this._syncing) return;
+      if (this._syncing) {
+        this._resyncPending = true;
+        return;
+      }
       this._syncing = true;
       try {
         const state = await this._readState();
-        if (!this._active) return;
-        if (state && state.off && !isInit) {
+        if (!this._active || state === undefined) return;
+        const managed = !!this._manager();
+        if (state && state.off && (managed || !isInit)) {
           this._goDormant();
           return;
         }
@@ -156,6 +170,10 @@
         this._apply(state);
       } finally {
         this._syncing = false;
+        if (this._resyncPending && this._active) {
+          this._resyncPending = false;
+          this._sync(false);
+        }
       }
     },
 
@@ -197,6 +215,16 @@
       if (!this._preview) this.dismissChatBox();
     },
 
+    _syncChatBoxLabels() {
+      if (!this._chatBoxEl) return;
+      const interval = this._getIntervalMinutes();
+      const activeMinutes = (this._state && Number(this._state.intervalMinutes)) || interval;
+      const badge = this._chatBoxEl.querySelector('.besing-rest-badge');
+      if (badge) badge.textContent = `${activeMinutes}m`;
+      const repeatSpan = this._chatBoxEl.querySelector('#besing-rest-btn-repeat span');
+      if (repeatSpan) repeatSpan.textContent = `Repeat (${interval}m)`;
+    },
+
     // Keeps the bubble on screen while the reminder is due, rebuilding it if the page or the
     // BESing layer removed it.
     _ensureChatBox() {
@@ -206,6 +234,7 @@
       if (box && box.isConnected && (!layer || box.getRootNode() === layer)) {
         this._preview = false;
         if (appMgr && appMgr.widgetEl) appMgr.widgetEl.classList.add('besing-pulse-alert');
+        this._syncChatBoxLabels();
         this._repositionChatBox();
         return;
       }
@@ -228,6 +257,9 @@
           appMgr.widgetEl.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
         }
       }
+
+      const targetContainer = appMgr ? appMgr.shadow : (document.body || document.documentElement);
+      if (!targetContainer) return;
 
       const interval = this._getIntervalMinutes();
       const activeMinutes = (this._state && Number(this._state.intervalMinutes)) || interval;
@@ -265,11 +297,14 @@
       }
 
       // 2. Insert into shadow DOM if available, otherwise document.body
-      const targetContainer = (appMgr && appMgr.shadow) ? appMgr.shadow : (document.body || document.documentElement);
       targetContainer.appendChild(box);
       this._chatBoxEl = box;
 
       this._repositionChatBox();
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => this._repositionChatBox());
+      }
+      setTimeout(() => this._repositionChatBox(), 200);
 
       // 3. Highlight pet icon with alert pulse while chat box is open
       if (appMgr && appMgr.widgetEl) {
@@ -339,8 +374,10 @@
       // Inside the BESing layer, positions use the manager's zoom-independent coordinates.
       const inManagerLayer = !!(appMgr && appMgr.shadow && box.getRootNode() === appMgr.shadow && typeof appMgr.getViewportMetrics === 'function');
       const metrics = inManagerLayer ? appMgr.getViewportMetrics() : null;
-      const vpW = metrics ? metrics.width : (window.visualViewport?.width || window.innerWidth || 800);
-      const vpH = metrics ? metrics.height : (window.visualViewport?.height || window.innerHeight || 600);
+      const rawW = metrics ? metrics.width : (window.visualViewport?.width || window.innerWidth || 0);
+      const rawH = metrics ? metrics.height : (window.visualViewport?.height || window.innerHeight || 0);
+      const vpW = rawW > 50 ? rawW : 800;
+      const vpH = rawH > 50 ? rawH : 600;
       const boxW = Math.min(270, vpW - 24);
 
       let targetX = vpW - boxW - 20;
@@ -349,22 +386,24 @@
 
       if (widget) {
         const rect = inManagerLayer ? appMgr.getLocalRect(widget) : widget.getBoundingClientRect();
-        const widgetCenterX = rect.left + rect.width / 2;
+        if (rect.width > 0 && rect.height > 0) {
+          const widgetCenterX = rect.left + rect.width / 2;
 
-        targetX = Math.max(12, Math.min(vpW - boxW - 12, widgetCenterX - boxW / 2));
+          targetX = Math.max(12, Math.min(vpW - boxW - 12, widgetCenterX - boxW / 2));
 
-        if (rect.top > 160) {
-          targetY = rect.top - 145;
-          isAbove = true;
-        } else {
-          targetY = rect.bottom + 12;
-          isAbove = false;
-        }
+          if (rect.top > 160) {
+            targetY = rect.top - 145;
+            isAbove = true;
+          } else {
+            targetY = rect.bottom + 12;
+            isAbove = false;
+          }
 
-        if (arrow) {
-          arrow.className = isAbove ? 'besing-rest-arrow arrow-bottom' : 'besing-rest-arrow arrow-top';
-          const arrowLeft = Math.max(16, Math.min(boxW - 28, widgetCenterX - targetX - 6));
-          arrow.style.left = `${arrowLeft}px`;
+          if (arrow) {
+            arrow.className = isAbove ? 'besing-rest-arrow arrow-bottom' : 'besing-rest-arrow arrow-top';
+            const arrowLeft = Math.max(16, Math.min(boxW - 28, widgetCenterX - targetX - 6));
+            arrow.style.left = `${arrowLeft}px`;
+          }
         }
       }
 
@@ -390,7 +429,7 @@
         if (typeof appMgr.refreshCurrentSiteModules === 'function') {
           appMgr.refreshCurrentSiteModules();
         }
-        if (typeof appMgr.renderBody === 'function') {
+        if (appMgr.menuWrapperEl && typeof appMgr.renderBody === 'function') {
           appMgr.renderBody();
         }
       }

@@ -1,7 +1,7 @@
 # Rest Reminder
 
 **Script Identifier:** `rest-reminder`  
-**Current Version:** 1.1.0  
+**Current Version:** 1.2.0  
 **Category:** Productivity  
 **Author:** BESing Team  
 **License:** MIT  
@@ -40,5 +40,7 @@ When the reminder triggers:
 - **Repeat (Primary)**: Clicking Repeat immediately dismisses the chat bubble, calculates `due = Date.now() + intervalMinutes * 60 * 1000`, stores it in the shared state, and begins the countdown for the next cycle on every page. No rest time tracking is required.
 - **Off**: Clicking Off immediately dismisses the chat bubble, marks the shared state as off so other open pages stop too, and switches the script off globally, including any per-site ON rules. Switching the script back on starts a fresh cycle.
 
-### Timer Sync
-Each page with the script running re-reads the shared state every 5 seconds while it is visible, and right away when the tab becomes visible again. Hidden tabs do no work. While the reminder is due, the bubble is shown on whichever page you are on, and rebuilt if the page removed it. Without the BESing manager (standalone install) the timer falls back to `localStorage`, which is separate per site.
+### Cross-Tab & Manager Sync
+1. **Manager Rule & Config Sync**: `BESManagerApp` syncs `enabled_scripts`, `site_rules`, `script_configs`, `global_settings`, and `widget_position` across tabs immediately via `chrome.storage.onChanged` in Extension mode, and on `visibilitychange`, `focus`, `pageshow`, `popstate`, menu open, and a 5-second visible poll in Userscript GM mode. Enabling Rest Reminder or changing its interval on one tab automatically starts or updates all already-open tabs without reloading, and remote config sync updates labels without resetting the active global countdown.
+2. **Timer State Sync (`shared_rest_reminder`)**: Each running page syncs the shared timer immediately via `chrome.storage.onChanged` (Extension), on `visibilitychange`, `pageshow`, `focus`, and a 5-second visible poll. Clicking **Repeat** recalculates `due` across every tab and dismisses any open bubbles elsewhere. Clicking **Off** (on the bubble or in BESing's toggle/detail UI) sets `off: true` and disables the script globally so open tabs dismiss their bubbles and new tabs stay dormant instead of restarting the timer on load.
+3. **Standalone Fallback**: Without the BESing manager, state falls back to `localStorage` (`besing_rest_reminder_state`), which is per-origin, and a page reload starts a fresh cycle.

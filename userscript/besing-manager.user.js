@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.9.2
+// @version      1.9.3
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -59,28 +59,37 @@
     isExt: typeof chrome !== 'undefined' && !!chrome.storage && !!chrome.storage.local,
 
     // `timeoutMs` bounds the wait for extension storage before falling back to the localStorage mirror.
-    async get(key, defaultValue = null, timeoutMs = 350) {
+    // When `skipLocalFallback` is true, extension storage errors/timeouts return `undefined` instead of
+    // per-origin localStorage, so cross-site state readers know not to overwrite shared state.
+    async get(key, defaultValue = null, timeoutMs = 350, skipLocalFallback = false) {
       if (this.isGM) {
         try {
           const val = GM_getValue(key, defaultValue);
           return val !== undefined ? val : defaultValue;
         } catch (e) {
-          return defaultValue;
+          return skipLocalFallback ? undefined : defaultValue;
         }
       }
       if (this.isExt) {
         return new Promise(resolve => {
           let resolved = false;
-          // Mobile Edge / WebKit timeout guard: 350ms race
+          const fallbackLocal = () => {
+            if (skipLocalFallback) {
+              resolve(undefined);
+              return;
+            }
+            try {
+              const item = window.localStorage.getItem('besing_' + key);
+              resolve((item !== null && item !== undefined) ? JSON.parse(item) : defaultValue);
+            } catch (e) {
+              resolve(defaultValue);
+            }
+          };
+          // Mobile Edge / WebKit timeout guard
           const timer = setTimeout(() => {
             if (!resolved) {
               resolved = true;
-              try {
-                const item = window.localStorage.getItem('besing_' + key);
-                resolve((item !== null && item !== undefined) ? JSON.parse(item) : defaultValue);
-              } catch (e) {
-                resolve(defaultValue);
-              }
+              fallbackLocal();
             }
           }, timeoutMs);
 
@@ -90,12 +99,7 @@
                 resolved = true;
                 clearTimeout(timer);
                 if (chrome.runtime && chrome.runtime.lastError) {
-                  try {
-                    const item = window.localStorage.getItem('besing_' + key);
-                    resolve((item !== null && item !== undefined) ? JSON.parse(item) : defaultValue);
-                  } catch (e) {
-                    resolve(defaultValue);
-                  }
+                  fallbackLocal();
                 } else {
                   const val = (res && res[key] !== undefined) ? res[key] : defaultValue;
                   try {
@@ -109,12 +113,7 @@
             if (!resolved) {
               resolved = true;
               clearTimeout(timer);
-              try {
-                const item = window.localStorage.getItem('besing_' + key);
-                resolve((item !== null && item !== undefined) ? JSON.parse(item) : defaultValue);
-              } catch (e) {
-                resolve(defaultValue);
-              }
+              fallbackLocal();
             }
           }
         });
@@ -275,6 +274,7 @@
         }
       };
 
+      this._writeSeq = 0;
       this.siteRules = readLocal('site_rules', {});
       this.enabledScripts = readLocal('enabled_scripts', { 'prevent-redirect': true });
       if (this.enabledScripts['prevent-redirect'] === undefined) {
@@ -292,16 +292,17 @@
       };
     }
 
-    async init() {
-      const data = await BESAdapter.getAll({
-        site_rules: this.siteRules || {},
-        blocked_sites: [],
-        enabled_scripts: this.enabledScripts || {},
-        script_configs: this.scriptConfigs || {},
-        widget_position: this.widgetPos,
-        global_settings: this.settings || {}
-      });
+    _defaultSettings() {
+      return {
+        theme: 'cyber-pet',
+        agentUrl: 'http://127.0.0.1:8765/api/sync',
+        authToken: '',
+        updateChannel: 'github',
+        autoCheckUpdates: true
+      };
+    }
 
+    _applyLoadedData(data) {
       this.siteRules = (data.site_rules && typeof data.site_rules === 'object') ? data.site_rules : {};
 
       // Migrate legacy blocked_sites array if present
@@ -321,10 +322,95 @@
       }
 
       this.scriptConfigs = (data.script_configs && typeof data.script_configs === 'object') ? data.script_configs : {};
-      if (data.widget_position) {
-        this.widgetPos = data.widget_position;
+      if (data.widget_position !== undefined) {
+        this.widgetPos = data.widget_position || null;
       }
-      this.settings = { ...this.settings, ...(data.global_settings || {}) };
+      this.settings = { ...this._defaultSettings(), ...(data.global_settings || {}) };
+    }
+
+    async init() {
+      const data = await BESAdapter.getAll({
+        site_rules: this.siteRules || {},
+        blocked_sites: [],
+        enabled_scripts: this.enabledScripts || {},
+        script_configs: this.scriptConfigs || {},
+        widget_position: this.widgetPos,
+        global_settings: this.settings || {}
+      });
+
+      this._applyLoadedData(data);
+    }
+
+    async syncFromStore(externalChanges = null) {
+      const prevRules = JSON.stringify({
+        siteRules: this.siteRules,
+        enabledScripts: this.enabledScripts,
+        scriptConfigs: this.scriptConfigs
+      });
+      const prevSettings = JSON.stringify(this.settings);
+      const prevPos = JSON.stringify(this.widgetPos);
+
+      if (externalChanges && typeof externalChanges === 'object') {
+        const mirror = (k, v) => {
+          try { window.localStorage.setItem('besing_' + k, JSON.stringify(v)); } catch (e) {}
+        };
+        if ('site_rules' in externalChanges) {
+          const v = (externalChanges.site_rules && typeof externalChanges.site_rules === 'object') ? externalChanges.site_rules : {};
+          this.siteRules = v;
+          mirror('site_rules', v);
+        }
+        if ('enabled_scripts' in externalChanges) {
+          const v = (externalChanges.enabled_scripts && typeof externalChanges.enabled_scripts === 'object') ? externalChanges.enabled_scripts : {};
+          if (v['prevent-redirect'] === undefined) v['prevent-redirect'] = true;
+          this.enabledScripts = v;
+          mirror('enabled_scripts', v);
+        }
+        if ('script_configs' in externalChanges) {
+          const v = (externalChanges.script_configs && typeof externalChanges.script_configs === 'object') ? externalChanges.script_configs : {};
+          this.scriptConfigs = v;
+          mirror('script_configs', v);
+        }
+        if ('global_settings' in externalChanges) {
+          const v = (externalChanges.global_settings && typeof externalChanges.global_settings === 'object') ? externalChanges.global_settings : {};
+          this.settings = { ...this._defaultSettings(), ...v };
+          mirror('global_settings', this.settings);
+        }
+        if ('widget_position' in externalChanges) {
+          this.widgetPos = externalChanges.widget_position || null;
+          mirror('widget_position', this.widgetPos);
+        }
+      } else {
+        const seqBefore = this._writeSeq;
+        const data = await BESAdapter.getAll({
+          site_rules: {},
+          enabled_scripts: { 'prevent-redirect': true },
+          script_configs: {},
+          widget_position: null,
+          global_settings: this._defaultSettings()
+        });
+        if (this._writeSeq !== seqBefore) {
+          return { rulesChanged: false, settingsChanged: false, posChanged: false, stale: true };
+        }
+        const src = BESAdapter.lastLoad && BESAdapter.lastLoad.source;
+        if (src !== 'gm' && src !== 'ext') {
+          return { rulesChanged: false, settingsChanged: false, posChanged: false };
+        }
+        this._applyLoadedData(data);
+      }
+
+      const nextRules = JSON.stringify({
+        siteRules: this.siteRules,
+        enabledScripts: this.enabledScripts,
+        scriptConfigs: this.scriptConfigs
+      });
+      const nextSettings = JSON.stringify(this.settings);
+      const nextPos = JSON.stringify(this.widgetPos);
+
+      return {
+        rulesChanged: nextRules !== prevRules,
+        settingsChanged: nextSettings !== prevSettings,
+        posChanged: nextPos !== prevPos
+      };
     }
 
     getCurrentHost() {
@@ -343,6 +429,7 @@
     async setSiteDisabledAll(host, disabled) {
       const h = (host || this.getCurrentHost()).toLowerCase().trim();
       if (!h) return;
+      this._writeSeq++;
       if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
       this.siteRules[h].disableAll = !!disabled;
       this.cleanupSiteRule(h);
@@ -386,6 +473,7 @@
     // touched here; the only way to drop them is to switch the lock back to global.
     async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {
       const h = (host || '').toLowerCase().trim();
+      this._writeSeq++;
       if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
       if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
 
@@ -433,6 +521,7 @@
     async setConfigLock(scriptId, locked, host = this.getCurrentHost()) {
       const h = (host || '').toLowerCase().trim();
       if (!h) return;
+      this._writeSeq++;
       if (locked) {
         this.lockConfigToSite(scriptId, h);
       } else if (this.siteRules[h] && this.siteRules[h].configs) {
@@ -461,6 +550,7 @@
     async setSiteOverride(scriptId, host, mode) {
       const h = (host || '').toLowerCase().trim();
       if (!h) return;
+      this._writeSeq++;
       if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
       if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
 
@@ -479,6 +569,7 @@
     async removeSiteOverride(scriptId, host) {
       const h = (host || '').toLowerCase().trim();
       if (!h || !this.siteRules[h]) return;
+      this._writeSeq++;
       if (this.siteRules[h].scripts) delete this.siteRules[h].scripts[scriptId];
       this.cleanupSiteRule(h);
       await BESAdapter.set('site_rules', this.siteRules);
@@ -495,6 +586,7 @@
 
     async setScriptConfig(scriptId, patch, host = this.getCurrentHost()) {
       const h = (host || '').toLowerCase().trim();
+      this._writeSeq++;
 
       if (this.isConfigLocked(scriptId, h)) {
         this.siteRules[h].configs[scriptId] = { ...this.siteRules[h].configs[scriptId], ...patch };
@@ -507,6 +599,7 @@
 
     async toggleSiteRule(host, ruleKey, val) {
       const h = (host || '').toLowerCase().trim();
+      this._writeSeq++;
       if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
       if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {};
 
@@ -533,6 +626,7 @@
     async removeSiteRule(host, ruleKey = null) {
       const h = (host || '').toLowerCase().trim();
       if (!this.siteRules[h]) return;
+      this._writeSeq++;
 
       if (!ruleKey || ruleKey === 'all') {
         delete this.siteRules[h];
@@ -563,6 +657,7 @@
     }
 
     async setWidgetPosition(pos) {
+      this._writeSeq++;
       this.widgetPos = pos;
       await BESAdapter.set('widget_position', pos);
     }
@@ -572,11 +667,13 @@
     }
 
     async setTheme(theme) {
+      this._writeSeq++;
       this.settings.theme = theme;
       await BESAdapter.set('global_settings', this.settings);
     }
 
     async updateSettings(patch) {
+      this._writeSeq++;
       this.settings = { ...this.settings, ...patch };
       await BESAdapter.set('global_settings', this.settings);
     }
@@ -612,7 +709,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.9.2',
+          v: '1.9.3',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -799,7 +896,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.9.2), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.9.3), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -5844,7 +5941,7 @@
       const mod = {
     id: 'rest-reminder',
     name: 'Rest Reminder',
-    version: '1.1.0',
+    version: '1.2.0',
     description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
     category: 'Productivity',
     SHARED_KEY: 'rest_reminder',
@@ -5857,6 +5954,7 @@
     _timer: null,
     _syncInterval: null,
     _syncing: false,
+    _resyncPending: false,
     _chatBoxEl: null,
     _preview: false,
     _boundReposition: null,
@@ -5882,16 +5980,22 @@
       this._sync(true);
     },
 
-    onConfigChange(newConfig) {
+    onConfigChange(newConfig, meta = {}) {
       const prevInterval = this._getIntervalMinutes();
       this._config = newConfig || {};
-      if (this._active && prevInterval !== this._getIntervalMinutes()) {
+      const nextInterval = this._getIntervalMinutes();
+      this._syncChatBoxLabels();
+      if (!this._active) return;
+      if (meta && meta.local === true && prevInterval !== nextInterval) {
         this._startCycle();
+      } else if (prevInterval !== nextInterval) {
+        this._sync();
       }
     },
 
     destroy() {
       this._active = false;
+      this._resyncPending = false;
       if (this._timer) {
         clearTimeout(this._timer);
         this._timer = null;
@@ -5924,13 +6028,15 @@
       return inst && !inst.disposed ? inst : null;
     },
 
-    /** @returns {Promise<RestReminderState | null>} */
+    /** @returns {Promise<RestReminderState | null | undefined>} */
     async _readState() {
       const appMgr = this._manager();
       if (appMgr && typeof appMgr.readSharedState === 'function') {
         try {
           return await appMgr.readSharedState(this.SHARED_KEY, null);
-        } catch (e) {}
+        } catch (e) {
+          return undefined;
+        }
       }
       try {
         const raw = window.localStorage.getItem(this.LOCAL_KEY);
@@ -5959,15 +6065,20 @@
     },
 
     // Reads the shared state and brings this page in line with it.
-    // On init, a missing or "off" state starts a fresh cycle: the script only runs when enabled,
-    // so being initialized after Off means the user switched it back on.
+    // Inside BESing, the manager clears `off` when the user turns the script back on, so `off: true`
+    // always means dormant (preventing a loading tab from overwriting a concurrent Off action).
+    // Standalone installs have no manager UI, so a page reload (isInit) starts a fresh cycle.
     async _sync(isInit = false) {
-      if (this._syncing) return;
+      if (this._syncing) {
+        this._resyncPending = true;
+        return;
+      }
       this._syncing = true;
       try {
         const state = await this._readState();
-        if (!this._active) return;
-        if (state && state.off && !isInit) {
+        if (!this._active || state === undefined) return;
+        const managed = !!this._manager();
+        if (state && state.off && (managed || !isInit)) {
           this._goDormant();
           return;
         }
@@ -5978,6 +6089,10 @@
         this._apply(state);
       } finally {
         this._syncing = false;
+        if (this._resyncPending && this._active) {
+          this._resyncPending = false;
+          this._sync(false);
+        }
       }
     },
 
@@ -6019,6 +6134,16 @@
       if (!this._preview) this.dismissChatBox();
     },
 
+    _syncChatBoxLabels() {
+      if (!this._chatBoxEl) return;
+      const interval = this._getIntervalMinutes();
+      const activeMinutes = (this._state && Number(this._state.intervalMinutes)) || interval;
+      const badge = this._chatBoxEl.querySelector('.besing-rest-badge');
+      if (badge) badge.textContent = `${activeMinutes}m`;
+      const repeatSpan = this._chatBoxEl.querySelector('#besing-rest-btn-repeat span');
+      if (repeatSpan) repeatSpan.textContent = `Repeat (${interval}m)`;
+    },
+
     // Keeps the bubble on screen while the reminder is due, rebuilding it if the page or the
     // BESing layer removed it.
     _ensureChatBox() {
@@ -6028,6 +6153,7 @@
       if (box && box.isConnected && (!layer || box.getRootNode() === layer)) {
         this._preview = false;
         if (appMgr && appMgr.widgetEl) appMgr.widgetEl.classList.add('besing-pulse-alert');
+        this._syncChatBoxLabels();
         this._repositionChatBox();
         return;
       }
@@ -6050,6 +6176,9 @@
           appMgr.widgetEl.classList.remove('folded-left', 'folded-right', 'folded-top', 'folded-bottom');
         }
       }
+
+      const targetContainer = appMgr ? appMgr.shadow : (document.body || document.documentElement);
+      if (!targetContainer) return;
 
       const interval = this._getIntervalMinutes();
       const activeMinutes = (this._state && Number(this._state.intervalMinutes)) || interval;
@@ -6087,11 +6216,14 @@
       }
 
       // 2. Insert into shadow DOM if available, otherwise document.body
-      const targetContainer = (appMgr && appMgr.shadow) ? appMgr.shadow : (document.body || document.documentElement);
       targetContainer.appendChild(box);
       this._chatBoxEl = box;
 
       this._repositionChatBox();
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => this._repositionChatBox());
+      }
+      setTimeout(() => this._repositionChatBox(), 200);
 
       // 3. Highlight pet icon with alert pulse while chat box is open
       if (appMgr && appMgr.widgetEl) {
@@ -6161,8 +6293,10 @@
       // Inside the BESing layer, positions use the manager's zoom-independent coordinates.
       const inManagerLayer = !!(appMgr && appMgr.shadow && box.getRootNode() === appMgr.shadow && typeof appMgr.getViewportMetrics === 'function');
       const metrics = inManagerLayer ? appMgr.getViewportMetrics() : null;
-      const vpW = metrics ? metrics.width : (window.visualViewport?.width || window.innerWidth || 800);
-      const vpH = metrics ? metrics.height : (window.visualViewport?.height || window.innerHeight || 600);
+      const rawW = metrics ? metrics.width : (window.visualViewport?.width || window.innerWidth || 0);
+      const rawH = metrics ? metrics.height : (window.visualViewport?.height || window.innerHeight || 0);
+      const vpW = rawW > 50 ? rawW : 800;
+      const vpH = rawH > 50 ? rawH : 600;
       const boxW = Math.min(270, vpW - 24);
 
       let targetX = vpW - boxW - 20;
@@ -6171,22 +6305,24 @@
 
       if (widget) {
         const rect = inManagerLayer ? appMgr.getLocalRect(widget) : widget.getBoundingClientRect();
-        const widgetCenterX = rect.left + rect.width / 2;
+        if (rect.width > 0 && rect.height > 0) {
+          const widgetCenterX = rect.left + rect.width / 2;
 
-        targetX = Math.max(12, Math.min(vpW - boxW - 12, widgetCenterX - boxW / 2));
+          targetX = Math.max(12, Math.min(vpW - boxW - 12, widgetCenterX - boxW / 2));
 
-        if (rect.top > 160) {
-          targetY = rect.top - 145;
-          isAbove = true;
-        } else {
-          targetY = rect.bottom + 12;
-          isAbove = false;
-        }
+          if (rect.top > 160) {
+            targetY = rect.top - 145;
+            isAbove = true;
+          } else {
+            targetY = rect.bottom + 12;
+            isAbove = false;
+          }
 
-        if (arrow) {
-          arrow.className = isAbove ? 'besing-rest-arrow arrow-bottom' : 'besing-rest-arrow arrow-top';
-          const arrowLeft = Math.max(16, Math.min(boxW - 28, widgetCenterX - targetX - 6));
-          arrow.style.left = `${arrowLeft}px`;
+          if (arrow) {
+            arrow.className = isAbove ? 'besing-rest-arrow arrow-bottom' : 'besing-rest-arrow arrow-top';
+            const arrowLeft = Math.max(16, Math.min(boxW - 28, widgetCenterX - targetX - 6));
+            arrow.style.left = `${arrowLeft}px`;
+          }
         }
       }
 
@@ -6212,7 +6348,7 @@
         if (typeof appMgr.refreshCurrentSiteModules === 'function') {
           appMgr.refreshCurrentSiteModules();
         }
-        if (typeof appMgr.renderBody === 'function') {
+        if (appMgr.menuWrapperEl && typeof appMgr.renderBody === 'function') {
           appMgr.renderBody();
         }
       }
@@ -6869,7 +7005,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.9.2';
+    static CURRENT_VERSION = '1.9.3';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -7048,12 +7184,30 @@
       this.disposed = false;
       this._viewportFrame = 0;
       this._viewportHandler = null;
+      this._storageSyncInterval = null;
+      this._storageChangeListener = null;
+      this._boundWindowFocusSync = null;
+      this._storageSyncing = false;
+      this._storageSyncPending = false;
+      this._pendingExternalChanges = null;
     }
 
     // Full shutdown used when another instance replaces this one: stops timers, modules and UI,
     // and makes every later lifecycle callback (pageshow, heartbeat, load) a no-op.
     dispose() {
       this.disposed = true;
+      if (this._storageSyncInterval) {
+        clearInterval(this._storageSyncInterval);
+        this._storageSyncInterval = null;
+      }
+      if (this._storageChangeListener && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+        try { chrome.storage.onChanged.removeListener(this._storageChangeListener); } catch (e) {}
+        this._storageChangeListener = null;
+      }
+      if (this._boundWindowFocusSync) {
+        window.removeEventListener('focus', this._boundWindowFocusSync);
+        this._boundWindowFocusSync = null;
+      }
       this.teardown();
       this.detachViewportTracking();
     }
@@ -7064,7 +7218,8 @@
       if (!this.modules || this.modules.length === 0) {
         this.modules = BUILTIN_MODULES.map(m => ({
           ...m,
-          running: false
+          running: false,
+          _lastConfigJson: null
         }));
       }
 
@@ -7074,8 +7229,10 @@
       const host = this.storage.getCurrentHost();
       if (prModule && typeof prModule.init === 'function' && this.storage.isScriptActiveOnSite(prModule.id, host)) {
         try {
-          prModule.init(this.storage.getScriptConfig(prModule.id, host));
+          const cfg = this.storage.getScriptConfig(prModule.id, host);
+          prModule.init(cfg);
           prModule.running = true;
+          prModule._lastConfigJson = JSON.stringify(cfg);
           console.log('[BESing] Preemptive security shield synchronously armed at document-start.');
           if (typeof prModule.handleLateStart === 'function') prModule.handleLateStart();
         } catch (e) {
@@ -7106,7 +7263,8 @@
       if (!this.modules || this.modules.length === 0) {
         this.modules = BUILTIN_MODULES.map(m => ({
           ...m,
-          running: false
+          running: false,
+          _lastConfigJson: null
         }));
       }
 
@@ -7114,6 +7272,7 @@
       this.modules.forEach(m => {
         const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
         const cfg = this.storage.getScriptConfig(m.id, currentHost);
+        const cfgJson = JSON.stringify(cfg);
 
         if (m.id === 'prevent-redirect') {
           // If explicitly disabled on this site by user, deactivate the preemptive shield
@@ -7121,20 +7280,23 @@
             try {
               m.destroy();
               m.running = false;
+              m._lastConfigJson = null;
               console.log('[BESing] Preemptive security shield deactivated per site rule.');
             } catch (err) {}
           } else if (shouldBeActive && !m.running) {
             try {
               m.init(cfg);
               m.running = true;
+              m._lastConfigJson = cfgJson;
             } catch (err) {
               BESBootLog.error(`init ${m.id}`, err);
             }
           } else if (shouldBeActive && m.running) {
             try {
-              if (typeof m.onConfigChange === 'function') {
-                m.onConfigChange(cfg);
+              if (typeof m.onConfigChange === 'function' && m._lastConfigJson !== cfgJson) {
+                m.onConfigChange(cfg, { local: false });
               }
+              m._lastConfigJson = cfgJson;
             } catch (err) {
               BESBootLog.error(`config ${m.id}`, err);
             }
@@ -7146,6 +7308,7 @@
           try {
             m.init(cfg);
             m.running = true;
+            m._lastConfigJson = cfgJson;
           } catch (err) {
             console.error(`[BESing] Error initializing ${m.id}:`, err);
             BESBootLog.error(`init ${m.id}`, err);
@@ -7154,14 +7317,16 @@
           try {
             m.destroy();
             m.running = false;
+            m._lastConfigJson = null;
           } catch (err) {
             console.error(`[BESing] Error destroying ${m.id}:`, err);
             BESBootLog.error(`destroy ${m.id}`, err);
           }
         } else if (shouldBeActive && m.running) {
-          if (typeof m.onConfigChange === 'function') {
-            try { m.onConfigChange(cfg); } catch (err) { BESBootLog.error(`config ${m.id}`, err); }
+          if (typeof m.onConfigChange === 'function' && m._lastConfigJson !== cfgJson) {
+            try { m.onConfigChange(cfg, { local: false }); } catch (err) { BESBootLog.error(`config ${m.id}`, err); }
           }
+          m._lastConfigJson = cfgJson;
         }
       });
       BESBootLog.record('modules', { running: this.modules.filter(m => m.running).map(m => m.id).join(',') });
@@ -7224,14 +7389,16 @@
         if (this.disposed) return;
         this.ensureMounted('pageshow');
         this.clampWidgetPosition();
-        this.refreshCurrentSiteModules();
+        this.syncStorage();
+        this.refreshCurrentSiteModules({ fromSync: true });
       });
 
       window.addEventListener('popstate', () => {
         if (this.disposed) return;
         this.ensureMounted('popstate');
         this.clampWidgetPosition();
-        this.refreshCurrentSiteModules();
+        this.syncStorage();
+        this.refreshCurrentSiteModules({ fromSync: true });
       });
 
       document.addEventListener('visibilitychange', () => {
@@ -7239,10 +7406,12 @@
         if (document.visibilityState === 'visible') {
           this.ensureMounted('visible');
           this.clampWidgetPosition();
+          this.syncStorage();
         }
       });
 
       this.startHeartbeat();
+      this.startCrossTabSync();
 
       // Direct DOM MutationObserver on document.documentElement
       try {
@@ -7274,20 +7443,156 @@
       }, 2500);
     }
 
+    startCrossTabSync() {
+      if (this.disposed || !IS_TOP_FRAME) return;
+      const hasExtOnChanged = BESAdapter.isExt && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === 'function';
+      if (hasExtOnChanged && !this._storageChangeListener) {
+        this._storageChangeListener = (changes, areaName) => {
+          if (this.disposed || areaName !== 'local' || !changes) return;
+          const syncKeys = ['site_rules', 'enabled_scripts', 'script_configs', 'global_settings', 'widget_position'];
+          const extData = {};
+          let hasRelevant = false;
+          for (const k of syncKeys) {
+            if (Object.prototype.hasOwnProperty.call(changes, k)) {
+              extData[k] = changes[k].newValue;
+              hasRelevant = true;
+            }
+          }
+          if (hasRelevant) {
+            this.syncStorage(extData);
+          }
+          if (Object.prototype.hasOwnProperty.call(changes, 'shared_rest_reminder')) {
+            const rr = this.modules.find(mod => mod.id === 'rest-reminder');
+            if (rr && rr.running && typeof rr._sync === 'function') {
+              rr._sync();
+            }
+          }
+        };
+        try {
+          chrome.storage.onChanged.addListener(this._storageChangeListener);
+        } catch (e) {
+          this._storageChangeListener = null;
+        }
+      }
+
+      if (!this._boundWindowFocusSync) {
+        this._boundWindowFocusSync = () => {
+          if (!this.disposed) this.syncStorage();
+        };
+        window.addEventListener('focus', this._boundWindowFocusSync);
+      }
+
+      if (!this._storageSyncInterval && !this._storageChangeListener) {
+        this._storageSyncInterval = setInterval(() => {
+          if (!this.disposed && document.visibilityState !== 'hidden') {
+            this.syncStorage();
+            const rr = this.modules.find(mod => mod.id === 'rest-reminder');
+            if (rr && rr.running && typeof rr._sync === 'function') {
+              rr._sync();
+            }
+          }
+        }, 5000);
+      }
+    }
+
+    async syncStorage(externalChanges = null) {
+      if (this.disposed || !IS_TOP_FRAME) return;
+      if (this._storageSyncing) {
+        if (externalChanges) {
+          this._pendingExternalChanges = Object.assign(this._pendingExternalChanges || {}, externalChanges);
+        }
+        this._storageSyncPending = true;
+        return;
+      }
+      this._storageSyncing = true;
+      try {
+        const wasBlocked = this.storage.isCurrentBlocked();
+        const diff = await this.storage.syncFromStore(externalChanges);
+        if (this.disposed) return;
+        if (diff.stale) {
+          this._storageSyncPending = true;
+          return;
+        }
+
+        if (diff.rulesChanged) {
+          const nowBlocked = this.storage.isCurrentBlocked();
+          if (!wasBlocked && nowBlocked) {
+            this.closeModal();
+            this.teardown();
+          } else if (wasBlocked && !nowBlocked) {
+            this.ensureMounted('unblocked');
+            this.startHeartbeat();
+            this.refreshCurrentSiteModules({ fromSync: true });
+          } else if (!nowBlocked) {
+            this.refreshCurrentSiteModules({ fromSync: true });
+          }
+        }
+
+        if (diff.settingsChanged && this.widgetEl) {
+          this.updatePetIcon(this.widgetEl);
+        }
+
+        if (diff.posChanged && this.widgetEl && !this.isDragging) {
+          this.restoreWidgetPosition();
+          this.checkEdgeDocking(this.widgetEl);
+        }
+
+        if ((diff.rulesChanged || diff.settingsChanged) && this.menuWrapperEl && this.shadow) {
+          const active = this.shadow.activeElement;
+          const isEditingInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT');
+          if (!isEditingInput) {
+            this.renderBody();
+          }
+        }
+      } catch (e) {
+      } finally {
+        this._storageSyncing = false;
+        if (this._storageSyncPending && !this.disposed) {
+          const nextExt = this._pendingExternalChanges || null;
+          this._storageSyncPending = false;
+          this._pendingExternalChanges = null;
+          this.syncStorage(nextExt);
+        }
+      }
+    }
+
+    async onScriptModeChanged(scriptId, mode) {
+      if (scriptId !== 'rest-reminder') return;
+      const cfg = this.storage.getScriptConfig('rest-reminder', this.storage.getCurrentHost());
+      const raw = Number(cfg && cfg.intervalMinutes);
+      const intervalMinutes = (!isNaN(raw) && raw >= 1 && raw <= 240) ? raw : 20;
+      if (mode === 'off') {
+        await this.writeSharedState('rest_reminder', { due: 0, intervalMinutes, off: true });
+      } else if (mode === 'on' || mode === 'site') {
+        const state = await this.readSharedState('rest_reminder', null);
+        if (state !== undefined && (!state || state.off || !Number.isFinite(Number(state.due)) || Number(state.due) <= 0)) {
+          await this.writeSharedState('rest_reminder', {
+            due: Date.now() + intervalMinutes * 60 * 1000,
+            intervalMinutes,
+            off: false
+          });
+        }
+      }
+    }
+
     // Child frames: honor the frame's site rules for frame-safe modules only, with no widget or listeners.
     initFrameModules(currentHost) {
       this.modules.forEach(m => {
         const shouldBeActive = FRAME_SAFE_MODULES.has(m.id) && this.storage.isScriptActiveOnSite(m.id, currentHost);
         const cfg = this.storage.getScriptConfig(m.id, currentHost);
+        const cfgJson = JSON.stringify(cfg);
         try {
           if (shouldBeActive && !m.running) {
             m.init(cfg);
             m.running = true;
+            m._lastConfigJson = cfgJson;
           } else if (!shouldBeActive && m.running) {
             m.destroy();
             m.running = false;
-          } else if (shouldBeActive && m.running && typeof m.onConfigChange === 'function') {
-            m.onConfigChange(cfg);
+            m._lastConfigJson = null;
+          } else if (shouldBeActive && m.running && typeof m.onConfigChange === 'function' && m._lastConfigJson !== cfgJson) {
+            m.onConfigChange(cfg, { local: false });
+            m._lastConfigJson = cfgJson;
           }
         } catch (err) {
           console.error(`[BESing] Frame module error ${m.id}:`, err);
@@ -7295,16 +7600,19 @@
       });
     }
 
-    refreshCurrentSiteModules() {
+    refreshCurrentSiteModules(options = {}) {
       if (this.disposed) return;
       const currentHost = this.storage.getCurrentHost();
+      const isLocal = !options.fromSync;
       this.modules.forEach(m => {
         const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
         const cfg = this.storage.getScriptConfig(m.id, currentHost);
+        const cfgJson = JSON.stringify(cfg);
         if (shouldBeActive && !m.running) {
           try {
             m.init(cfg);
             m.running = true;
+            m._lastConfigJson = cfgJson;
           } catch (err) {
             console.error(`[BESing] Error initializing ${m.id}:`, err);
           }
@@ -7312,13 +7620,20 @@
           try {
             m.destroy();
             m.running = false;
+            m._lastConfigJson = null;
           } catch (err) {
             console.error(`[BESing] Error destroying ${m.id}:`, err);
           }
-        } else if (shouldBeActive && m.running) {
+        } else if (shouldBeActive && m.running && m._lastConfigJson !== cfgJson) {
           if (typeof m.onConfigChange === 'function') {
-            try { m.onConfigChange(cfg); } catch (e) {}
+            try { m.onConfigChange(cfg, { local: isLocal }); } catch (e) {}
+          } else {
+            try {
+              m.destroy();
+              m.init(cfg);
+            } catch (e) {}
           }
+          m._lastConfigJson = cfgJson;
         }
       });
       this.updateBadge();
@@ -7338,8 +7653,10 @@
       this.modules.forEach(m => {
         if (m.id === 'prevent-redirect' || !m.running) return;
         try {
+          const cfg = this.storage.getScriptConfig(m.id, currentHost);
           m.destroy();
-          m.init(this.storage.getScriptConfig(m.id, currentHost));
+          m.init(cfg);
+          m._lastConfigJson = JSON.stringify(cfg);
         } catch (err) {
           BESBootLog.error(`restart ${m.id}`, err);
         }
@@ -7349,31 +7666,33 @@
 
     async applyScriptConfig(scriptId, patch) {
       const currentHost = this.storage.getCurrentHost();
-      await this.storage.setScriptConfig(scriptId, patch, currentHost);
-      this.pushConfigToModule(scriptId);
+      const savePromise = this.storage.setScriptConfig(scriptId, patch, currentHost);
+      this.pushConfigToModule(scriptId, { local: true });
+      await savePromise;
     }
 
     // Hands the settings that apply on this site to a running module, restarting modules that
     // cannot take settings live.
-    pushConfigToModule(scriptId) {
+    pushConfigToModule(scriptId, options = { local: true }) {
       const updatedCfg = this.storage.getScriptConfig(scriptId, this.storage.getCurrentHost());
       const m = this.modules.find(mod => mod.id === scriptId);
       if (m && m.running) {
         if (typeof m.onConfigChange === 'function') {
-          try { m.onConfigChange(updatedCfg); } catch (e) {}
+          try { m.onConfigChange(updatedCfg, { local: options.local !== false }); } catch (e) {}
         } else {
           try {
             m.destroy();
             m.init(updatedCfg);
           } catch (e) {}
         }
+        m._lastConfigJson = JSON.stringify(updatedCfg);
       }
     }
 
     // Cross-site state for modules. Userscript manager and extension storage are shared by every
     // site, unlike localStorage, which is separate per origin. Values must be JSON-serializable.
     async readSharedState(key, fallback = null) {
-      return BESAdapter.get('shared_' + key, fallback);
+      return BESAdapter.get('shared_' + key, fallback, 2500, BESAdapter.isExt);
     }
 
     async writeSharedState(key, value) {
@@ -8041,6 +8360,7 @@
       if (!this.shadow || !this.host || !this.host.isConnected) this.mount();
       if (!this.shadow) return;
       this.currentView = view;
+      this.syncStorage();
 
       const wrapper = document.createElement('div');
       wrapper.className = 'besing-bubble-wrapper';
@@ -8567,7 +8887,9 @@
                   </div>
                 `);
                 row.querySelector('input').onchange = async (e) => {
-                  await this.storage.setSiteOverride(scriptId, host, e.target.checked ? 'site' : 'site-off');
+                  const nextSiteMode = e.target.checked ? 'site' : 'site-off';
+                  await this.onScriptModeChanged(scriptId, nextSiteMode);
+                  await this.storage.setSiteOverride(scriptId, host, nextSiteMode);
                   renderSiteRulesList();
                   this.refreshCurrentSiteModules();
                 };
@@ -8632,6 +8954,7 @@
             if (!rawH) return;
             const scriptId = selectS ? selectS.value : (this.modules[0] ? this.modules[0].id : '');
             const modeVal = selectM ? selectM.value : 'site';
+            await this.onScriptModeChanged(scriptId, modeVal);
             await this.storage.setSiteOverride(scriptId, rawH, modeVal);
             inputH.value = '';
             renderSiteRulesList();
@@ -8735,6 +9058,7 @@
                 nextMode = 'off';
               }
               currentMode = nextMode;
+              await this.onScriptModeChanged(m.id, nextMode);
               await this.storage.setScriptMode(m.id, nextMode, currentHost);
 
               // Update toggle state in-place to prevent resetting scroll position to top
@@ -9497,6 +9821,7 @@
       const btnOn = body.querySelector('[data-mode="on"]');
 
       const handleModeChange = async (newMode) => {
+        await this.onScriptModeChanged(m.id, newMode);
         await this.storage.setScriptMode(m.id, newMode, currentHost);
         this.refreshCurrentSiteModules();
         this.renderBody();
@@ -9710,8 +10035,10 @@
           btnLaunch.onclick = () => {
             this.closeModal();
             if (typeof m.init === 'function' && !m.running) {
-              m.init(readCfg());
+              const cfgNow = readCfg();
+              m.init(cfgNow);
               m.running = true;
+              m._lastConfigJson = JSON.stringify(cfgNow);
             }
             if (typeof m.startZapper === 'function') {
               m.startZapper(async (patch) => {
@@ -9870,7 +10197,7 @@
         const refreshReminderState = async () => {
           try {
             const shared = await this.readSharedState(m.SHARED_KEY || 'rest_reminder', null);
-            if (shared) reminderState = shared;
+            if (shared !== undefined) reminderState = shared;
           } catch (e) {}
           paintCountdown();
         };

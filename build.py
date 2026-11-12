@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -171,28 +171,37 @@ def build():
     isExt: typeof chrome !== 'undefined' && !!chrome.storage && !!chrome.storage.local,
 
     // `timeoutMs` bounds the wait for extension storage before falling back to the localStorage mirror.
-    async get(key, defaultValue = null, timeoutMs = 350) {{
+    // When `skipLocalFallback` is true, extension storage errors/timeouts return `undefined` instead of
+    // per-origin localStorage, so cross-site state readers know not to overwrite shared state.
+    async get(key, defaultValue = null, timeoutMs = 350, skipLocalFallback = false) {{
       if (this.isGM) {{
         try {{
           const val = GM_getValue(key, defaultValue);
           return val !== undefined ? val : defaultValue;
         }} catch (e) {{
-          return defaultValue;
+          return skipLocalFallback ? undefined : defaultValue;
         }}
       }}
       if (this.isExt) {{
         return new Promise(resolve => {{
           let resolved = false;
-          // Mobile Edge / WebKit timeout guard: 350ms race
+          const fallbackLocal = () => {{
+            if (skipLocalFallback) {{
+              resolve(undefined);
+              return;
+            }}
+            try {{
+              const item = window.localStorage.getItem('besing_' + key);
+              resolve((item !== null && item !== undefined) ? JSON.parse(item) : defaultValue);
+            }} catch (e) {{
+              resolve(defaultValue);
+            }}
+          }};
+          // Mobile Edge / WebKit timeout guard
           const timer = setTimeout(() => {{
             if (!resolved) {{
               resolved = true;
-              try {{
-                const item = window.localStorage.getItem('besing_' + key);
-                resolve((item !== null && item !== undefined) ? JSON.parse(item) : defaultValue);
-              }} catch (e) {{
-                resolve(defaultValue);
-              }}
+              fallbackLocal();
             }}
           }}, timeoutMs);
 
@@ -202,12 +211,7 @@ def build():
                 resolved = true;
                 clearTimeout(timer);
                 if (chrome.runtime && chrome.runtime.lastError) {{
-                  try {{
-                    const item = window.localStorage.getItem('besing_' + key);
-                    resolve((item !== null && item !== undefined) ? JSON.parse(item) : defaultValue);
-                  }} catch (e) {{
-                    resolve(defaultValue);
-                  }}
+                  fallbackLocal();
                 }} else {{
                   const val = (res && res[key] !== undefined) ? res[key] : defaultValue;
                   try {{
@@ -221,12 +225,7 @@ def build():
             if (!resolved) {{
               resolved = true;
               clearTimeout(timer);
-              try {{
-                const item = window.localStorage.getItem('besing_' + key);
-                resolve((item !== null && item !== undefined) ? JSON.parse(item) : defaultValue);
-              }} catch (e) {{
-                resolve(defaultValue);
-              }}
+              fallbackLocal();
             }}
           }}
         }});
@@ -387,6 +386,7 @@ def build():
         }}
       }};
 
+      this._writeSeq = 0;
       this.siteRules = readLocal('site_rules', {{}});
       this.enabledScripts = readLocal('enabled_scripts', {{ 'prevent-redirect': true }});
       if (this.enabledScripts['prevent-redirect'] === undefined) {{
@@ -404,16 +404,17 @@ def build():
       }};
     }}
 
-    async init() {{
-      const data = await BESAdapter.getAll({{
-        site_rules: this.siteRules || {{}},
-        blocked_sites: [],
-        enabled_scripts: this.enabledScripts || {{}},
-        script_configs: this.scriptConfigs || {{}},
-        widget_position: this.widgetPos,
-        global_settings: this.settings || {{}}
-      }});
+    _defaultSettings() {{
+      return {{
+        theme: 'cyber-pet',
+        agentUrl: 'http://127.0.0.1:8765/api/sync',
+        authToken: '',
+        updateChannel: 'github',
+        autoCheckUpdates: true
+      }};
+    }}
 
+    _applyLoadedData(data) {{
       this.siteRules = (data.site_rules && typeof data.site_rules === 'object') ? data.site_rules : {{}};
 
       // Migrate legacy blocked_sites array if present
@@ -433,10 +434,95 @@ def build():
       }}
 
       this.scriptConfigs = (data.script_configs && typeof data.script_configs === 'object') ? data.script_configs : {{}};
-      if (data.widget_position) {{
-        this.widgetPos = data.widget_position;
+      if (data.widget_position !== undefined) {{
+        this.widgetPos = data.widget_position || null;
       }}
-      this.settings = {{ ...this.settings, ...(data.global_settings || {{}}) }};
+      this.settings = {{ ...this._defaultSettings(), ...(data.global_settings || {{}}) }};
+    }}
+
+    async init() {{
+      const data = await BESAdapter.getAll({{
+        site_rules: this.siteRules || {{}},
+        blocked_sites: [],
+        enabled_scripts: this.enabledScripts || {{}},
+        script_configs: this.scriptConfigs || {{}},
+        widget_position: this.widgetPos,
+        global_settings: this.settings || {{}}
+      }});
+
+      this._applyLoadedData(data);
+    }}
+
+    async syncFromStore(externalChanges = null) {{
+      const prevRules = JSON.stringify({{
+        siteRules: this.siteRules,
+        enabledScripts: this.enabledScripts,
+        scriptConfigs: this.scriptConfigs
+      }});
+      const prevSettings = JSON.stringify(this.settings);
+      const prevPos = JSON.stringify(this.widgetPos);
+
+      if (externalChanges && typeof externalChanges === 'object') {{
+        const mirror = (k, v) => {{
+          try {{ window.localStorage.setItem('besing_' + k, JSON.stringify(v)); }} catch (e) {{}}
+        }};
+        if ('site_rules' in externalChanges) {{
+          const v = (externalChanges.site_rules && typeof externalChanges.site_rules === 'object') ? externalChanges.site_rules : {{}};
+          this.siteRules = v;
+          mirror('site_rules', v);
+        }}
+        if ('enabled_scripts' in externalChanges) {{
+          const v = (externalChanges.enabled_scripts && typeof externalChanges.enabled_scripts === 'object') ? externalChanges.enabled_scripts : {{}};
+          if (v['prevent-redirect'] === undefined) v['prevent-redirect'] = true;
+          this.enabledScripts = v;
+          mirror('enabled_scripts', v);
+        }}
+        if ('script_configs' in externalChanges) {{
+          const v = (externalChanges.script_configs && typeof externalChanges.script_configs === 'object') ? externalChanges.script_configs : {{}};
+          this.scriptConfigs = v;
+          mirror('script_configs', v);
+        }}
+        if ('global_settings' in externalChanges) {{
+          const v = (externalChanges.global_settings && typeof externalChanges.global_settings === 'object') ? externalChanges.global_settings : {{}};
+          this.settings = {{ ...this._defaultSettings(), ...v }};
+          mirror('global_settings', this.settings);
+        }}
+        if ('widget_position' in externalChanges) {{
+          this.widgetPos = externalChanges.widget_position || null;
+          mirror('widget_position', this.widgetPos);
+        }}
+      }} else {{
+        const seqBefore = this._writeSeq;
+        const data = await BESAdapter.getAll({{
+          site_rules: {{}},
+          enabled_scripts: {{ 'prevent-redirect': true }},
+          script_configs: {{}},
+          widget_position: null,
+          global_settings: this._defaultSettings()
+        }});
+        if (this._writeSeq !== seqBefore) {{
+          return {{ rulesChanged: false, settingsChanged: false, posChanged: false, stale: true }};
+        }}
+        const src = BESAdapter.lastLoad && BESAdapter.lastLoad.source;
+        if (src !== 'gm' && src !== 'ext') {{
+          return {{ rulesChanged: false, settingsChanged: false, posChanged: false }};
+        }}
+        this._applyLoadedData(data);
+      }}
+
+      const nextRules = JSON.stringify({{
+        siteRules: this.siteRules,
+        enabledScripts: this.enabledScripts,
+        scriptConfigs: this.scriptConfigs
+      }});
+      const nextSettings = JSON.stringify(this.settings);
+      const nextPos = JSON.stringify(this.widgetPos);
+
+      return {{
+        rulesChanged: nextRules !== prevRules,
+        settingsChanged: nextSettings !== prevSettings,
+        posChanged: nextPos !== prevPos
+      }};
     }}
 
     getCurrentHost() {{
@@ -455,6 +541,7 @@ def build():
     async setSiteDisabledAll(host, disabled) {{
       const h = (host || this.getCurrentHost()).toLowerCase().trim();
       if (!h) return;
+      this._writeSeq++;
       if (!this.siteRules[h]) this.siteRules[h] = {{ disableAll: false, scripts: {{}}, configs: {{}} }};
       this.siteRules[h].disableAll = !!disabled;
       this.cleanupSiteRule(h);
@@ -498,6 +585,7 @@ def build():
     // touched here; the only way to drop them is to switch the lock back to global.
     async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {{
       const h = (host || '').toLowerCase().trim();
+      this._writeSeq++;
       if (!this.siteRules[h]) this.siteRules[h] = {{ disableAll: false, scripts: {{}}, configs: {{}} }};
       if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {{}};
 
@@ -545,6 +633,7 @@ def build():
     async setConfigLock(scriptId, locked, host = this.getCurrentHost()) {{
       const h = (host || '').toLowerCase().trim();
       if (!h) return;
+      this._writeSeq++;
       if (locked) {{
         this.lockConfigToSite(scriptId, h);
       }} else if (this.siteRules[h] && this.siteRules[h].configs) {{
@@ -573,6 +662,7 @@ def build():
     async setSiteOverride(scriptId, host, mode) {{
       const h = (host || '').toLowerCase().trim();
       if (!h) return;
+      this._writeSeq++;
       if (!this.siteRules[h]) this.siteRules[h] = {{ disableAll: false, scripts: {{}}, configs: {{}} }};
       if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {{}};
 
@@ -591,6 +681,7 @@ def build():
     async removeSiteOverride(scriptId, host) {{
       const h = (host || '').toLowerCase().trim();
       if (!h || !this.siteRules[h]) return;
+      this._writeSeq++;
       if (this.siteRules[h].scripts) delete this.siteRules[h].scripts[scriptId];
       this.cleanupSiteRule(h);
       await BESAdapter.set('site_rules', this.siteRules);
@@ -607,6 +698,7 @@ def build():
 
     async setScriptConfig(scriptId, patch, host = this.getCurrentHost()) {{
       const h = (host || '').toLowerCase().trim();
+      this._writeSeq++;
 
       if (this.isConfigLocked(scriptId, h)) {{
         this.siteRules[h].configs[scriptId] = {{ ...this.siteRules[h].configs[scriptId], ...patch }};
@@ -619,6 +711,7 @@ def build():
 
     async toggleSiteRule(host, ruleKey, val) {{
       const h = (host || '').toLowerCase().trim();
+      this._writeSeq++;
       if (!this.siteRules[h]) this.siteRules[h] = {{ disableAll: false, scripts: {{}}, configs: {{}} }};
       if (!this.siteRules[h].scripts) this.siteRules[h].scripts = {{}};
 
@@ -645,6 +738,7 @@ def build():
     async removeSiteRule(host, ruleKey = null) {{
       const h = (host || '').toLowerCase().trim();
       if (!this.siteRules[h]) return;
+      this._writeSeq++;
 
       if (!ruleKey || ruleKey === 'all') {{
         delete this.siteRules[h];
@@ -675,6 +769,7 @@ def build():
     }}
 
     async setWidgetPosition(pos) {{
+      this._writeSeq++;
       this.widgetPos = pos;
       await BESAdapter.set('widget_position', pos);
     }}
@@ -684,11 +779,13 @@ def build():
     }}
 
     async setTheme(theme) {{
+      this._writeSeq++;
       this.settings.theme = theme;
       await BESAdapter.set('global_settings', this.settings);
     }}
 
     async updateSettings(patch) {{
+      this._writeSeq++;
       this.settings = {{ ...this.settings, ...patch }};
       await BESAdapter.set('global_settings', this.settings);
     }}
@@ -1307,12 +1404,30 @@ def build():
       this.disposed = false;
       this._viewportFrame = 0;
       this._viewportHandler = null;
+      this._storageSyncInterval = null;
+      this._storageChangeListener = null;
+      this._boundWindowFocusSync = null;
+      this._storageSyncing = false;
+      this._storageSyncPending = false;
+      this._pendingExternalChanges = null;
     }}
 
     // Full shutdown used when another instance replaces this one: stops timers, modules and UI,
     // and makes every later lifecycle callback (pageshow, heartbeat, load) a no-op.
     dispose() {{
       this.disposed = true;
+      if (this._storageSyncInterval) {{
+        clearInterval(this._storageSyncInterval);
+        this._storageSyncInterval = null;
+      }}
+      if (this._storageChangeListener && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {{
+        try {{ chrome.storage.onChanged.removeListener(this._storageChangeListener); }} catch (e) {{}}
+        this._storageChangeListener = null;
+      }}
+      if (this._boundWindowFocusSync) {{
+        window.removeEventListener('focus', this._boundWindowFocusSync);
+        this._boundWindowFocusSync = null;
+      }}
       this.teardown();
       this.detachViewportTracking();
     }}
@@ -1323,7 +1438,8 @@ def build():
       if (!this.modules || this.modules.length === 0) {{
         this.modules = BUILTIN_MODULES.map(m => ({{
           ...m,
-          running: false
+          running: false,
+          _lastConfigJson: null
         }}));
       }}
 
@@ -1333,8 +1449,10 @@ def build():
       const host = this.storage.getCurrentHost();
       if (prModule && typeof prModule.init === 'function' && this.storage.isScriptActiveOnSite(prModule.id, host)) {{
         try {{
-          prModule.init(this.storage.getScriptConfig(prModule.id, host));
+          const cfg = this.storage.getScriptConfig(prModule.id, host);
+          prModule.init(cfg);
           prModule.running = true;
+          prModule._lastConfigJson = JSON.stringify(cfg);
           console.log('[BESing] Preemptive security shield synchronously armed at document-start.');
           if (typeof prModule.handleLateStart === 'function') prModule.handleLateStart();
         }} catch (e) {{
@@ -1365,7 +1483,8 @@ def build():
       if (!this.modules || this.modules.length === 0) {{
         this.modules = BUILTIN_MODULES.map(m => ({{
           ...m,
-          running: false
+          running: false,
+          _lastConfigJson: null
         }}));
       }}
 
@@ -1373,6 +1492,7 @@ def build():
       this.modules.forEach(m => {{
         const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
         const cfg = this.storage.getScriptConfig(m.id, currentHost);
+        const cfgJson = JSON.stringify(cfg);
 
         if (m.id === 'prevent-redirect') {{
           // If explicitly disabled on this site by user, deactivate the preemptive shield
@@ -1380,20 +1500,23 @@ def build():
             try {{
               m.destroy();
               m.running = false;
+              m._lastConfigJson = null;
               console.log('[BESing] Preemptive security shield deactivated per site rule.');
             }} catch (err) {{}}
           }} else if (shouldBeActive && !m.running) {{
             try {{
               m.init(cfg);
               m.running = true;
+              m._lastConfigJson = cfgJson;
             }} catch (err) {{
               BESBootLog.error(`init ${{m.id}}`, err);
             }}
           }} else if (shouldBeActive && m.running) {{
             try {{
-              if (typeof m.onConfigChange === 'function') {{
-                m.onConfigChange(cfg);
+              if (typeof m.onConfigChange === 'function' && m._lastConfigJson !== cfgJson) {{
+                m.onConfigChange(cfg, {{ local: false }});
               }}
+              m._lastConfigJson = cfgJson;
             }} catch (err) {{
               BESBootLog.error(`config ${{m.id}}`, err);
             }}
@@ -1405,6 +1528,7 @@ def build():
           try {{
             m.init(cfg);
             m.running = true;
+            m._lastConfigJson = cfgJson;
           }} catch (err) {{
             console.error(`[BESing] Error initializing ${{m.id}}:`, err);
             BESBootLog.error(`init ${{m.id}}`, err);
@@ -1413,14 +1537,16 @@ def build():
           try {{
             m.destroy();
             m.running = false;
+            m._lastConfigJson = null;
           }} catch (err) {{
             console.error(`[BESing] Error destroying ${{m.id}}:`, err);
             BESBootLog.error(`destroy ${{m.id}}`, err);
           }}
         }} else if (shouldBeActive && m.running) {{
-          if (typeof m.onConfigChange === 'function') {{
-            try {{ m.onConfigChange(cfg); }} catch (err) {{ BESBootLog.error(`config ${{m.id}}`, err); }}
+          if (typeof m.onConfigChange === 'function' && m._lastConfigJson !== cfgJson) {{
+            try {{ m.onConfigChange(cfg, {{ local: false }}); }} catch (err) {{ BESBootLog.error(`config ${{m.id}}`, err); }}
           }}
+          m._lastConfigJson = cfgJson;
         }}
       }});
       BESBootLog.record('modules', {{ running: this.modules.filter(m => m.running).map(m => m.id).join(',') }});
@@ -1483,14 +1609,16 @@ def build():
         if (this.disposed) return;
         this.ensureMounted('pageshow');
         this.clampWidgetPosition();
-        this.refreshCurrentSiteModules();
+        this.syncStorage();
+        this.refreshCurrentSiteModules({{ fromSync: true }});
       }});
 
       window.addEventListener('popstate', () => {{
         if (this.disposed) return;
         this.ensureMounted('popstate');
         this.clampWidgetPosition();
-        this.refreshCurrentSiteModules();
+        this.syncStorage();
+        this.refreshCurrentSiteModules({{ fromSync: true }});
       }});
 
       document.addEventListener('visibilitychange', () => {{
@@ -1498,10 +1626,12 @@ def build():
         if (document.visibilityState === 'visible') {{
           this.ensureMounted('visible');
           this.clampWidgetPosition();
+          this.syncStorage();
         }}
       }});
 
       this.startHeartbeat();
+      this.startCrossTabSync();
 
       // Direct DOM MutationObserver on document.documentElement
       try {{
@@ -1533,20 +1663,156 @@ def build():
       }}, 2500);
     }}
 
+    startCrossTabSync() {{
+      if (this.disposed || !IS_TOP_FRAME) return;
+      const hasExtOnChanged = BESAdapter.isExt && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === 'function';
+      if (hasExtOnChanged && !this._storageChangeListener) {{
+        this._storageChangeListener = (changes, areaName) => {{
+          if (this.disposed || areaName !== 'local' || !changes) return;
+          const syncKeys = ['site_rules', 'enabled_scripts', 'script_configs', 'global_settings', 'widget_position'];
+          const extData = {{}};
+          let hasRelevant = false;
+          for (const k of syncKeys) {{
+            if (Object.prototype.hasOwnProperty.call(changes, k)) {{
+              extData[k] = changes[k].newValue;
+              hasRelevant = true;
+            }}
+          }}
+          if (hasRelevant) {{
+            this.syncStorage(extData);
+          }}
+          if (Object.prototype.hasOwnProperty.call(changes, 'shared_rest_reminder')) {{
+            const rr = this.modules.find(mod => mod.id === 'rest-reminder');
+            if (rr && rr.running && typeof rr._sync === 'function') {{
+              rr._sync();
+            }}
+          }}
+        }};
+        try {{
+          chrome.storage.onChanged.addListener(this._storageChangeListener);
+        }} catch (e) {{
+          this._storageChangeListener = null;
+        }}
+      }}
+
+      if (!this._boundWindowFocusSync) {{
+        this._boundWindowFocusSync = () => {{
+          if (!this.disposed) this.syncStorage();
+        }};
+        window.addEventListener('focus', this._boundWindowFocusSync);
+      }}
+
+      if (!this._storageSyncInterval && !this._storageChangeListener) {{
+        this._storageSyncInterval = setInterval(() => {{
+          if (!this.disposed && document.visibilityState !== 'hidden') {{
+            this.syncStorage();
+            const rr = this.modules.find(mod => mod.id === 'rest-reminder');
+            if (rr && rr.running && typeof rr._sync === 'function') {{
+              rr._sync();
+            }}
+          }}
+        }}, 5000);
+      }}
+    }}
+
+    async syncStorage(externalChanges = null) {{
+      if (this.disposed || !IS_TOP_FRAME) return;
+      if (this._storageSyncing) {{
+        if (externalChanges) {{
+          this._pendingExternalChanges = Object.assign(this._pendingExternalChanges || {{}}, externalChanges);
+        }}
+        this._storageSyncPending = true;
+        return;
+      }}
+      this._storageSyncing = true;
+      try {{
+        const wasBlocked = this.storage.isCurrentBlocked();
+        const diff = await this.storage.syncFromStore(externalChanges);
+        if (this.disposed) return;
+        if (diff.stale) {{
+          this._storageSyncPending = true;
+          return;
+        }}
+
+        if (diff.rulesChanged) {{
+          const nowBlocked = this.storage.isCurrentBlocked();
+          if (!wasBlocked && nowBlocked) {{
+            this.closeModal();
+            this.teardown();
+          }} else if (wasBlocked && !nowBlocked) {{
+            this.ensureMounted('unblocked');
+            this.startHeartbeat();
+            this.refreshCurrentSiteModules({{ fromSync: true }});
+          }} else if (!nowBlocked) {{
+            this.refreshCurrentSiteModules({{ fromSync: true }});
+          }}
+        }}
+
+        if (diff.settingsChanged && this.widgetEl) {{
+          this.updatePetIcon(this.widgetEl);
+        }}
+
+        if (diff.posChanged && this.widgetEl && !this.isDragging) {{
+          this.restoreWidgetPosition();
+          this.checkEdgeDocking(this.widgetEl);
+        }}
+
+        if ((diff.rulesChanged || diff.settingsChanged) && this.menuWrapperEl && this.shadow) {{
+          const active = this.shadow.activeElement;
+          const isEditingInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT');
+          if (!isEditingInput) {{
+            this.renderBody();
+          }}
+        }}
+      }} catch (e) {{
+      }} finally {{
+        this._storageSyncing = false;
+        if (this._storageSyncPending && !this.disposed) {{
+          const nextExt = this._pendingExternalChanges || null;
+          this._storageSyncPending = false;
+          this._pendingExternalChanges = null;
+          this.syncStorage(nextExt);
+        }}
+      }}
+    }}
+
+    async onScriptModeChanged(scriptId, mode) {{
+      if (scriptId !== 'rest-reminder') return;
+      const cfg = this.storage.getScriptConfig('rest-reminder', this.storage.getCurrentHost());
+      const raw = Number(cfg && cfg.intervalMinutes);
+      const intervalMinutes = (!isNaN(raw) && raw >= 1 && raw <= 240) ? raw : 20;
+      if (mode === 'off') {{
+        await this.writeSharedState('rest_reminder', {{ due: 0, intervalMinutes, off: true }});
+      }} else if (mode === 'on' || mode === 'site') {{
+        const state = await this.readSharedState('rest_reminder', null);
+        if (state !== undefined && (!state || state.off || !Number.isFinite(Number(state.due)) || Number(state.due) <= 0)) {{
+          await this.writeSharedState('rest_reminder', {{
+            due: Date.now() + intervalMinutes * 60 * 1000,
+            intervalMinutes,
+            off: false
+          }});
+        }}
+      }}
+    }}
+
     // Child frames: honor the frame's site rules for frame-safe modules only, with no widget or listeners.
     initFrameModules(currentHost) {{
       this.modules.forEach(m => {{
         const shouldBeActive = FRAME_SAFE_MODULES.has(m.id) && this.storage.isScriptActiveOnSite(m.id, currentHost);
         const cfg = this.storage.getScriptConfig(m.id, currentHost);
+        const cfgJson = JSON.stringify(cfg);
         try {{
           if (shouldBeActive && !m.running) {{
             m.init(cfg);
             m.running = true;
+            m._lastConfigJson = cfgJson;
           }} else if (!shouldBeActive && m.running) {{
             m.destroy();
             m.running = false;
-          }} else if (shouldBeActive && m.running && typeof m.onConfigChange === 'function') {{
-            m.onConfigChange(cfg);
+            m._lastConfigJson = null;
+          }} else if (shouldBeActive && m.running && typeof m.onConfigChange === 'function' && m._lastConfigJson !== cfgJson) {{
+            m.onConfigChange(cfg, {{ local: false }});
+            m._lastConfigJson = cfgJson;
           }}
         }} catch (err) {{
           console.error(`[BESing] Frame module error ${{m.id}}:`, err);
@@ -1554,16 +1820,19 @@ def build():
       }});
     }}
 
-    refreshCurrentSiteModules() {{
+    refreshCurrentSiteModules(options = {{}}) {{
       if (this.disposed) return;
       const currentHost = this.storage.getCurrentHost();
+      const isLocal = !options.fromSync;
       this.modules.forEach(m => {{
         const shouldBeActive = this.storage.isScriptActiveOnSite(m.id, currentHost);
         const cfg = this.storage.getScriptConfig(m.id, currentHost);
+        const cfgJson = JSON.stringify(cfg);
         if (shouldBeActive && !m.running) {{
           try {{
             m.init(cfg);
             m.running = true;
+            m._lastConfigJson = cfgJson;
           }} catch (err) {{
             console.error(`[BESing] Error initializing ${{m.id}}:`, err);
           }}
@@ -1571,13 +1840,20 @@ def build():
           try {{
             m.destroy();
             m.running = false;
+            m._lastConfigJson = null;
           }} catch (err) {{
             console.error(`[BESing] Error destroying ${{m.id}}:`, err);
           }}
-        }} else if (shouldBeActive && m.running) {{
+        }} else if (shouldBeActive && m.running && m._lastConfigJson !== cfgJson) {{
           if (typeof m.onConfigChange === 'function') {{
-            try {{ m.onConfigChange(cfg); }} catch (e) {{}}
+            try {{ m.onConfigChange(cfg, {{ local: isLocal }}); }} catch (e) {{}}
+          }} else {{
+            try {{
+              m.destroy();
+              m.init(cfg);
+            }} catch (e) {{}}
           }}
+          m._lastConfigJson = cfgJson;
         }}
       }});
       this.updateBadge();
@@ -1597,8 +1873,10 @@ def build():
       this.modules.forEach(m => {{
         if (m.id === 'prevent-redirect' || !m.running) return;
         try {{
+          const cfg = this.storage.getScriptConfig(m.id, currentHost);
           m.destroy();
-          m.init(this.storage.getScriptConfig(m.id, currentHost));
+          m.init(cfg);
+          m._lastConfigJson = JSON.stringify(cfg);
         }} catch (err) {{
           BESBootLog.error(`restart ${{m.id}}`, err);
         }}
@@ -1608,31 +1886,33 @@ def build():
 
     async applyScriptConfig(scriptId, patch) {{
       const currentHost = this.storage.getCurrentHost();
-      await this.storage.setScriptConfig(scriptId, patch, currentHost);
-      this.pushConfigToModule(scriptId);
+      const savePromise = this.storage.setScriptConfig(scriptId, patch, currentHost);
+      this.pushConfigToModule(scriptId, {{ local: true }});
+      await savePromise;
     }}
 
     // Hands the settings that apply on this site to a running module, restarting modules that
     // cannot take settings live.
-    pushConfigToModule(scriptId) {{
+    pushConfigToModule(scriptId, options = {{ local: true }}) {{
       const updatedCfg = this.storage.getScriptConfig(scriptId, this.storage.getCurrentHost());
       const m = this.modules.find(mod => mod.id === scriptId);
       if (m && m.running) {{
         if (typeof m.onConfigChange === 'function') {{
-          try {{ m.onConfigChange(updatedCfg); }} catch (e) {{}}
+          try {{ m.onConfigChange(updatedCfg, {{ local: options.local !== false }}); }} catch (e) {{}}
         }} else {{
           try {{
             m.destroy();
             m.init(updatedCfg);
           }} catch (e) {{}}
         }}
+        m._lastConfigJson = JSON.stringify(updatedCfg);
       }}
     }}
 
     // Cross-site state for modules. Userscript manager and extension storage are shared by every
     // site, unlike localStorage, which is separate per origin. Values must be JSON-serializable.
     async readSharedState(key, fallback = null) {{
-      return BESAdapter.get('shared_' + key, fallback);
+      return BESAdapter.get('shared_' + key, fallback, 2500, BESAdapter.isExt);
     }}
 
     async writeSharedState(key, value) {{
@@ -2300,6 +2580,7 @@ def build():
       if (!this.shadow || !this.host || !this.host.isConnected) this.mount();
       if (!this.shadow) return;
       this.currentView = view;
+      this.syncStorage();
 
       const wrapper = document.createElement('div');
       wrapper.className = 'besing-bubble-wrapper';
@@ -2826,7 +3107,9 @@ def build():
                   </div>
                 `);
                 row.querySelector('input').onchange = async (e) => {{
-                  await this.storage.setSiteOverride(scriptId, host, e.target.checked ? 'site' : 'site-off');
+                  const nextSiteMode = e.target.checked ? 'site' : 'site-off';
+                  await this.onScriptModeChanged(scriptId, nextSiteMode);
+                  await this.storage.setSiteOverride(scriptId, host, nextSiteMode);
                   renderSiteRulesList();
                   this.refreshCurrentSiteModules();
                 }};
@@ -2891,6 +3174,7 @@ def build():
             if (!rawH) return;
             const scriptId = selectS ? selectS.value : (this.modules[0] ? this.modules[0].id : '');
             const modeVal = selectM ? selectM.value : 'site';
+            await this.onScriptModeChanged(scriptId, modeVal);
             await this.storage.setSiteOverride(scriptId, rawH, modeVal);
             inputH.value = '';
             renderSiteRulesList();
@@ -2994,6 +3278,7 @@ def build():
                 nextMode = 'off';
               }}
               currentMode = nextMode;
+              await this.onScriptModeChanged(m.id, nextMode);
               await this.storage.setScriptMode(m.id, nextMode, currentHost);
 
               // Update toggle state in-place to prevent resetting scroll position to top
@@ -3756,6 +4041,7 @@ def build():
       const btnOn = body.querySelector('[data-mode="on"]');
 
       const handleModeChange = async (newMode) => {{
+        await this.onScriptModeChanged(m.id, newMode);
         await this.storage.setScriptMode(m.id, newMode, currentHost);
         this.refreshCurrentSiteModules();
         this.renderBody();
@@ -3969,8 +4255,10 @@ def build():
           btnLaunch.onclick = () => {{
             this.closeModal();
             if (typeof m.init === 'function' && !m.running) {{
-              m.init(readCfg());
+              const cfgNow = readCfg();
+              m.init(cfgNow);
               m.running = true;
+              m._lastConfigJson = JSON.stringify(cfgNow);
             }}
             if (typeof m.startZapper === 'function') {{
               m.startZapper(async (patch) => {{
@@ -4129,7 +4417,7 @@ def build():
         const refreshReminderState = async () => {{
           try {{
             const shared = await this.readSharedState(m.SHARED_KEY || 'rest_reminder', null);
-            if (shared) reminderState = shared;
+            if (shared !== undefined) reminderState = shared;
           }} catch (e) {{}}
           paintCountdown();
         }};
