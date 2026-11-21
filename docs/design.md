@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.10.0  
+**Version:** 1.11.0  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -554,3 +554,20 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Delta Traffic Optimization**: `besing_sync_pull` accepts `p_since` and `p_device_hashes` (`{ instance_id: snapshot_hash }`), returning only compact metadata (`unchanged: true`) for devices whose tab snapshot has not changed and only new history/usage rows since the last pull.
 - **Prevent Redirect Integration**: Trusted clicks originating inside `besing-host` Shadow DOM pass through Prevent Redirect's click guard so opening synced external links from the Browser Sync panel works smoothly while redirect protection remains active.
 - **Verification**: Verified in real external Microsoft Edge via Playwright across three suites: (1) unpacked MV3 Extension E2E (Sync Link linking, Edge tabs/closed tabs/account label push, pulling remote iPhone Safari + Work-PC Edge tab groups, native **Open Group** tab creation `1 -> 3`, XSS payload neutralization, `javascript:` URL filtering, strict privacy check confirming zero cookie/token/DOM leakage, 0 console errors); (2) Stay/Userscript E2E (Link Generator SHA-256 SQL + Sync Link, RLS 403 on direct table queries, 401 on wrong secret, SPA visit capture, 60s reload dedup, 10-minute cross-tab pull throttle, usage tracking); and (3) 30-day traffic simulation projecting **62.65 MB/month egress** (1.73 MB steady-state DB) for 3 devices (1 PC 24h + 2 mobile 8h) and **146.12 MB/month egress** (2.59 MB steady-state DB) for 5 devices plus runaway-reload and oversized-payload stress checks.
+
+### 7.40 Shared Manager Cloud Connection, Settings Sync (UTC LWW) & Quick Transfer (v1.11.0)
+- **Manager-Level Cloud Database (`BESCloud` in `build.py`, `extension/background.js`)**:
+  - Moved the shared 1-paste `besing-sync://...` Sync Link, Device Name, Profile/User Label, Link Generator, and unified daily traffic meter into **BESing Settings -> Cloud Database (Shared Sync)** (`global_settings.cloudSync`), with seamless automatic fallback/migration from legacy `script_configs['browser-sync'].syncLink`.
+  - Exposed `app.cloud` (`rpc`, `kvSync`, `testConnection`, `getConfig`, `setConfig`, `getInfo`) and MV3 message handlers (`besing-cloud:rpc`, `besing-cloud:get-info`) so `Browser Sync`, `Settings Sync`, `Quick Transfer`, and future cloud modules share one connection and one traffic meter while keeping independent UI pages and isolated data namespaces.
+- **Generic Namespaced LWW KV Table (`public.besing_script_kv` & `besing_kv_sync`)**:
+  - Added one locked-down (RLS enabled, zero policies, `REVOKE ALL` from `anon`/`authenticated`) namespaced key-value table keyed by `(space_hash, namespace, item_key)` with UTC epoch millisecond `updated_ms`, `deleted` tombstones (auto-pruned after 30 days), optional TTL expiry, and server-assigned `synced_at` delta watermarks.
+  - `besing_kv_sync` enforces per-key Last-Write-Wins atomically in Postgres (`WHERE updated_ms <= excluded.updated_ms`), clamps far-future client clocks, and allows future lightweight BESing scripts to store isolated data under their own `namespace` with zero new SQL migrations.
+- **Settings Sync (`scripts/settings-sync/settings-sync.user.js`)**:
+  - Opt-in module (OFF by default) using `namespace = 'settings'` in `besing_script_kv`.
+  - `BESStorage` records per-key UTC timestamps (`settings_timestamps`) whenever global script modes (`enabled:<id>`), global script configs (`config:<id>`), site rules (`site:<host>`), or desktop pet theme (`ui:theme`) change, while deliberately excluding device-local state (`widgetPos`, `cloudSync`, `boot_log`, and `settings-sync` itself).
+  - Applies remote winning edits live via `persistFromCloudMerge()` and `refreshCurrentSiteModules({ fromSync: true })`, with a Recent Remote Updates log and per-category sync toggles.
+- **Quick Transfer (`scripts/quick-transfer/quick-transfer.user.js`, `public.besing_transfers`)**:
+  - Open-and-use tool that works directly from its panel even while OFF (zero background page overhead).
+  - Supports sending text snippets, pasting clipboard images (`Ctrl+V` directly inside the textarea or via Paste Image button, with automatic WebP compression for large PNG screenshots > 1.5 MB), and uploading files up to **5 MB** raw (40 MB active cap per space, max 50 items, automatic **48-hour expiry**).
+  - `besing_transfer_list` returns metadata plus inline text only for small text snippets (<= 2 KB, enabling synchronous 1-tap iOS clipboard copy); larger texts, images, and files are fetched lazily on demand via `besing_transfer_get`.
+- **Verification**: Pushed migration `20261121043000_besing_cloud_modules.sql` to live production Supabase and verified in real external Microsoft Edge (both unpacked MV3 Extension mode and Stay/Userscript mode) inside an isolated temporary test space (cleaned up after verification): RLS 401/403 isolation on `newsring_subscribers`, `besing_script_kv`, and `besing_transfers`; wrong-secret 401 rejection; LWW conflict resolution rejecting stale timestamps and accepting newer ones; metadata-only image listing (749 B), lazy full image fetch, PNG preview rendering, and > 5 MB HTTP 400 rejection; and single-paste Settings link powering Quick Transfer (OFF), Settings Sync (applying remote `pixel-dino` theme & site rules), and Browser Sync seamlessly across both modes.

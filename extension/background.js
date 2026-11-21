@@ -209,9 +209,13 @@ function storageSet(obj) {
 }
 
 async function getConfig() {
-  const res = await storageGet(['enabled_scripts', 'script_configs', STORAGE_META_KEY]);
+  const res = await storageGet(['enabled_scripts', 'script_configs', 'global_settings', STORAGE_META_KEY]);
   const enabledMap = res.enabled_scripts || {};
   const configsMap = res.script_configs || {};
+  const globalSettings = res.global_settings || {};
+  const cloudCfg = (globalSettings && globalSettings.cloudSync && typeof globalSettings.cloudSync === 'object')
+    ? globalSettings.cloudSync
+    : {};
   const cfg = configsMap['browser-sync'] || {};
   let meta = res[STORAGE_META_KEY] || {};
   if (!meta.instanceId) {
@@ -222,16 +226,25 @@ async function getConfig() {
     await storageSet({ [STORAGE_META_KEY]: meta });
   }
   const enabled = enabledMap['browser-sync'] === true;
-  const creds = parseSyncLink(cfg.syncLink || '');
+  const rawSyncLink = (cloudCfg.syncLink && String(cloudCfg.syncLink).trim()) || (cfg.syncLink && String(cfg.syncLink).trim()) || '';
+  const creds = parseSyncLink(rawSyncLink);
   const pullIntervalMinutes = Math.max(2, Math.min(120, Number(cfg.pullIntervalMinutes) || 10));
   const retentionDays = Math.max(1, Math.min(90, Number(cfg.retentionDays) || 7));
+  const deviceName = (cloudCfg.deviceName && String(cloudCfg.deviceName).trim())
+    || (cfg.deviceName && String(cfg.deviceName).trim())
+    || (detectPlatform() === 'windows' ? 'PC' : 'Desktop');
+  const accountLabel = (cloudCfg.accountLabel && String(cloudCfg.accountLabel).trim())
+    || (cfg.accountLabel && String(cfg.accountLabel).trim())
+    || detectedEmail
+    || '';
   return {
     enabled,
     cfg,
+    cloudCfg,
     creds,
     instanceId: meta.instanceId,
-    deviceName: (cfg.deviceName && String(cfg.deviceName).trim()) || `${detectPlatform() === 'windows' ? 'PC' : 'Desktop'}`,
-    accountLabel: (cfg.accountLabel && String(cfg.accountLabel).trim()) || detectedEmail || '',
+    deviceName,
+    accountLabel,
     pullIntervalMinutes,
     retentionDays,
     excludeHosts: parseExcludeHosts(cfg),
@@ -752,7 +765,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area !== 'local') return;
-  if (changes.enabled_scripts || changes.script_configs) {
+  if (changes.enabled_scripts || changes.script_configs || changes.global_settings) {
     refreshProfileEmail();
     await setupAlarms();
   }
@@ -880,10 +893,50 @@ if (chrome.history && chrome.history.onVisited) {
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || typeof msg.type !== 'string' || !msg.type.startsWith('besing-sync:')) return false;
+  if (!msg || typeof msg.type !== 'string' || (!msg.type.startsWith('besing-sync:') && !msg.type.startsWith('besing-cloud:'))) return false;
 
   (async () => {
     try {
+      // Shared Manager Cloud API (used by Settings Sync, Quick Transfer, Browser Sync, and future scripts)
+      if (msg.type === 'besing-cloud:get-info') {
+        refreshProfileEmail();
+        const conf = await getConfig();
+        const res = await storageGet([STORAGE_STATS_KEY]);
+        sendResponse({
+          ok: true,
+          mode: 'extension',
+          configured: Boolean(conf.creds),
+          instanceId: conf.instanceId,
+          deviceName: conf.deviceName,
+          accountLabel: conf.accountLabel,
+          detectedEmail,
+          browser: detectBrowser(),
+          platform: detectPlatform(),
+          stats: res[STORAGE_STATS_KEY] || null
+        });
+        return;
+      }
+
+      if (msg.type === 'besing-cloud:rpc') {
+        const conf = await getConfig();
+        const creds = msg.syncLink ? parseSyncLink(msg.syncLink) : conf.creds;
+        if (!creds) {
+          sendResponse({ ok: false, error: 'Cloud database not linked. Configure Sync Link in BESing Settings.' });
+          return;
+        }
+        const fnName = String(msg.fnName || '').trim();
+        if (!/^[a-z0-9_]+$/i.test(fnName)) {
+          sendResponse({ ok: false, error: 'Invalid RPC function name' });
+          return;
+        }
+        const bodyObj = Object.assign({}, msg.args || {}, { p_secret: creds.secret });
+        const trafficKind = msg.trafficKind === 'pull' ? 'pull' : 'push';
+        const data = await callRpc(creds, fnName, bodyObj, trafficKind);
+        const res = await storageGet([STORAGE_STATS_KEY]);
+        sendResponse({ ok: true, data, stats: res[STORAGE_STATS_KEY] || null });
+        return;
+      }
+
       if (msg.type === 'besing-sync:get-state') {
         refreshProfileEmail();
         const conf = await getConfig();

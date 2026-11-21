@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.10.0
+ * Version 1.11.0
  */
 
 (function () {
@@ -13,7 +13,7 @@
   })();
   const FRAME_SAFE_MODULES = new Set(['prevent-redirect', 'force-copy']);
   // Modules whose settings drive state shared by every site, so they cannot be locked to one site.
-  const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder', 'browser-sync']);
+  const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder', 'browser-sync', 'settings-sync', 'quick-transfer']);
 
   // Ownership claim shared by every JS world (userscript sandboxes, extension content scripts, page).
   // Worlds do not share globals, and <html> may not exist yet at document-start, but they do share
@@ -259,6 +259,7 @@
         this.enabledScripts['prevent-redirect'] = true;
       }
       this.scriptConfigs = readLocal('script_configs', {});
+      this.settingsTimestamps = readLocal('settings_timestamps', {});
       this.widgetPos = readLocal('widget_position', null);
       this.settings = {
         theme: 'cyber-pet',
@@ -266,6 +267,7 @@
         authToken: '',
         updateChannel: 'github',
         autoCheckUpdates: true,
+        cloudSync: {},
         ...readLocal('global_settings', {})
       };
     }
@@ -276,7 +278,8 @@
         agentUrl: 'http://127.0.0.1:8765/api/sync',
         authToken: '',
         updateChannel: 'github',
-        autoCheckUpdates: true
+        autoCheckUpdates: true,
+        cloudSync: {}
       };
     }
 
@@ -300,10 +303,23 @@
       }
 
       this.scriptConfigs = (data.script_configs && typeof data.script_configs === 'object') ? data.script_configs : {};
+      this.settingsTimestamps = (data.settings_timestamps && typeof data.settings_timestamps === 'object') ? data.settings_timestamps : (this.settingsTimestamps || {});
       if (data.widget_position !== undefined) {
         this.widgetPos = data.widget_position || null;
       }
       this.settings = { ...this._defaultSettings(), ...(data.global_settings || {}) };
+      if (!this.settings.cloudSync || typeof this.settings.cloudSync !== 'object') {
+        this.settings.cloudSync = {};
+      }
+      // Seamless migration: adopt legacy browser-sync Sync Link into manager-level cloudSync.
+      const legacyBS = this.scriptConfigs['browser-sync'];
+      if (!this.settings.cloudSync.syncLink && legacyBS && legacyBS.syncLink) {
+        this.settings.cloudSync = {
+          syncLink: legacyBS.syncLink,
+          deviceName: legacyBS.deviceName || this.settings.cloudSync.deviceName || '',
+          accountLabel: legacyBS.accountLabel || this.settings.cloudSync.accountLabel || ''
+        };
+      }
     }
 
     async init() {
@@ -312,6 +328,7 @@
         blocked_sites: [],
         enabled_scripts: this.enabledScripts || {},
         script_configs: this.scriptConfigs || {},
+        settings_timestamps: this.settingsTimestamps || {},
         widget_position: this.widgetPos,
         global_settings: this.settings || {}
       });
@@ -348,6 +365,11 @@
           this.scriptConfigs = v;
           mirror('script_configs', v);
         }
+        if ('settings_timestamps' in externalChanges) {
+          const v = (externalChanges.settings_timestamps && typeof externalChanges.settings_timestamps === 'object') ? externalChanges.settings_timestamps : {};
+          this.settingsTimestamps = v;
+          mirror('settings_timestamps', v);
+        }
         if ('global_settings' in externalChanges) {
           const v = (externalChanges.global_settings && typeof externalChanges.global_settings === 'object') ? externalChanges.global_settings : {};
           this.settings = { ...this._defaultSettings(), ...v };
@@ -363,6 +385,7 @@
           site_rules: {},
           enabled_scripts: { 'prevent-redirect': true },
           script_configs: {},
+          settings_timestamps: {},
           widget_position: null,
           global_settings: this._defaultSettings()
         });
@@ -474,8 +497,11 @@
       }
 
       this.cleanupSiteRule(h);
+      this._touchTimestamp(`enabled:${scriptId}`);
+      this._touchTimestamp(`site:${h}`);
       await BESAdapter.set('enabled_scripts', this.enabledScripts);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }
 
     // Settings are locked to a site when `siteRules[host].configs[scriptId]` exists. Data saved by
@@ -506,7 +532,9 @@
         delete this.siteRules[h].configs[scriptId];
         this.cleanupSiteRule(h);
       }
+      this._touchTimestamp(`site:${h}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }
 
     getScriptSiteOverrides(scriptId) {
@@ -541,7 +569,9 @@
       }
 
       this.cleanupSiteRule(h);
+      this._touchTimestamp(`site:${h}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }
 
     async removeSiteOverride(scriptId, host) {
@@ -550,7 +580,9 @@
       this._writeSeq++;
       if (this.siteRules[h].scripts) delete this.siteRules[h].scripts[scriptId];
       this.cleanupSiteRule(h);
+      this._touchTimestamp(`site:${h}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }
 
     // Script settings: the site's locked copy when one exists (whatever the script's mode), else global.
@@ -568,11 +600,14 @@
 
       if (this.isConfigLocked(scriptId, h)) {
         this.siteRules[h].configs[scriptId] = { ...this.siteRules[h].configs[scriptId], ...patch };
+        this._touchTimestamp(`site:${h}`);
         await BESAdapter.set('site_rules', this.siteRules);
       } else {
         this.scriptConfigs[scriptId] = { ...(this.scriptConfigs[scriptId] || {}), ...patch };
+        this._touchTimestamp(`config:${scriptId}`);
         await BESAdapter.set('script_configs', this.scriptConfigs);
       }
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }
 
     async toggleSiteRule(host, ruleKey, val) {
@@ -588,7 +623,9 @@
       }
 
       this.cleanupSiteRule(h);
+      this._touchTimestamp(`site:${h}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }
 
     cleanupSiteRule(host) {
@@ -617,7 +654,9 @@
         this.cleanupSiteRule(h);
       }
 
+      this._touchTimestamp(`site:${h}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }
 
     getAllSiteRules() {
@@ -647,13 +686,309 @@
     async setTheme(theme) {
       this._writeSeq++;
       this.settings.theme = theme;
+      this._touchTimestamp('ui:theme');
       await BESAdapter.set('global_settings', this.settings);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }
 
     async updateSettings(patch) {
       this._writeSeq++;
       this.settings = { ...this.settings, ...patch };
       await BESAdapter.set('global_settings', this.settings);
+    }
+
+    _touchTimestamp(entryKey) {
+      if (!entryKey) return;
+      if (!this.settingsTimestamps || typeof this.settingsTimestamps !== 'object') {
+        this.settingsTimestamps = {};
+      }
+      this.settingsTimestamps[entryKey] = Date.now();
+      try {
+        window.dispatchEvent(new CustomEvent('besing:settings-mutated', { detail: { key: entryKey, ts: this.settingsTimestamps[entryKey] } }));
+      } catch (e) {}
+    }
+
+    async persistFromCloudMerge({ rulesTouched = false, settingsTouched = false } = {}) {
+      this._writeSeq++;
+      if (rulesTouched) {
+        await BESAdapter.set('enabled_scripts', this.enabledScripts);
+        await BESAdapter.set('script_configs', this.scriptConfigs);
+        await BESAdapter.set('site_rules', this.siteRules);
+      }
+      if (settingsTouched) {
+        await BESAdapter.set('global_settings', this.settings);
+      }
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
+    }
+
+    getCloudConfig() {
+      const c = (this.settings && this.settings.cloudSync && typeof this.settings.cloudSync === 'object')
+        ? this.settings.cloudSync
+        : {};
+      const legacy = (this.scriptConfigs && this.scriptConfigs['browser-sync']) || {};
+      return {
+        syncLink: (c.syncLink && String(c.syncLink).trim()) || (legacy.syncLink && String(legacy.syncLink).trim()) || '',
+        deviceName: (c.deviceName && String(c.deviceName).trim()) || (legacy.deviceName && String(legacy.deviceName).trim()) || '',
+        accountLabel: (c.accountLabel && String(c.accountLabel).trim()) || (legacy.accountLabel && String(legacy.accountLabel).trim()) || ''
+      };
+    }
+
+    async setCloudConfig(patch) {
+      const cur = this.getCloudConfig();
+      const next = Object.assign({}, cur, patch || {});
+      await this.updateSettings({ cloudSync: next });
+    }
+  }
+
+  // Shared manager-level Cloud Database client (used by Browser Sync, Settings Sync, Quick Transfer,
+  // and future BESing scripts). Keeps one Sync Link and unified traffic accounting across all modules.
+  class BESCloud {
+    constructor(app) {
+      this.app = app;
+      this.STATS_KEY = 'browser_sync_stats';
+    }
+
+    isExtensionMode() {
+      return typeof chrome !== 'undefined' && !!chrome.runtime && typeof chrome.runtime.sendMessage === 'function';
+    }
+
+    _b64UrlEncode(str) {
+      const bytes = new TextEncoder().encode(String(str || ''));
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    _b64UrlDecode(str) {
+      let b64 = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4) b64 += '=';
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    }
+
+    parseSyncLink(raw) {
+      const s = String(raw || '').trim();
+      if (!s) return null;
+      try {
+        let payloadStr = s;
+        if (s.startsWith('besing-sync://')) payloadStr = this._b64UrlDecode(s.slice('besing-sync://'.length));
+        else if (!s.startsWith('{')) return null;
+        const obj = JSON.parse(payloadStr);
+        const url = String(obj.u || obj.url || '').trim().replace(/\/+$/, '');
+        const key = String(obj.k || obj.anonKey || obj.key || '').trim();
+        const secret = String(obj.s || obj.secret || '').trim();
+        if (!url || !key || !secret || secret.length < 16) return null;
+        const isHttps = url.startsWith('https://');
+        const isLocal = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(url);
+        if (!isHttps && !isLocal) return null;
+        return { url, key, secret };
+      } catch (e) {
+        return null;
+      }
+    }
+
+    defaultDeviceName() {
+      const ua = (typeof navigator !== 'undefined' && navigator.userAgent) ? navigator.userAgent : '';
+      const touch = (typeof navigator !== 'undefined' && navigator.maxTouchPoints) ? navigator.maxTouchPoints : 0;
+      if (/iPad/i.test(ua) || (/Macintosh/i.test(ua) && touch > 1)) return 'iPad';
+      if (/iPhone|iPod/i.test(ua)) return 'iPhone';
+      if (/Android/i.test(ua)) return 'Android';
+      if (/Windows/i.test(ua)) return 'Windows-PC';
+      if (/Macintosh|Mac OS/i.test(ua)) return 'Mac';
+      return 'Device';
+    }
+
+    getConfig() {
+      const c = this.app.storage.getCloudConfig();
+      if (!c.deviceName) c.deviceName = this.defaultDeviceName();
+      return c;
+    }
+
+    async setConfig(patch) {
+      await this.app.storage.setCloudConfig(patch);
+    }
+
+    isConfigured() {
+      return Boolean(this.parseSyncLink(this.getConfig().syncLink));
+    }
+
+    async generateSetupBundle(supabaseUrl, anonKey, retentionDays = 7) {
+      const bs = this.app.modules.find(m => m.id === 'browser-sync');
+      if (bs && typeof bs.generateSetupBundle === 'function') {
+        return await bs.generateSetupBundle(supabaseUrl, anonKey, retentionDays);
+      }
+      return { ok: false, error: 'Browser Sync generator unavailable.' };
+    }
+
+    _todayStr() {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+
+    async _recordTraffic(kind, bytesSent, bytesReceived) {
+      const today = this._todayStr();
+      const s = (await this.app.readSharedState(this.STATS_KEY, null)) || {
+        day: today, bytesSentToday: 0, bytesReceivedToday: 0, pushesToday: 0, pullsToday: 0,
+        bytesSentTotal: 0, bytesReceivedTotal: 0, pushesTotal: 0, pullsTotal: 0
+      };
+      if (s.day !== today) {
+        s.day = today; s.bytesSentToday = 0; s.bytesReceivedToday = 0; s.pushesToday = 0; s.pullsToday = 0;
+      }
+      s.bytesSentToday += bytesSent;
+      s.bytesReceivedToday += bytesReceived;
+      s.bytesSentTotal += bytesSent;
+      s.bytesReceivedTotal += bytesReceived;
+      if (kind === 'push') { s.pushesToday += 1; s.pushesTotal += 1; }
+      if (kind === 'pull') { s.pullsToday += 1; s.pullsTotal += 1; }
+      await this.app.writeSharedState(this.STATS_KEY, s);
+      return s;
+    }
+
+    _sendExt(msg) {
+      return new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (!settled) { settled = true; resolve({ ok: false, error: 'Extension background worker timed out' }); }
+        }, 20000);
+        try {
+          chrome.runtime.sendMessage(msg, (resp) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (chrome.runtime && chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
+            else resolve(resp || { ok: false, error: 'Empty response from background worker' });
+          });
+        } catch (e) {
+          if (!settled) { settled = true; clearTimeout(timer); resolve({ ok: false, error: e.message || String(e) }); }
+        }
+      });
+    }
+
+    async getInfo() {
+      if (this.isExtensionMode()) {
+        return await this._sendExt({ type: 'besing-cloud:get-info' });
+      }
+      const cfg = this.getConfig();
+      const stats = await this.app.readSharedState(this.STATS_KEY, null);
+      return {
+        ok: true,
+        mode: 'userscript',
+        configured: this.isConfigured(),
+        deviceName: cfg.deviceName,
+        accountLabel: cfg.accountLabel,
+        detectedEmail: '',
+        stats
+      };
+    }
+
+    async rpc(fnName, args = {}, { trafficKind = 'push', syncLink = null, keepalive = false } = {}) {
+      if (this.isExtensionMode()) {
+        return await this._sendExt({ type: 'besing-cloud:rpc', fnName, args, trafficKind, syncLink });
+      }
+      const creds = this.parseSyncLink(syncLink || this.getConfig().syncLink);
+      if (!creds) return { ok: false, error: 'Cloud database not linked. Configure Sync Link in BESing Settings.' };
+
+      const endpoint = `${creds.url}/rest/v1/rpc/${fnName}`;
+      const bodyStr = JSON.stringify(Object.assign({}, args || {}, { p_secret: creds.secret }));
+      const bytesSent = new TextEncoder().encode(bodyStr).length;
+      const headers = {
+        'apikey': creds.key,
+        'Authorization': `Bearer ${creds.key}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      };
+
+      const doFetch = async () => {
+        const opts = { method: 'POST', headers, body: bodyStr };
+        if (keepalive && bytesSent < 60000) opts.keepalive = true;
+        const res = await fetch(endpoint, opts);
+        const text = await res.text();
+        const bytesReceived = new TextEncoder().encode(text).length;
+        await this._recordTraffic(trafficKind, bytesSent, bytesReceived);
+        if (!res.ok) {
+          let msg = `HTTP ${res.status}`;
+          try { const j = JSON.parse(text); if (j && j.message) msg = `${res.status}: ${j.message}`; } catch (e) {}
+          return { ok: false, status: res.status, error: msg };
+        }
+        return { ok: true, data: text ? JSON.parse(text) : {} };
+      };
+
+      if (keepalive || typeof GM_xmlhttpRequest !== 'function') {
+        try { return await doFetch(); } catch (e) { return { ok: false, error: e.message || String(e) }; }
+      }
+
+      return await new Promise((resolve) => {
+        let done = false;
+        try {
+          GM_xmlhttpRequest({
+            method: 'POST',
+            url: endpoint,
+            headers,
+            data: bodyStr,
+            timeout: 20000,
+            onload: async (res) => {
+              if (done) return;
+              done = true;
+              const text = res.responseText || '';
+              const bytesReceived = new TextEncoder().encode(text).length;
+              await this._recordTraffic(trafficKind, bytesSent, bytesReceived);
+              if (res.status >= 200 && res.status < 300) {
+                try { resolve({ ok: true, data: text ? JSON.parse(text) : {} }); } catch (e) { resolve({ ok: true, data: {} }); }
+              } else {
+                let msg = `HTTP ${res.status}`;
+                try { const j = JSON.parse(text); if (j && j.message) msg = `${res.status}: ${j.message}`; } catch (e) {}
+                resolve({ ok: false, status: res.status, error: msg });
+              }
+            },
+            onerror: () => {
+              if (done) return;
+              done = true;
+              doFetch().then(resolve).catch(e => resolve({ ok: false, error: e.message || String(e) }));
+            },
+            ontimeout: () => {
+              if (done) return;
+              done = true;
+              resolve({ ok: false, error: 'Request timed out' });
+            }
+          });
+        } catch (e) {
+          if (!done) {
+            done = true;
+            doFetch().then(resolve).catch(err => resolve({ ok: false, error: err.message || String(err) }));
+          }
+        }
+      });
+    }
+
+    async kvSync(namespace, entries = [], since = null) {
+      return await this.rpc('besing_kv_sync', {
+        p_namespace: namespace,
+        p_entries: entries,
+        p_since: since
+      }, { trafficKind: 'pull' });
+    }
+
+    async testConnection(syncLink) {
+      const raw = syncLink || this.getConfig().syncLink;
+      if (!this.parseSyncLink(raw)) {
+        return { ok: false, error: 'Invalid Sync Link format (must be besing-sync://... with HTTPS URL, publishable key, and secret >= 16 chars).' };
+      }
+      const t0 = Date.now();
+      const res = await this.rpc('besing_sync_pull', {
+        p_since: null,
+        p_device_hashes: {},
+        p_history_limit: 1
+      }, { trafficKind: 'pull', syncLink: raw });
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Connection failed' };
+      const d = res.data || {};
+      return {
+        ok: true,
+        latencyMs: Date.now() - t0,
+        deviceCount: Array.isArray(d.devices) ? d.devices.length : 0,
+        retentionDays: d.retention_days || 7
+      };
     }
   }
 
@@ -687,7 +1022,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.10.0',
+          v: '1.11.0',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -874,7 +1209,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.10.0), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.11.0), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -7033,6 +7368,19 @@
     // Runtime & Helpers
     // -----------------------------------------------------------------------
 
+    _getCloudConfig() {
+      const cfg = this._config || {};
+      const mgr = this._manager();
+      const cloud = (mgr && mgr.cloud && typeof mgr.cloud.getConfig === 'function')
+        ? mgr.cloud.getConfig()
+        : {};
+      return {
+        syncLink: (cloud.syncLink && String(cloud.syncLink).trim()) || (cfg.syncLink && String(cfg.syncLink).trim()) || '',
+        deviceName: (cloud.deviceName && String(cloud.deviceName).trim()) || (cfg.deviceName && String(cfg.deviceName).trim()) || this.defaultDeviceName(),
+        accountLabel: (cloud.accountLabel && String(cloud.accountLabel).trim()) || (cfg.accountLabel && String(cfg.accountLabel).trim()) || ''
+      };
+    },
+
     _manager() {
       const inst = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
                    (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
@@ -7514,7 +7862,8 @@
     async _recordCurrentVisit({ forcePush = false } = {}) {
       if (!this._active || this.isExtensionMode()) return;
       const cfg = this._config || {};
-      const creds = this.parseSyncLink(cfg.syncLink || '');
+      const cloud = this._getCloudConfig();
+      const creds = this.parseSyncLink(cloud.syncLink);
       if (!creds) return;
 
       const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(cfg));
@@ -7594,7 +7943,8 @@
     async _userscriptPush({ includeTabs = true, keepalive = false, force = false } = {}) {
       if (this._pushInFlight && !keepalive) return { ok: true, busy: true };
       const cfg = this._config || {};
-      const creds = this.parseSyncLink(cfg.syncLink || '');
+      const cloud = this._getCloudConfig();
+      const creds = this.parseSyncLink(cloud.syncLink);
       if (!creds) return { ok: false, skipped: true };
 
       this._pushInFlight = true;
@@ -7614,11 +7964,11 @@
 
         const payload = {
           instance_id: meta.instanceId,
-          device_name: (cfg.deviceName && String(cfg.deviceName).trim()) || this.defaultDeviceName(),
+          device_name: cloud.deviceName,
           browser: this.detectBrowser(),
           platform: this.detectPlatform(),
           mode: 'userscript',
-          account_label: (cfg.accountLabel && String(cfg.accountLabel).trim()) || ''
+          account_label: cloud.accountLabel
         };
         if (tabs) payload.tabs = tabs.slice(0, 50);
         if (histBatch.length > 0) payload.history = histBatch;
@@ -7664,7 +8014,8 @@
     async _userscriptPull({ full = false, force = false } = {}) {
       if (this._pullInFlight) return { ok: true, busy: true };
       const cfg = this._config || {};
-      const creds = this.parseSyncLink(cfg.syncLink || '');
+      const cloud = this._getCloudConfig();
+      const creds = this.parseSyncLink(cloud.syncLink);
       if (!creds) return { ok: false, skipped: true };
 
       const cache = await this._getCache();
@@ -7787,7 +8138,7 @@
       if (this.isExtensionMode()) {
         return await this._sendExt({ type: 'besing-sync:get-state' });
       }
-      const cfg = this._config || {};
+      const cloud = this._getCloudConfig();
       const meta = await this._ensureMeta();
       const cache = await this._getCache();
       const stats = await this._readShared(this.SHARED_STATS_KEY, null);
@@ -7798,7 +8149,7 @@
         detectedEmail: '',
         browser: this.detectBrowser(),
         platform: this.detectPlatform(),
-        configured: Boolean(this.parseSyncLink(cfg.syncLink || '')),
+        configured: Boolean(this.parseSyncLink(cloud.syncLink)),
         enabled: this._active,
         cache,
         stats
@@ -7889,7 +8240,7 @@
       if (this.isExtensionMode()) {
         return await this._sendExt({ type: 'besing-sync:delete-device', instanceId });
       }
-      const creds = this.parseSyncLink((this._config && this._config.syncLink) || '');
+      const creds = this.parseSyncLink(this._getCloudConfig().syncLink);
       if (!creds) return { ok: false, error: 'Not configured' };
       try {
         await this._rpc(creds, 'besing_sync_delete_device', {
@@ -7908,7 +8259,7 @@
       if (this.isExtensionMode()) {
         return await this._sendExt({ type: 'besing-sync:set-retention', days: d });
       }
-      const creds = this.parseSyncLink((this._config && this._config.syncLink) || '');
+      const creds = this.parseSyncLink(this._getCloudConfig().syncLink);
       if (!creds) return { ok: false, error: 'Not configured' };
       try {
         const res = await this._rpc(creds, 'besing_sync_set_retention', {
@@ -8053,12 +8404,571 @@
       mod.author = "BESing Team";
       mod.category = "Sync";
       return mod;
+    })(),
+
+    // Module: Settings Sync
+    (() => {
+      const mod = {
+    id: 'settings-sync',
+    name: 'Settings Sync',
+    version: '1.0.0',
+    description: 'Sync BESing script modes, configs, site rules, and pet theme across devices with UTC Last-Write-Wins conflict resolution.',
+    category: 'Sync',
+
+    NAMESPACE: 'settings',
+    META_KEY: 'settings_sync_meta',
+    EXCLUDED_SCRIPTS: ['settings-sync'],
+
+    _config: null,
+    _active: false,
+    _syncing: false,
+    _debounceTimer: null,
+    _pollTimer: null,
+    _boundMutated: null,
+    _boundVisible: null,
+
+    _manager() {
+      const inst = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                   (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      return inst && !inst.disposed ? inst : null;
+    },
+
+    async _readMeta() {
+      const mgr = this._manager();
+      const fallback = { lastServerTime: null, lastSyncAt: 0, lockUntil: 0, lastError: null, recentLog: [] };
+      if (!mgr || typeof mgr.readSharedState !== 'function') return fallback;
+      const m = await mgr.readSharedState(this.META_KEY, null);
+      if (m && typeof m === 'object') {
+        return Object.assign({}, fallback, m, { recentLog: Array.isArray(m.recentLog) ? m.recentLog : [] });
+      }
+      return fallback;
+    },
+
+    async _writeMeta(meta) {
+      const mgr = this._manager();
+      if (!mgr || typeof mgr.writeSharedState !== 'function') return;
+      await mgr.writeSharedState(this.META_KEY, meta);
+    },
+
+    _collectLocalEntries(mgr, cfg, onlySinceMs = 0) {
+      const st = mgr.storage;
+      const tsMap = (st && st.settingsTimestamps && typeof st.settingsTimestamps === 'object') ? st.settingsTimestamps : {};
+      const cloud = (mgr.cloud && typeof mgr.cloud.getConfig === 'function') ? mgr.cloud.getConfig() : {};
+      const sender = (cloud.deviceName || 'Device').slice(0, 80);
+      const entries = [];
+
+      const syncModes = cfg.syncModes !== false;
+      const syncConfigs = cfg.syncConfigs !== false;
+      const syncSites = cfg.syncSites !== false;
+      const syncTheme = cfg.syncTheme !== false;
+
+      const pushEntry = (key, value, deleted = false) => {
+        const ts = Number(tsMap[key]) || 0;
+        // Skip untouched defaults unless we have a real timestamp or explicit tombstone.
+        if (ts <= 0) return;
+        if (onlySinceMs > 0 && ts <= onlySinceMs) return;
+        entries.push({ key, value: deleted ? null : value, deleted, updated_ms: ts, updated_by: sender });
+      };
+
+      if (syncModes) {
+        const enabled = st.enabledScripts || {};
+        const seenIds = new Set([...Object.keys(enabled), ...Object.keys(tsMap).filter(k => k.startsWith('enabled:')).map(k => k.slice(8))]);
+        seenIds.forEach(id => {
+          if (!id || this.EXCLUDED_SCRIPTS.includes(id)) return;
+          pushEntry(`enabled:${id}`, Boolean(enabled[id]), false);
+        });
+      }
+
+      if (syncConfigs) {
+        const cfgs = st.scriptConfigs || {};
+        const seenIds = new Set([...Object.keys(cfgs), ...Object.keys(tsMap).filter(k => k.startsWith('config:')).map(k => k.slice(7))]);
+        seenIds.forEach(id => {
+          if (!id || this.EXCLUDED_SCRIPTS.includes(id)) return;
+          const raw = cfgs[id];
+          if (raw && typeof raw === 'object') {
+            // Never sync device-local connection secrets or device labels inside script configs.
+            const clean = Object.assign({}, raw);
+            if (id === 'browser-sync') {
+              delete clean.syncLink;
+              delete clean.deviceName;
+              delete clean.accountLabel;
+            }
+            pushEntry(`config:${id}`, clean, false);
+          } else {
+            pushEntry(`config:${id}`, null, true);
+          }
+        });
+      }
+
+      if (syncSites) {
+        const rules = st.siteRules || {};
+        const seenHosts = new Set([...Object.keys(rules), ...Object.keys(tsMap).filter(k => k.startsWith('site:')).map(k => k.slice(5))]);
+        seenHosts.forEach(host => {
+          if (!host) return;
+          const rule = rules[host];
+          if (rule && typeof rule === 'object') {
+            pushEntry(`site:${host}`, rule, false);
+          } else {
+            pushEntry(`site:${host}`, null, true);
+          }
+        });
+      }
+
+      if (syncTheme) {
+        const theme = (st.settings && st.settings.theme) ? String(st.settings.theme) : null;
+        if (theme) pushEntry('ui:theme', theme, false);
+      }
+
+      return entries.slice(0, 100);
+    },
+
+    async _applyRemoteEntries(mgr, cfg, remoteEntries) {
+      if (!Array.isArray(remoteEntries) || remoteEntries.length === 0) return { applied: 0, logLines: [] };
+      const st = mgr.storage;
+      if (!st.settingsTimestamps || typeof st.settingsTimestamps !== 'object') st.settingsTimestamps = {};
+
+      const syncModes = cfg.syncModes !== false;
+      const syncConfigs = cfg.syncConfigs !== false;
+      const syncSites = cfg.syncSites !== false;
+      const syncTheme = cfg.syncTheme !== false;
+
+      let applied = 0;
+      let rulesTouched = false;
+      let settingsTouched = false;
+      const logLines = [];
+
+      for (let i = 0; i < remoteEntries.length; i++) {
+        const e = remoteEntries[i];
+        if (!e || typeof e.key !== 'string') continue;
+        const remoteMs = Number(e.updated_ms) || 0;
+        const localMs = Number(st.settingsTimestamps[e.key]) || 0;
+        if (remoteMs <= localMs) continue;
+
+        const key = e.key;
+        const deleted = Boolean(e.deleted);
+        const val = e.value;
+        let didApply = false;
+
+        if (key.startsWith('enabled:') && syncModes) {
+          const id = key.slice(8);
+          if (id && !this.EXCLUDED_SCRIPTS.includes(id)) {
+            if (!st.enabledScripts) st.enabledScripts = {};
+            st.enabledScripts[id] = Boolean(val);
+            rulesTouched = true;
+            didApply = true;
+          }
+        } else if (key.startsWith('config:') && syncConfigs) {
+          const id = key.slice(7);
+          if (id && !this.EXCLUDED_SCRIPTS.includes(id)) {
+            if (!st.scriptConfigs) st.scriptConfigs = {};
+            if (deleted || !val || typeof val !== 'object') {
+              delete st.scriptConfigs[id];
+            } else {
+              const clean = Object.assign({}, val);
+              if (id === 'browser-sync') {
+                delete clean.syncLink;
+                delete clean.deviceName;
+                delete clean.accountLabel;
+              }
+              st.scriptConfigs[id] = clean;
+            }
+            rulesTouched = true;
+            didApply = true;
+          }
+        } else if (key.startsWith('site:') && syncSites) {
+          const host = key.slice(5);
+          if (host) {
+            if (!st.siteRules) st.siteRules = {};
+            if (deleted || !val || typeof val !== 'object') {
+              delete st.siteRules[host];
+            } else {
+              st.siteRules[host] = val;
+            }
+            rulesTouched = true;
+            didApply = true;
+          }
+        } else if (key === 'ui:theme' && syncTheme) {
+          if (typeof val === 'string' && val) {
+            if (!st.settings) st.settings = {};
+            st.settings.theme = val;
+            settingsTouched = true;
+            didApply = true;
+          }
+        }
+
+        if (didApply) {
+          st.settingsTimestamps[key] = remoteMs;
+          applied++;
+          const who = e.updated_by ? ` from ${e.updated_by}` : '';
+          const timeStr = new Date(remoteMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          logLines.push(`${key}${deleted ? ' (removed)' : ''}${who} @ ${timeStr}`);
+        }
+      }
+
+      if (applied > 0) {
+        await st.persistFromCloudMerge({ rulesTouched, settingsTouched });
+        if (rulesTouched && typeof mgr.refreshCurrentSiteModules === 'function') {
+          mgr.refreshCurrentSiteModules({ fromSync: true });
+        }
+        if (settingsTouched && mgr.widgetEl && typeof mgr.updatePetIcon === 'function') {
+          mgr.updatePetIcon(mgr.widgetEl);
+        }
+      }
+      return { applied, logLines };
+    },
+
+    async syncNow({ full = false, force = true } = {}) {
+      if (this._syncing) return { ok: true, busy: true };
+      const mgr = this._manager();
+      if (!mgr || !mgr.cloud || !mgr.cloud.isConfigured()) {
+        return { ok: false, error: 'Cloud database not linked. Configure Sync Link in BESing Settings.' };
+      }
+
+      const meta = await this._readMeta();
+      const now = Date.now();
+      const cfg = this._config || {};
+      const intervalMs = Math.max(2, Math.min(120, Number(cfg.pullIntervalMinutes) || 10)) * 60 * 1000;
+
+      if (!force) {
+        if (now - meta.lastSyncAt < intervalMs) return { ok: true, skipped: true, meta };
+        if (meta.lockUntil && now < meta.lockUntil) return { ok: true, skipped: true, meta };
+      }
+
+      meta.lockUntil = now + 15000;
+      await this._writeMeta(meta);
+
+      this._syncing = true;
+      try {
+        // On full/manual sync, send all timestamped local keys so LWW resolves both ways cleanly.
+        const entries = this._collectLocalEntries(mgr, cfg, 0);
+        const res = await mgr.cloud.rpc('besing_kv_sync', {
+          p_namespace: this.NAMESPACE,
+          p_entries: entries,
+          p_since: full ? null : meta.lastServerTime
+        }, { trafficKind: 'pull' });
+
+        if (!res || !res.ok) {
+          throw new Error((res && res.error) || 'Settings sync RPC failed');
+        }
+        const data = res.data || {};
+        const merged = await this._applyRemoteEntries(mgr, cfg, data.entries || []);
+
+        const nextLog = [...merged.logLines, ...meta.recentLog].slice(0, 15);
+        const nextMeta = {
+          lastServerTime: data.server_time || new Date().toISOString(),
+          lastSyncAt: Date.now(),
+          lockUntil: 0,
+          lastError: null,
+          lastAccepted: Number(data.accepted) || 0,
+          lastApplied: merged.applied,
+          lastStaleIgnored: Number(data.stale_ignored) || 0,
+          recentLog: nextLog
+        };
+        await this._writeMeta(nextMeta);
+        return { ok: true, meta: nextMeta, applied: merged.applied, accepted: nextMeta.lastAccepted };
+      } catch (err) {
+        const cur = await this._readMeta();
+        cur.lockUntil = 0;
+        cur.lastError = err && err.message ? err.message : String(err);
+        await this._writeMeta(cur);
+        return { ok: false, error: cur.lastError, meta: cur };
+      } finally {
+        this._syncing = false;
+      }
+    },
+
+    async getStatus() {
+      const mgr = this._manager();
+      const configured = Boolean(mgr && mgr.cloud && mgr.cloud.isConfigured());
+      const meta = await this._readMeta();
+      const trackedKeys = (mgr && mgr.storage && mgr.storage.settingsTimestamps)
+        ? Object.keys(mgr.storage.settingsTimestamps).length
+        : 0;
+      return { ok: true, configured, enabled: this._active, trackedKeys, meta };
+    },
+
+    _schedulePush() {
+      if (!this._active) return;
+      if (this._debounceTimer) clearTimeout(this._debounceTimer);
+      this._debounceTimer = setTimeout(() => {
+        this._debounceTimer = null;
+        if (this._active) this.syncNow({ full: false, force: true }).catch(() => {});
+      }, 4500);
+    },
+
+    init(config = {}) {
+      this.destroy();
+      this._config = config || {};
+      this._active = true;
+
+      // Initial delta sync shortly after boot (throttled across tabs via shared meta).
+      setTimeout(() => {
+        if (this._active) this.syncNow({ full: false, force: false }).catch(() => {});
+      }, 2000);
+
+      // Push shortly after local BESing setting mutations.
+      this._boundMutated = () => this._schedulePush();
+      window.addEventListener('besing:settings-mutated', this._boundMutated);
+
+      // Re-check 10-min sync when tab becomes visible.
+      this._boundVisible = () => {
+        if (this._active && document.visibilityState === 'visible') {
+          this.syncNow({ full: false, force: false }).catch(() => {});
+        }
+      };
+      document.addEventListener('visibilitychange', this._boundVisible);
+
+      this._pollTimer = setInterval(() => {
+        if (this._active && document.visibilityState === 'visible') {
+          this.syncNow({ full: false, force: false }).catch(() => {});
+        }
+      }, 60000);
+    },
+
+    onConfigChange(newConfig) {
+      this._config = newConfig || {};
+    },
+
+    destroy() {
+      this._active = false;
+      if (this._debounceTimer) { clearTimeout(this._debounceTimer); this._debounceTimer = null; }
+      if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+      if (this._boundMutated) {
+        window.removeEventListener('besing:settings-mutated', this._boundMutated);
+        this._boundMutated = null;
+      }
+      if (this._boundVisible) {
+        document.removeEventListener('visibilitychange', this._boundVisible);
+        this._boundVisible = null;
+      }
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"3\"></circle><path d=\"M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Sync";
+      return mod;
+    })(),
+
+    // Module: Quick Transfer
+    (() => {
+      const mod = {
+    id: 'quick-transfer',
+    name: 'Quick Transfer',
+    version: '1.0.0',
+    description: 'Send copied strings, clipboard screenshots, or files (up to 5 MB) between PC, iPhone, and iPad with automatic 2-day expiry. Open and use anytime without enabling.',
+    category: 'Sync',
+
+    MAX_BYTES: 5 * 1024 * 1024, // 5 MB raw limit
+    DEFAULT_TTL_HOURS: 48,
+
+    _manager() {
+      const inst = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                   (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      return inst && !inst.disposed ? inst : null;
+    },
+
+    _senderName() {
+      const mgr = this._manager();
+      const cloud = (mgr && mgr.cloud && typeof mgr.cloud.getConfig === 'function') ? mgr.cloud.getConfig() : {};
+      return (cloud.deviceName && String(cloud.deviceName).trim()) || 'Device';
+    },
+
+    isConfigured() {
+      const mgr = this._manager();
+      return Boolean(mgr && mgr.cloud && typeof mgr.cloud.isConfigured === 'function' && mgr.cloud.isConfigured());
+    },
+
+    _blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const res = String(reader.result || '');
+          const comma = res.indexOf(',');
+          resolve(comma >= 0 ? res.slice(comma + 1) : res);
+        };
+        reader.onerror = () => reject(new Error('Failed to read file/image data'));
+        reader.readAsDataURL(blob);
+      });
+    },
+
+    _base64ToBlob(b64, mimeType) {
+      const bin = atob(String(b64 || ''));
+      const len = bin.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: mimeType || 'application/octet-stream' });
+    },
+
+    async _compressImageIfLarge(blob) {
+      // Compress large clipboard PNG screenshots (> 1.5 MB) via canvas WebP/JPEG to keep DB & egress lean.
+      if (!blob || blob.size <= 1500000 || !/^image\/(png|bmp|tiff)$/i.test(blob.type || '')) {
+        return blob;
+      }
+      try {
+        const bmp = await createImageBitmap(blob);
+        const canvas = document.createElement('canvas');
+        canvas.width = bmp.width;
+        canvas.height = bmp.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return blob;
+        ctx.drawImage(bmp, 0, 0);
+        const out = await new Promise((resolve) => {
+          canvas.toBlob((b) => resolve(b || blob), 'image/webp', 0.85);
+        });
+        return (out && out.size < blob.size) ? out : blob;
+      } catch (e) {
+        return blob;
+      }
+    },
+
+    async listTransfers() {
+      const mgr = this._manager();
+      if (!mgr || !mgr.cloud || !mgr.cloud.isConfigured()) {
+        return { ok: false, error: 'Cloud database not linked. Configure Sync Link in BESing Settings.' };
+      }
+      const res = await mgr.cloud.rpc('besing_transfer_list', {}, { trafficKind: 'pull' });
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Failed to list transfers' };
+      return { ok: true, items: (res.data && Array.isArray(res.data.items)) ? res.data.items : [], serverTime: res.data && res.data.server_time };
+    },
+
+    async sendText(text, title = '', ttlHours = 48) {
+      const mgr = this._manager();
+      if (!mgr || !mgr.cloud || !mgr.cloud.isConfigured()) {
+        return { ok: false, error: 'Cloud database not linked. Configure Sync Link in BESing Settings.' };
+      }
+      const cleanText = String(text || '');
+      if (!cleanText.trim()) return { ok: false, error: 'Enter or paste text to send.' };
+      const byteLen = new TextEncoder().encode(cleanText).length;
+      if (byteLen > this.MAX_BYTES) {
+        return { ok: false, error: `Text is ${(byteLen / (1024 * 1024)).toFixed(2)} MB (max 5 MB).` };
+      }
+      const autoTitle = String(title || '').trim() || cleanText.trim().split(/\r?\n/)[0].slice(0, 60) || 'Text Snippet';
+      const res = await mgr.cloud.rpc('besing_transfer_put', {
+        p_payload: {
+          kind: 'text',
+          title: autoTitle.slice(0, 160),
+          mime_type: 'text/plain',
+          file_name: '',
+          size_bytes: byteLen,
+          content: cleanText,
+          preview_text: cleanText.replace(/\s+/g, ' ').trim().slice(0, 200),
+          sender_name: this._senderName(),
+          ttl_hours: Math.max(1, Math.min(48, Number(ttlHours) || this.DEFAULT_TTL_HOURS))
+        }
+      }, { trafficKind: 'push' });
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Upload failed' };
+      return { ok: true, item: res.data };
+    },
+
+    async sendBlob(blob, { title = '', fileName = '', ttlHours = 48 } = {}) {
+      const mgr = this._manager();
+      if (!mgr || !mgr.cloud || !mgr.cloud.isConfigured()) {
+        return { ok: false, error: 'Cloud database not linked. Configure Sync Link in BESing Settings.' };
+      }
+      if (!blob) return { ok: false, error: 'No file or image provided.' };
+      let target = blob;
+      const isImage = /^image\//i.test(target.type || '');
+      if (isImage) {
+        target = await this._compressImageIfLarge(target);
+      }
+      if (target.size > this.MAX_BYTES) {
+        return { ok: false, error: `File is ${(target.size / (1024 * 1024)).toFixed(2)} MB (max 5 MB).` };
+      }
+      const b64 = await this._blobToBase64(target);
+      const mime = target.type || (isImage ? 'image/png' : 'application/octet-stream');
+      const ext = isImage ? (mime.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') : 'bin';
+      const cleanFileName = String(fileName || (target.name || (isImage ? `clipboard-${Date.now()}.${ext}` : `file-${Date.now()}.bin`))).trim().slice(0, 180);
+      const cleanTitle = String(title || '').trim() || cleanFileName;
+      const res = await mgr.cloud.rpc('besing_transfer_put', {
+        p_payload: {
+          kind: isImage ? 'image' : 'file',
+          title: cleanTitle.slice(0, 160),
+          mime_type: mime.slice(0, 120),
+          file_name: cleanFileName,
+          size_bytes: target.size,
+          content: b64,
+          preview_text: `${cleanFileName} (${(target.size / 1024).toFixed(1)} KB)`,
+          sender_name: this._senderName(),
+          ttl_hours: Math.max(1, Math.min(48, Number(ttlHours) || this.DEFAULT_TTL_HOURS))
+        }
+      }, { trafficKind: 'push' });
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Upload failed' };
+      return { ok: true, item: res.data };
+    },
+
+    async readClipboardImage() {
+      if (typeof navigator === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
+        return { ok: false, error: 'Direct clipboard image read is unavailable here. Click inside the box above and press Ctrl+V (or use Upload File).' };
+      }
+      try {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imgType = item.types.find(t => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            return { ok: true, blob };
+          }
+        }
+        return { ok: false, error: 'No image found on clipboard. Copy an image first or paste text into the box.' };
+      } catch (e) {
+        return { ok: false, error: `Clipboard read denied: ${e.message || e}. Try pressing Ctrl+V inside the text box.` };
+      }
+    },
+
+    async fetchTransfer(id) {
+      const mgr = this._manager();
+      if (!mgr || !mgr.cloud || !mgr.cloud.isConfigured()) {
+        return { ok: false, error: 'Cloud database not linked.' };
+      }
+      const res = await mgr.cloud.rpc('besing_transfer_get', { p_id: String(id || '') }, { trafficKind: 'pull' });
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Failed to fetch item' };
+      return { ok: true, item: res.data };
+    },
+
+    async deleteTransfer(id) {
+      const mgr = this._manager();
+      if (!mgr || !mgr.cloud || !mgr.cloud.isConfigured()) {
+        return { ok: false, error: 'Cloud database not linked.' };
+      }
+      const res = await mgr.cloud.rpc('besing_transfer_delete', { p_id: String(id || '') }, { trafficKind: 'push' });
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Failed to delete item' };
+      return { ok: true };
+    },
+
+    triggerDownload(item) {
+      if (!item) return false;
+      try {
+        const blob = item.kind === 'text'
+          ? new Blob([item.content || ''], { type: 'text/plain;charset=utf-8' })
+          : this._base64ToBlob(item.content || '', item.mime_type);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = item.file_name || `${(item.title || 'transfer').replace(/[^a-z0-9._-]+/gi, '_')}.${item.kind === 'text' ? 'txt' : 'bin'}`;
+        a.style.display = 'none';
+        (document.body || document.documentElement).appendChild(a);
+        a.click();
+        setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1500);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    },
+
+    // Open-and-use tool: init/destroy are no-ops so leaving it OFF costs zero page overhead.
+    init() {},
+    destroy() {}
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"></path><polyline points=\"17 8 12 3 7 8\"></polyline><line x1=\"12\" y1=\"3\" x2=\"12\" y2=\"15\"></line></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Sync";
+      return mod;
     })()
   ];
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.10.0';
+    static CURRENT_VERSION = '1.11.0';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -8219,6 +9129,7 @@
       this.host = null;
       this.shadow = null;
       this.widgetEl = null;
+      this.cloud = new BESCloud(this);
       this.menuWrapperEl = null;
       this.searchQuery = '';
       this.currentView = 'extensions';
@@ -8502,7 +9413,7 @@
       if (hasExtOnChanged && !this._storageChangeListener) {
         this._storageChangeListener = (changes, areaName) => {
           if (this.disposed || areaName !== 'local' || !changes) return;
-          const syncKeys = ['site_rules', 'enabled_scripts', 'script_configs', 'global_settings', 'widget_position'];
+          const syncKeys = ['site_rules', 'enabled_scripts', 'script_configs', 'settings_timestamps', 'global_settings', 'widget_position'];
           const extData = {};
           let hasRelevant = false;
           for (const k of syncKeys) {
@@ -9593,9 +10504,48 @@
       if (this.currentView === 'settings') {
         const currentHost = window.location.hostname || 'localhost';
         const curTheme = this.storage.getTheme();
+        const cloudCfg = this.cloud.getConfig();
+        const cloudLinked = this.cloud.isConfigured();
+        const escCloud = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
         this.setSafeHTML(body, `
           <div class="besing-settings-section">
+            <div class="besing-update-card" style="border-color:${cloudLinked ? 'rgba(52,211,153,0.35)' : 'rgba(245,158,11,0.35)'};">
+              <div class="besing-update-header">
+                <span class="besing-section-title">Cloud Database (Shared Sync)</span>
+                <span class="besing-status-pill ${cloudLinked ? 'connected' : ''}" id="besing-cloud-pill" style="${cloudLinked ? '' : 'background:rgba(245,158,11,0.16);color:#fbbf24;border-color:rgba(245,158,11,0.35);'}">
+                  <span id="besing-cloud-pill-text">${cloudLinked ? 'Linked' : 'Not Linked'}</span>
+                </span>
+              </div>
+              <p style="font-size:10px;color:#94a3b8;margin:4px 0 6px;line-height:1.35;">
+                One Sync Link connects Browser Sync, Settings Sync, Quick Transfer, and future cloud scripts. Nothing is hardcoded.
+              </p>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <input type="password" class="besing-test-input" id="besing-cloud-link" placeholder="Paste besing-sync://... link" value="${escCloud(cloudCfg.syncLink)}" style="font-family:monospace;font-size:11px;">
+                <div style="display:flex;gap:6px;">
+                  <input type="text" class="besing-test-input" id="besing-cloud-device" placeholder="Device Name (e.g. Main-PC, iPhone)" value="${escCloud(cloudCfg.deviceName)}" style="flex:1;min-width:0;">
+                  <input type="text" class="besing-test-input" id="besing-cloud-account" placeholder="Profile / User" value="${escCloud(cloudCfg.accountLabel)}" style="flex:1;min-width:0;">
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-save-test" style="flex:1;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;">Save & Test</button>
+                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-copy">Copy Link</button>
+                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-vis">Show</button>
+                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-unlink" style="color:#fca5a5;">Unlink</button>
+                </div>
+                <div id="besing-cloud-msg" style="font-size:10px;color:#94a3b8;line-height:1.35;"></div>
+                <div id="besing-cloud-traffic" style="font-size:10px;color:#64748b;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"></div>
+                <details style="margin-top:2px;">
+                  <summary style="font-size:10px;color:#a5b4fc;cursor:pointer;user-select:none;">First-Time Supabase Link Generator</summary>
+                  <div style="display:flex;flex-direction:column;gap:5px;margin-top:6px;">
+                    <input type="text" class="besing-test-input" id="besing-cloud-gen-url" placeholder="https://your-project.supabase.co">
+                    <input type="password" class="besing-test-input" id="besing-cloud-gen-key" placeholder="Supabase publishable / anon key">
+                    <button type="button" class="besing-btn-sub-action" id="btn-cloud-generate" style="background:rgba(99,102,241,0.22);border:1px solid rgba(99,102,241,0.45);color:#a5b4fc;">Generate Secret & Sync Link</button>
+                    <textarea class="besing-test-input" id="besing-cloud-gen-sql" readonly rows="3" style="display:none;font-family:monospace;font-size:10px;"></textarea>
+                  </div>
+                </details>
+              </div>
+            </div>
+
             <div class="besing-theme-picker">
               <div class="besing-section-title">Display Pattern & Desktop Pet</div>
               <div class="besing-theme-grid">
@@ -9706,6 +10656,110 @@
             btn.classList.add('active');
           };
         });
+
+        // Manager-level Cloud Database settings handlers
+        (() => {
+          const cLink = body.querySelector('#besing-cloud-link');
+          const cDev = body.querySelector('#besing-cloud-device');
+          const cAcct = body.querySelector('#besing-cloud-account');
+          const cMsg = body.querySelector('#besing-cloud-msg');
+          const cTraffic = body.querySelector('#besing-cloud-traffic');
+          const cPill = body.querySelector('#besing-cloud-pill-text');
+          const fmtB = (n) => {
+            const v = Number(n) || 0;
+            if (v < 1024) return `${v} B`;
+            if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+            return `${(v / (1024 * 1024)).toFixed(2)} MB`;
+          };
+
+          this.cloud.getInfo().then(info => {
+            if (!info || !info.ok) return;
+            if (cAcct && info.detectedEmail && !cAcct.value) {
+              cAcct.placeholder = `Auto: ${info.detectedEmail}`;
+            }
+            if (cTraffic && info.stats) {
+              cTraffic.textContent = `Traffic today: ↑ ${fmtB(info.stats.bytesSentToday)} (${info.stats.pushesToday || 0}p) · ↓ ${fmtB(info.stats.bytesReceivedToday)} (${info.stats.pullsToday || 0}g)`;
+            }
+          }).catch(() => {});
+
+          const btnVis = body.querySelector('#btn-cloud-vis');
+          if (btnVis && cLink) {
+            btnVis.onclick = () => {
+              const show = cLink.type === 'password';
+              cLink.type = show ? 'text' : 'password';
+              btnVis.textContent = show ? 'Hide' : 'Show';
+            };
+          }
+
+          const btnCopy = body.querySelector('#btn-cloud-copy');
+          if (btnCopy && cLink) {
+            btnCopy.onclick = () => {
+              const v = cLink.value.trim();
+              if (!v) { if (cMsg) cMsg.textContent = 'No Sync Link configured yet.'; return; }
+              copyTextToClipboard(v).then(ok => {
+                if (cMsg) cMsg.textContent = ok ? 'Sync Link copied! Paste it on your other devices.' : 'Could not copy automatically; click Show and copy manually.';
+              });
+            };
+          }
+
+          const btnSave = body.querySelector('#btn-cloud-save-test');
+          if (btnSave && cLink) {
+            btnSave.onclick = async () => {
+              const raw = cLink.value.trim();
+              const dev = (cDev && cDev.value ? cDev.value.trim() : '') || this.cloud.defaultDeviceName();
+              const acct = (cAcct && cAcct.value ? cAcct.value.trim() : '');
+              if (!raw) {
+                await this.cloud.setConfig({ deviceName: dev, accountLabel: acct });
+                if (cMsg) cMsg.textContent = 'Saved device identity.';
+                return;
+              }
+              if (!this.cloud.parseSyncLink(raw)) {
+                if (cMsg) cMsg.textContent = 'Invalid Sync Link (must be besing-sync://... with HTTPS URL, publishable key, and secret).';
+                return;
+              }
+              btnSave.disabled = true;
+              btnSave.textContent = 'Testing...';
+              const res = await this.cloud.testConnection(raw);
+              btnSave.disabled = false;
+              btnSave.textContent = 'Save & Test';
+              if (!res || !res.ok) {
+                if (cMsg) cMsg.textContent = `Connection failed: ${(res && res.error) || 'unknown error'}`;
+                return;
+              }
+              await this.cloud.setConfig({ syncLink: raw, deviceName: dev, accountLabel: acct });
+              if (cPill) cPill.textContent = 'Linked';
+              if (cMsg) cMsg.textContent = `Linked in ${res.latencyMs}ms (${res.deviceCount} device(s), ${res.retentionDays}d retention). Shared by all sync scripts.`;
+            };
+          }
+
+          const btnUnlink = body.querySelector('#btn-cloud-unlink');
+          if (btnUnlink && cLink) {
+            btnUnlink.onclick = async () => {
+              cLink.value = '';
+              await this.cloud.setConfig({ syncLink: '' });
+              await this.applyScriptConfig('browser-sync', { syncLink: '' });
+              if (cPill) cPill.textContent = 'Not Linked';
+              if (cMsg) cMsg.textContent = 'Unlinked from cloud database.';
+            };
+          }
+
+          const btnGen = body.querySelector('#btn-cloud-generate');
+          if (btnGen) {
+            btnGen.onclick = async () => {
+              const u = (body.querySelector('#besing-cloud-gen-url')?.value || '').trim();
+              const k = (body.querySelector('#besing-cloud-gen-key')?.value || '').trim();
+              const b = await this.cloud.generateSetupBundle(u, k, 7);
+              if (!b || !b.ok) {
+                if (cMsg) cMsg.textContent = (b && b.error) || 'Failed to generate Sync Link.';
+                return;
+              }
+              if (cLink) cLink.value = b.syncLink;
+              const sqlEl = body.querySelector('#besing-cloud-gen-sql');
+              if (sqlEl) { sqlEl.value = b.sql; sqlEl.style.display = 'block'; }
+              if (cMsg) cMsg.textContent = 'Generated! Run the SQL below once in Supabase SQL Editor, then click Save & Test.';
+            };
+          }
+        })();
 
         const bootLogList = body.querySelector('#besing-boot-log-list');
         const bootLogMsg = body.querySelector('#besing-boot-log-msg');
@@ -10739,18 +11793,18 @@
         `;
       } else if (m.id === 'browser-sync') {
         const escAttr = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        const hasLink = Boolean(cfg.syncLink && typeof m.parseSyncLink === 'function' && m.parseSyncLink(cfg.syncLink));
+        const sharedCloud = this.cloud.getConfig();
+        const hasLink = this.cloud.isConfigured();
         const activeSubTab = this._bsyncTab || (hasLink ? 'devices' : 'setup');
         const isExt = typeof m.isExtensionMode === 'function' && m.isExtensionMode();
-        const defName = (typeof m.defaultDeviceName === 'function') ? m.defaultDeviceName() : 'Device';
-        const deviceNameVal = escAttr(cfg.deviceName || defName);
-        const accountVal = escAttr(cfg.accountLabel || '');
+        const deviceNameVal = escAttr(sharedCloud.deviceName || this.cloud.defaultDeviceName());
+        const accountVal = escAttr(sharedCloud.accountLabel || '');
         const pullMinVal = Math.max(2, Math.min(120, Number(cfg.pullIntervalMinutes) || 10));
         const retentionVal = Math.max(1, Math.min(90, Number(cfg.retentionDays) || 7));
         const excludeVal = escAttr(cfg.excludeHosts || '');
         const pushEveryVisit = cfg.pushEveryVisit !== false;
         const importNative = cfg.importToNativeHistory === true;
-        const syncLinkVal = escAttr(cfg.syncLink || '');
+        const syncLinkVal = escAttr(sharedCloud.syncLink || '');
 
         specificControls = `
           <div class="besing-config-section" style="padding:10px;border:1px solid rgba(56,189,248,0.22);border-radius:10px;background:rgba(15,23,42,0.55);">
@@ -10880,6 +11934,143 @@
                   <button type="button" class="besing-btn-sub-action" id="btn-bsync-copy-sql" style="align-self:flex-end;">Copy SQL</button>
                 </div>
               </div>
+            </div>
+          </div>
+        `;
+      } else if (m.id === 'settings-sync') {
+        const linked = this.cloud.isConfigured();
+        const syncModes = cfg.syncModes !== false;
+        const syncConfigs = cfg.syncConfigs !== false;
+        const syncSites = cfg.syncSites !== false;
+        const syncTheme = cfg.syncTheme !== false;
+        const pullMin = Math.max(2, Math.min(120, Number(cfg.pullIntervalMinutes) || 10));
+
+        specificControls = `
+          <div class="besing-config-section" style="padding:10px;border:1px solid rgba(56,189,248,0.22);border-radius:10px;background:rgba(15,23,42,0.55);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <div style="min-width:0;flex:1;">
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <span id="ssync-dot" style="width:8px;height:8px;border-radius:50%;background:${linked ? '#34d399' : '#f59e0b'};display:inline-block;"></span>
+                  <span id="ssync-status-label" style="font-size:12px;font-weight:700;color:#e2e8f0;">${linked ? 'Cloud Linked' : 'Not Linked'}</span>
+                  <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(16,185,129,0.16);color:#34d399;border:1px solid rgba(16,185,129,0.35);">UTC Latest Wins</span>
+                </div>
+                <div id="ssync-meta-line" style="font-size:10px;color:#94a3b8;margin-top:3px;">Checking sync state...</div>
+              </div>
+              <div style="display:flex;gap:5px;">
+                <button type="button" class="besing-btn-sub-action" id="btn-ssync-now" style="padding:6px 10px;font-size:11px;font-weight:700;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;">Sync Now</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-ssync-full" title="Pull every remote key and merge with latest UTC timestamps" style="padding:6px 8px;font-size:10px;">Full</button>
+              </div>
+            </div>
+            ${!linked ? `<button type="button" class="besing-btn-sub-action" id="btn-ssync-open-cloud" style="margin-top:8px;width:100%;color:#fbbf24;border-color:rgba(245,158,11,0.4);">Configure Shared Sync Link in Settings</button>` : ''}
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Synced Categories</span>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;margin:4px 0 8px;line-height:1.35;">
+              Every change is stamped in UTC epoch time so conflicts resolve to the newest edit per key. Device-local items (Sync Link, Device Name, Widget Position, Debug Log) are never overwritten.
+            </p>
+            <div class="besing-toggle-row-list">
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Script On / Off Modes</div>
+                  <div class="besing-toggle-desc">Global activation state of bundled modules</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-ssync-modes" ${syncModes ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Script Configurations</div>
+                  <div class="besing-toggle-desc">Zoom levels, Ad Cleaner aggressiveness, colors, intervals</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-ssync-configs" ${syncConfigs ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Site-Specific Rules & Zaps</div>
+                  <div class="besing-toggle-desc">Per-domain overrides, blocklist, and zapped selectors</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-ssync-sites" ${syncSites ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Desktop Pet Theme</div>
+                  <div class="besing-toggle-desc">Cyber Pet, Cozy Slime, Pixel Dino, or Minimal</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-ssync-theme" ${syncTheme ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px;">
+              <label style="font-size:11px;color:#cbd5e1;">Auto-pull interval (min):
+                <input type="number" class="besing-test-input" id="ssync-input-pullmin" min="2" max="120" value="${pullMin}" style="width:58px;margin-left:6px;padding:3px 6px;">
+              </label>
+              <button type="button" class="besing-btn-sub-action" id="btn-ssync-save">Save</button>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Recent Remote Updates</span>
+            </div>
+            <div id="ssync-log-list" style="display:flex;flex-direction:column;gap:4px;margin-top:6px;font-size:10px;color:#94a3b8;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;">
+              <div>No remote updates applied yet.</div>
+            </div>
+          </div>
+        `;
+      } else if (m.id === 'quick-transfer') {
+        const linked = this.cloud.isConfigured();
+
+        specificControls = `
+          <div class="besing-config-section" style="padding:10px;border:1px solid rgba(56,189,248,0.22);border-radius:10px;background:rgba(15,23,42,0.55);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <div>
+                <div style="font-size:12px;font-weight:700;color:#e2e8f0;">Quick Transfer (Open & Use)</div>
+                <div id="qtx-status-line" style="font-size:10px;color:#94a3b8;margin-top:2px;">${linked ? 'Works even when OFF · Items expire automatically after 2 days (max 5 MB)' : 'Link your shared Cloud Database in Settings first.'}</div>
+              </div>
+              <button type="button" class="besing-btn-sub-action" id="btn-qtx-refresh" style="padding:5px 10px;font-size:11px;color:#38bdf8;border-color:rgba(56,189,248,0.4);">Refresh</button>
+            </div>
+            ${!linked ? `<button type="button" class="besing-btn-sub-action" id="btn-qtx-open-cloud" style="margin-top:8px;width:100%;color:#fbbf24;border-color:rgba(245,158,11,0.4);">Configure Shared Sync Link in Settings</button>` : ''}
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Send to Other Devices</span>
+              <span style="font-size:10px;color:#64748b;">Max 5 MB · 48h TTL</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+              <input type="text" class="besing-test-input" id="qtx-input-title" placeholder="Name / Label (optional, e.g. Wi-Fi Note or Screenshot)">
+              <textarea class="besing-test-input" id="qtx-input-text" rows="3" placeholder="Type/paste text here — or press Ctrl+V with a copied image to upload it directly!" style="resize:vertical;font-size:11px;"></textarea>
+              <input type="file" id="qtx-input-file" style="display:none;">
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="besing-btn-sub-action" id="btn-qtx-send-text" style="flex:1;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;font-weight:700;">Send Text</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-qtx-paste-img" style="flex:1;background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#c084fc;">Paste Image</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-qtx-pick-file" style="flex:1;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;">Upload File</button>
+              </div>
+              <div id="qtx-send-msg" style="font-size:10px;color:#94a3b8;line-height:1.35;"></div>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Active Drops</span>
+              <span id="qtx-count-badge" style="font-size:10px;color:#94a3b8;">--</span>
+            </div>
+            <div id="qtx-preview-box" style="display:none;margin-top:6px;padding:8px;border-radius:8px;background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.35);"></div>
+            <div id="qtx-items-list" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading transfers...</p>
             </div>
           </div>
         `;
@@ -11987,13 +13178,20 @@
               return;
             }
             const fields = readSetupFields();
-            await this.applyScriptConfig(m.id, Object.assign({ syncLink: raw }, fields));
+            await this.cloud.setConfig({ syncLink: raw, deviceName: fields.deviceName, accountLabel: fields.accountLabel });
+            await this.applyScriptConfig(m.id, {
+              excludeHosts: fields.excludeHosts,
+              pullIntervalMinutes: fields.pullIntervalMinutes,
+              retentionDays: fields.retentionDays,
+              pushEveryVisit: fields.pushEveryVisit,
+              importToNativeHistory: fields.importToNativeHistory
+            });
             const curHost = this.storage.getCurrentHost();
             if (this.storage.getScriptMode(m.id, curHost) === 'off') {
               await this.storage.setScriptMode(m.id, 'on', curHost);
               await this.refreshCurrentSiteModules();
             }
-            if (setupMsg) setupMsg.textContent = `Connected in ${test.latencyMs}ms (${test.deviceCount} device(s), ${test.retentionDays}d retention). Syncing now...`;
+            if (setupMsg) setupMsg.textContent = `Connected in ${test.latencyMs}ms (${test.deviceCount} device(s), ${test.retentionDays}d retention). Shared with all sync tools.`;
             await m.syncNow(true);
             await refreshView();
           };
@@ -12003,8 +13201,9 @@
         if (btnClearLink && inputLink) {
           btnClearLink.onclick = async () => {
             inputLink.value = '';
+            await this.cloud.setConfig({ syncLink: '' });
             await this.applyScriptConfig(m.id, { syncLink: '' });
-            if (setupMsg) setupMsg.textContent = 'Unlinked from database. Local settings cleared.';
+            if (setupMsg) setupMsg.textContent = 'Unlinked from shared cloud database.';
             await refreshView();
           };
         }
@@ -12014,11 +13213,17 @@
           btnSavePrefs.onclick = async () => {
             const fields = readSetupFields();
             const rawLink = (inputLink && inputLink.value ? inputLink.value.trim() : '');
-            const patch = Object.assign({}, fields);
-            if (rawLink && m.parseSyncLink(rawLink)) patch.syncLink = rawLink;
-            await this.applyScriptConfig(m.id, patch);
-            const curLink = patch.syncLink || (this.storage.getScriptConfig(m.id, this.storage.getCurrentHost()) || {}).syncLink || '';
-            if (curLink && m.parseSyncLink(curLink)) {
+            const cloudPatch = { deviceName: fields.deviceName, accountLabel: fields.accountLabel };
+            if (rawLink && m.parseSyncLink(rawLink)) cloudPatch.syncLink = rawLink;
+            await this.cloud.setConfig(cloudPatch);
+            await this.applyScriptConfig(m.id, {
+              excludeHosts: fields.excludeHosts,
+              pullIntervalMinutes: fields.pullIntervalMinutes,
+              retentionDays: fields.retentionDays,
+              pushEveryVisit: fields.pushEveryVisit,
+              importToNativeHistory: fields.importToNativeHistory
+            });
+            if (this.cloud.isConfigured()) {
               await m.setRetentionDays(fields.retentionDays);
             }
             if (setupMsg) setupMsg.textContent = `Saved settings (${fields.deviceName}, pull every ${fields.pullIntervalMinutes}m, ${fields.retentionDays}d retention).`;
@@ -12051,6 +13256,359 @@
           btnCopySql.onclick = () => {
             const sql = el('#bsync-gen-sql')?.value || '';
             if (sql) copyTextToClipboard(sql);
+          };
+        }
+      } else if (m.id === 'settings-sync') {
+        const el = (sel) => body.querySelector(sel);
+        const fmtAgo = (ts) => {
+          if (!ts) return 'never';
+          const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+          if (sec < 60) return `${sec}s ago`;
+          if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+          return `${Math.floor(sec / 3600)}h ago`;
+        };
+
+        const refreshSettingsSync = async () => {
+          if (typeof m.getStatus !== 'function') return;
+          const st = await m.getStatus();
+          const meta = (st && st.meta) || {};
+          const dot = el('#ssync-dot');
+          const lbl = el('#ssync-status-label');
+          const metaLine = el('#ssync-meta-line');
+          const logList = el('#ssync-log-list');
+          if (dot) dot.style.background = meta.lastError ? '#ef4444' : (st.configured ? '#34d399' : '#f59e0b');
+          if (lbl) lbl.textContent = meta.lastError ? 'Sync Error' : (st.configured ? 'Cloud Linked' : 'Not Linked');
+          if (metaLine) {
+            metaLine.textContent = meta.lastError
+              ? meta.lastError
+              : (st.configured ? `Last sync ${fmtAgo(meta.lastSyncAt)} · ${st.trackedKeys || 0} tracked key(s)` : 'Configure your shared Sync Link in BESing Settings.');
+          }
+          if (logList) {
+            while (logList.firstChild) logList.removeChild(logList.firstChild);
+            const logs = Array.isArray(meta.recentLog) ? meta.recentLog : [];
+            if (logs.length === 0) {
+              const d = document.createElement('div');
+              d.textContent = 'No remote updates applied yet.';
+              logList.appendChild(d);
+            } else {
+              logs.forEach(line => {
+                const d = document.createElement('div');
+                d.textContent = line;
+                d.style.cssText = 'padding:3px 6px;border-radius:5px;background:rgba(30,41,59,0.55);color:#cbd5e1;';
+                logList.appendChild(d);
+              });
+            }
+          }
+        };
+        refreshSettingsSync();
+
+        const btnOpenCloud = el('#btn-ssync-open-cloud');
+        if (btnOpenCloud) {
+          btnOpenCloud.onclick = () => {
+            this.currentView = 'settings';
+            this.renderBody();
+          };
+        }
+
+        const runSync = async (full) => {
+          const b = el(full ? '#btn-ssync-full' : '#btn-ssync-now');
+          if (b) { b.disabled = true; b.textContent = 'Syncing...'; }
+          await m.syncNow({ full, force: true });
+          if (b) { b.disabled = false; b.textContent = full ? 'Full' : 'Sync Now'; }
+          await refreshSettingsSync();
+        };
+        if (el('#btn-ssync-now')) el('#btn-ssync-now').onclick = () => runSync(false);
+        if (el('#btn-ssync-full')) el('#btn-ssync-full').onclick = () => runSync(true);
+
+        const bindToggle = (sel, key) => {
+          const c = el(sel);
+          if (c) c.onchange = async () => { await this.applyScriptConfig(m.id, { [key]: c.checked }); };
+        };
+        bindToggle('#chk-ssync-modes', 'syncModes');
+        bindToggle('#chk-ssync-configs', 'syncConfigs');
+        bindToggle('#chk-ssync-sites', 'syncSites');
+        bindToggle('#chk-ssync-theme', 'syncTheme');
+
+        if (el('#btn-ssync-save')) {
+          el('#btn-ssync-save').onclick = async () => {
+            const mins = Math.max(2, Math.min(120, parseInt(el('#ssync-input-pullmin')?.value, 10) || 10));
+            await this.applyScriptConfig(m.id, { pullIntervalMinutes: mins });
+            const metaLine = el('#ssync-meta-line');
+            if (metaLine) metaLine.textContent = `Saved auto-pull interval (${mins} min).`;
+          };
+        }
+      } else if (m.id === 'quick-transfer') {
+        const el = (sel) => body.querySelector(sel);
+        const sendMsg = el('#qtx-send-msg');
+        const listEl = el('#qtx-items-list');
+        const previewBox = el('#qtx-preview-box');
+        const countBadge = el('#qtx-count-badge');
+        const titleInput = el('#qtx-input-title');
+        const textInput = el('#qtx-input-text');
+        const fileInput = el('#qtx-input-file');
+
+        const fmtSize = (n) => {
+          const v = Number(n) || 0;
+          if (v < 1024) return `${v} B`;
+          if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+          return `${(v / (1024 * 1024)).toFixed(2)} MB`;
+        };
+
+        const fmtExpires = (iso) => {
+          const ms = Date.parse(iso || '') - Date.now();
+          if (!Number.isFinite(ms) || ms <= 0) return 'expiring';
+          const hrs = Math.ceil(ms / 3600000);
+          return `expires in ${hrs}h`;
+        };
+
+        const setMsg = (txt, color = '#94a3b8') => {
+          if (!sendMsg) return;
+          sendMsg.textContent = txt;
+          sendMsg.style.color = color;
+        };
+
+        const showPreview = (item) => {
+          if (!previewBox) return;
+          while (previewBox.firstChild) previewBox.removeChild(previewBox.firstChild);
+          previewBox.style.display = 'block';
+          const hdr = document.createElement('div');
+          hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;';
+          const ttl = document.createElement('span');
+          ttl.textContent = item.title || item.file_name || 'Preview';
+          ttl.style.cssText = 'font-size:11px;font-weight:700;color:#e2e8f0;';
+          const closeBtn = document.createElement('button');
+          closeBtn.type = 'button';
+          closeBtn.textContent = 'Close';
+          closeBtn.style.cssText = 'font-size:10px;padding:2px 7px;border-radius:5px;background:rgba(148,163,184,0.18);border:none;color:#cbd5e1;cursor:pointer;';
+          closeBtn.onclick = () => { previewBox.style.display = 'none'; };
+          hdr.appendChild(ttl);
+          hdr.appendChild(closeBtn);
+          previewBox.appendChild(hdr);
+
+          if (item.kind === 'image') {
+            const img = document.createElement('img');
+            img.src = `data:${item.mime_type || 'image/png'};base64,${item.content || ''}`;
+            img.alt = item.title || 'Synced image';
+            img.style.cssText = 'max-width:100%;max-height:240px;border-radius:6px;display:block;margin:0 auto;';
+            previewBox.appendChild(img);
+          } else {
+            const ta = document.createElement('textarea');
+            ta.readOnly = true;
+            ta.rows = 6;
+            ta.value = item.content || '';
+            ta.style.cssText = 'width:100%;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid rgba(148,163,184,0.25);border-radius:6px;padding:6px;font-family:monospace;font-size:10.5px;';
+            previewBox.appendChild(ta);
+            const copyFull = document.createElement('button');
+            copyFull.type = 'button';
+            copyFull.textContent = 'Copy Text';
+            copyFull.style.cssText = 'margin-top:6px;font-size:10px;padding:4px 10px;border-radius:6px;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;cursor:pointer;';
+            copyFull.onclick = () => {
+              copyTextToClipboard(item.content || '').then(ok => setMsg(ok ? 'Copied text to clipboard!' : 'Select and copy from the box above.', ok ? '#34d399' : '#fbbf24'));
+            };
+            previewBox.appendChild(copyFull);
+          }
+        };
+
+        const renderList = async () => {
+          if (!listEl) return;
+          if (!m.isConfigured()) {
+            while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
+            p.textContent = 'Configure your shared Sync Link in BESing Settings to send & receive drops.';
+            listEl.appendChild(p);
+            if (countBadge) countBadge.textContent = '0';
+            return;
+          }
+          const res = await m.listTransfers();
+          while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+          if (!res || !res.ok) {
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#fca5a5;margin:4px 0;';
+            p.textContent = (res && res.error) || 'Failed to load transfers.';
+            listEl.appendChild(p);
+            return;
+          }
+          const items = res.items || [];
+          if (countBadge) countBadge.textContent = `${items.length} active`;
+          if (items.length === 0) {
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
+            p.textContent = 'No active drops. Send text, paste a screenshot (Ctrl+V), or upload a file above.';
+            listEl.appendChild(p);
+            return;
+          }
+
+          items.forEach(item => {
+            const card = document.createElement('div');
+            card.style.cssText = 'padding:7px 8px;border-radius:8px;background:rgba(30,41,59,0.55);border:1px solid rgba(148,163,184,0.16);display:flex;flex-direction:column;gap:4px;';
+
+            const top = document.createElement('div');
+            top.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;';
+            const left = document.createElement('div');
+            left.style.cssText = 'min-width:0;flex:1;';
+            const titleEl = document.createElement('div');
+            titleEl.textContent = item.title || item.file_name || 'Untitled';
+            titleEl.style.cssText = 'font-size:11.5px;font-weight:700;color:#f1f5f9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+            const metaEl = document.createElement('div');
+            metaEl.textContent = `${(item.kind || 'text').toUpperCase()} · ${fmtSize(item.size_bytes)} · ${item.sender_name || 'Device'} · ${fmtExpires(item.expires_at)}`;
+            metaEl.style.cssText = 'font-size:9.5px;color:#94a3b8;';
+            left.appendChild(titleEl);
+            left.appendChild(metaEl);
+            top.appendChild(left);
+            card.appendChild(top);
+
+            if (item.preview_text) {
+              const prev = document.createElement('div');
+              prev.textContent = item.preview_text;
+              prev.style.cssText = 'font-size:10px;color:#cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:rgba(15,23,42,0.5);padding:3px 6px;border-radius:5px;';
+              card.appendChild(prev);
+            }
+
+            const actions = document.createElement('div');
+            actions.style.cssText = 'display:flex;gap:5px;flex-wrap:wrap;margin-top:2px;';
+            const mkBtn = (label, colorCss, handler) => {
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.textContent = label;
+              b.style.cssText = `font-size:10px;padding:3px 8px;border-radius:6px;cursor:pointer;${colorCss}`;
+              b.onclick = handler;
+              return b;
+            };
+
+            if (item.kind === 'text') {
+              if (item.inline_text !== null && item.inline_text !== undefined) {
+                // Synchronous tap -> clipboard copy works cleanly on iOS Safari!
+                actions.appendChild(mkBtn('Copy', 'background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;font-weight:600;', () => {
+                  copyTextToClipboard(item.inline_text).then(ok => setMsg(ok ? `Copied "${item.title}"` : 'Copy blocked — click View to copy manually.', ok ? '#34d399' : '#fbbf24'));
+                }));
+              }
+              actions.appendChild(mkBtn('View', 'background:rgba(99,102,241,0.18);border:1px solid rgba(99,102,241,0.4);color:#a5b4fc;', async () => {
+                if (item.inline_text !== null && item.inline_text !== undefined) {
+                  showPreview(Object.assign({}, item, { content: item.inline_text }));
+                } else {
+                  setMsg('Downloading text...');
+                  const full = await m.fetchTransfer(item.id);
+                  if (full && full.ok) { setMsg(''); showPreview(full.item); }
+                  else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+                }
+              }));
+            } else if (item.kind === 'image') {
+              actions.appendChild(mkBtn('Preview', 'background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#c084fc;font-weight:600;', async () => {
+                setMsg('Downloading image...');
+                const full = await m.fetchTransfer(item.id);
+                if (full && full.ok) { setMsg(''); showPreview(full.item); }
+                else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+              }));
+              actions.appendChild(mkBtn('Download', 'background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;', async () => {
+                setMsg('Downloading image...');
+                const full = await m.fetchTransfer(item.id);
+                if (full && full.ok) { m.triggerDownload(full.item); setMsg('Downloaded!', '#34d399'); }
+                else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+              }));
+            } else {
+              actions.appendChild(mkBtn('Download', 'background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;font-weight:600;', async () => {
+                setMsg('Downloading file...');
+                const full = await m.fetchTransfer(item.id);
+                if (full && full.ok) { m.triggerDownload(full.item); setMsg('Downloaded!', '#34d399'); }
+                else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+              }));
+            }
+
+            actions.appendChild(mkBtn('Delete', 'background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.35);color:#fca5a5;margin-left:auto;', async () => {
+              const d = await m.deleteTransfer(item.id);
+              if (d && d.ok) { setMsg('Deleted.'); renderList(); }
+              else setMsg((d && d.error) || 'Delete failed', '#fca5a5');
+            }));
+
+            card.appendChild(actions);
+            listEl.appendChild(card);
+          });
+        };
+
+        renderList();
+
+        if (el('#btn-qtx-open-cloud')) {
+          el('#btn-qtx-open-cloud').onclick = () => {
+            this.currentView = 'settings';
+            this.renderBody();
+          };
+        }
+        if (el('#btn-qtx-refresh')) el('#btn-qtx-refresh').onclick = () => renderList();
+
+        // Direct Ctrl+V clipboard image capture right inside the text box!
+        if (textInput) {
+          textInput.addEventListener('paste', async (ev) => {
+            const items = ev.clipboardData && ev.clipboardData.items ? Array.from(ev.clipboardData.items) : [];
+            const imgItem = items.find(i => i.type && i.type.startsWith('image/'));
+            if (!imgItem) return;
+            ev.preventDefault();
+            const blob = imgItem.getAsFile();
+            if (!blob) return;
+            setMsg('Uploading pasted image...', '#38bdf8');
+            const res = await m.sendBlob(blob, { title: (titleInput?.value || '').trim() });
+            if (res && res.ok) {
+              if (titleInput) titleInput.value = '';
+              setMsg(`Uploaded image "${res.item.title}" (${fmtSize(res.item.size_bytes)}).`, '#34d399');
+              renderList();
+            } else {
+              setMsg((res && res.error) || 'Image upload failed', '#fca5a5');
+            }
+          });
+        }
+
+        if (el('#btn-qtx-send-text')) {
+          el('#btn-qtx-send-text').onclick = async () => {
+            const txt = textInput ? textInput.value : '';
+            const ttl = titleInput ? titleInput.value : '';
+            setMsg('Sending text...', '#38bdf8');
+            const res = await m.sendText(txt, ttl);
+            if (res && res.ok) {
+              if (textInput) textInput.value = '';
+              if (titleInput) titleInput.value = '';
+              setMsg(`Sent "${res.item.title}" (${fmtSize(res.item.size_bytes)}). Expires in 48h.`, '#34d399');
+              renderList();
+            } else {
+              setMsg((res && res.error) || 'Send failed', '#fca5a5');
+            }
+          };
+        }
+
+        if (el('#btn-qtx-paste-img')) {
+          el('#btn-qtx-paste-img').onclick = async () => {
+            setMsg('Reading clipboard image...', '#c084fc');
+            const clip = await m.readClipboardImage();
+            if (!clip || !clip.ok) {
+              setMsg((clip && clip.error) || 'No image on clipboard', '#fbbf24');
+              return;
+            }
+            setMsg('Uploading clipboard image...', '#38bdf8');
+            const res = await m.sendBlob(clip.blob, { title: (titleInput?.value || '').trim() });
+            if (res && res.ok) {
+              if (titleInput) titleInput.value = '';
+              setMsg(`Uploaded "${res.item.title}" (${fmtSize(res.item.size_bytes)}).`, '#34d399');
+              renderList();
+            } else {
+              setMsg((res && res.error) || 'Upload failed', '#fca5a5');
+            }
+          };
+        }
+
+        if (el('#btn-qtx-pick-file') && fileInput) {
+          el('#btn-qtx-pick-file').onclick = () => fileInput.click();
+          fileInput.onchange = async () => {
+            const file = fileInput.files && fileInput.files[0];
+            fileInput.value = '';
+            if (!file) return;
+            setMsg(`Uploading ${file.name}...`, '#38bdf8');
+            const res = await m.sendBlob(file, { title: (titleInput?.value || '').trim(), fileName: file.name });
+            if (res && res.ok) {
+              if (titleInput) titleInput.value = '';
+              setMsg(`Uploaded "${res.item.title}" (${fmtSize(res.item.size_bytes)}).`, '#34d399');
+              renderList();
+            } else {
+              setMsg((res && res.error) || 'File upload failed', '#fca5a5');
+            }
           };
         }
       } else if (m.id === 'prevent-redirect') {

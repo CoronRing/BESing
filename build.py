@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -149,7 +149,7 @@ def build():
   }})();
   const FRAME_SAFE_MODULES = new Set(['prevent-redirect', 'force-copy']);
   // Modules whose settings drive state shared by every site, so they cannot be locked to one site.
-  const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder', 'browser-sync']);
+  const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder', 'browser-sync', 'settings-sync', 'quick-transfer']);
 
   // Ownership claim shared by every JS world (userscript sandboxes, extension content scripts, page).
   // Worlds do not share globals, and <html> may not exist yet at document-start, but they do share
@@ -395,6 +395,7 @@ def build():
         this.enabledScripts['prevent-redirect'] = true;
       }}
       this.scriptConfigs = readLocal('script_configs', {{}});
+      this.settingsTimestamps = readLocal('settings_timestamps', {{}});
       this.widgetPos = readLocal('widget_position', null);
       this.settings = {{
         theme: 'cyber-pet',
@@ -402,6 +403,7 @@ def build():
         authToken: '',
         updateChannel: 'github',
         autoCheckUpdates: true,
+        cloudSync: {{}},
         ...readLocal('global_settings', {{}})
       }};
     }}
@@ -412,7 +414,8 @@ def build():
         agentUrl: 'http://127.0.0.1:8765/api/sync',
         authToken: '',
         updateChannel: 'github',
-        autoCheckUpdates: true
+        autoCheckUpdates: true,
+        cloudSync: {{}}
       }};
     }}
 
@@ -436,10 +439,23 @@ def build():
       }}
 
       this.scriptConfigs = (data.script_configs && typeof data.script_configs === 'object') ? data.script_configs : {{}};
+      this.settingsTimestamps = (data.settings_timestamps && typeof data.settings_timestamps === 'object') ? data.settings_timestamps : (this.settingsTimestamps || {{}});
       if (data.widget_position !== undefined) {{
         this.widgetPos = data.widget_position || null;
       }}
       this.settings = {{ ...this._defaultSettings(), ...(data.global_settings || {{}}) }};
+      if (!this.settings.cloudSync || typeof this.settings.cloudSync !== 'object') {{
+        this.settings.cloudSync = {{}};
+      }}
+      // Seamless migration: adopt legacy browser-sync Sync Link into manager-level cloudSync.
+      const legacyBS = this.scriptConfigs['browser-sync'];
+      if (!this.settings.cloudSync.syncLink && legacyBS && legacyBS.syncLink) {{
+        this.settings.cloudSync = {{
+          syncLink: legacyBS.syncLink,
+          deviceName: legacyBS.deviceName || this.settings.cloudSync.deviceName || '',
+          accountLabel: legacyBS.accountLabel || this.settings.cloudSync.accountLabel || ''
+        }};
+      }}
     }}
 
     async init() {{
@@ -448,6 +464,7 @@ def build():
         blocked_sites: [],
         enabled_scripts: this.enabledScripts || {{}},
         script_configs: this.scriptConfigs || {{}},
+        settings_timestamps: this.settingsTimestamps || {{}},
         widget_position: this.widgetPos,
         global_settings: this.settings || {{}}
       }});
@@ -484,6 +501,11 @@ def build():
           this.scriptConfigs = v;
           mirror('script_configs', v);
         }}
+        if ('settings_timestamps' in externalChanges) {{
+          const v = (externalChanges.settings_timestamps && typeof externalChanges.settings_timestamps === 'object') ? externalChanges.settings_timestamps : {{}};
+          this.settingsTimestamps = v;
+          mirror('settings_timestamps', v);
+        }}
         if ('global_settings' in externalChanges) {{
           const v = (externalChanges.global_settings && typeof externalChanges.global_settings === 'object') ? externalChanges.global_settings : {{}};
           this.settings = {{ ...this._defaultSettings(), ...v }};
@@ -499,6 +521,7 @@ def build():
           site_rules: {{}},
           enabled_scripts: {{ 'prevent-redirect': true }},
           script_configs: {{}},
+          settings_timestamps: {{}},
           widget_position: null,
           global_settings: this._defaultSettings()
         }});
@@ -610,8 +633,11 @@ def build():
       }}
 
       this.cleanupSiteRule(h);
+      this._touchTimestamp(`enabled:${{scriptId}}`);
+      this._touchTimestamp(`site:${{h}}`);
       await BESAdapter.set('enabled_scripts', this.enabledScripts);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }}
 
     // Settings are locked to a site when `siteRules[host].configs[scriptId]` exists. Data saved by
@@ -642,7 +668,9 @@ def build():
         delete this.siteRules[h].configs[scriptId];
         this.cleanupSiteRule(h);
       }}
+      this._touchTimestamp(`site:${{h}}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }}
 
     getScriptSiteOverrides(scriptId) {{
@@ -677,7 +705,9 @@ def build():
       }}
 
       this.cleanupSiteRule(h);
+      this._touchTimestamp(`site:${{h}}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }}
 
     async removeSiteOverride(scriptId, host) {{
@@ -686,7 +716,9 @@ def build():
       this._writeSeq++;
       if (this.siteRules[h].scripts) delete this.siteRules[h].scripts[scriptId];
       this.cleanupSiteRule(h);
+      this._touchTimestamp(`site:${{h}}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }}
 
     // Script settings: the site's locked copy when one exists (whatever the script's mode), else global.
@@ -704,11 +736,14 @@ def build():
 
       if (this.isConfigLocked(scriptId, h)) {{
         this.siteRules[h].configs[scriptId] = {{ ...this.siteRules[h].configs[scriptId], ...patch }};
+        this._touchTimestamp(`site:${{h}}`);
         await BESAdapter.set('site_rules', this.siteRules);
       }} else {{
         this.scriptConfigs[scriptId] = {{ ...(this.scriptConfigs[scriptId] || {{}}), ...patch }};
+        this._touchTimestamp(`config:${{scriptId}}`);
         await BESAdapter.set('script_configs', this.scriptConfigs);
       }}
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }}
 
     async toggleSiteRule(host, ruleKey, val) {{
@@ -724,7 +759,9 @@ def build():
       }}
 
       this.cleanupSiteRule(h);
+      this._touchTimestamp(`site:${{h}}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }}
 
     cleanupSiteRule(host) {{
@@ -753,7 +790,9 @@ def build():
         this.cleanupSiteRule(h);
       }}
 
+      this._touchTimestamp(`site:${{h}}`);
       await BESAdapter.set('site_rules', this.siteRules);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }}
 
     getAllSiteRules() {{
@@ -783,13 +822,309 @@ def build():
     async setTheme(theme) {{
       this._writeSeq++;
       this.settings.theme = theme;
+      this._touchTimestamp('ui:theme');
       await BESAdapter.set('global_settings', this.settings);
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
     }}
 
     async updateSettings(patch) {{
       this._writeSeq++;
       this.settings = {{ ...this.settings, ...patch }};
       await BESAdapter.set('global_settings', this.settings);
+    }}
+
+    _touchTimestamp(entryKey) {{
+      if (!entryKey) return;
+      if (!this.settingsTimestamps || typeof this.settingsTimestamps !== 'object') {{
+        this.settingsTimestamps = {{}};
+      }}
+      this.settingsTimestamps[entryKey] = Date.now();
+      try {{
+        window.dispatchEvent(new CustomEvent('besing:settings-mutated', {{ detail: {{ key: entryKey, ts: this.settingsTimestamps[entryKey] }} }}));
+      }} catch (e) {{}}
+    }}
+
+    async persistFromCloudMerge({{ rulesTouched = false, settingsTouched = false }} = {{}}) {{
+      this._writeSeq++;
+      if (rulesTouched) {{
+        await BESAdapter.set('enabled_scripts', this.enabledScripts);
+        await BESAdapter.set('script_configs', this.scriptConfigs);
+        await BESAdapter.set('site_rules', this.siteRules);
+      }}
+      if (settingsTouched) {{
+        await BESAdapter.set('global_settings', this.settings);
+      }}
+      await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
+    }}
+
+    getCloudConfig() {{
+      const c = (this.settings && this.settings.cloudSync && typeof this.settings.cloudSync === 'object')
+        ? this.settings.cloudSync
+        : {{}};
+      const legacy = (this.scriptConfigs && this.scriptConfigs['browser-sync']) || {{}};
+      return {{
+        syncLink: (c.syncLink && String(c.syncLink).trim()) || (legacy.syncLink && String(legacy.syncLink).trim()) || '',
+        deviceName: (c.deviceName && String(c.deviceName).trim()) || (legacy.deviceName && String(legacy.deviceName).trim()) || '',
+        accountLabel: (c.accountLabel && String(c.accountLabel).trim()) || (legacy.accountLabel && String(legacy.accountLabel).trim()) || ''
+      }};
+    }}
+
+    async setCloudConfig(patch) {{
+      const cur = this.getCloudConfig();
+      const next = Object.assign({{}}, cur, patch || {{}});
+      await this.updateSettings({{ cloudSync: next }});
+    }}
+  }}
+
+  // Shared manager-level Cloud Database client (used by Browser Sync, Settings Sync, Quick Transfer,
+  // and future BESing scripts). Keeps one Sync Link and unified traffic accounting across all modules.
+  class BESCloud {{
+    constructor(app) {{
+      this.app = app;
+      this.STATS_KEY = 'browser_sync_stats';
+    }}
+
+    isExtensionMode() {{
+      return typeof chrome !== 'undefined' && !!chrome.runtime && typeof chrome.runtime.sendMessage === 'function';
+    }}
+
+    _b64UrlEncode(str) {{
+      const bytes = new TextEncoder().encode(String(str || ''));
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+    }}
+
+    _b64UrlDecode(str) {{
+      let b64 = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4) b64 += '=';
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    }}
+
+    parseSyncLink(raw) {{
+      const s = String(raw || '').trim();
+      if (!s) return null;
+      try {{
+        let payloadStr = s;
+        if (s.startsWith('besing-sync://')) payloadStr = this._b64UrlDecode(s.slice('besing-sync://'.length));
+        else if (!s.startsWith('{{')) return null;
+        const obj = JSON.parse(payloadStr);
+        const url = String(obj.u || obj.url || '').trim().replace(/\\/+$/, '');
+        const key = String(obj.k || obj.anonKey || obj.key || '').trim();
+        const secret = String(obj.s || obj.secret || '').trim();
+        if (!url || !key || !secret || secret.length < 16) return null;
+        const isHttps = url.startsWith('https://');
+        const isLocal = /^http:\\/\\/(127\\.0\\.0\\.1|localhost)(:\\d+)?$/i.test(url);
+        if (!isHttps && !isLocal) return null;
+        return {{ url, key, secret }};
+      }} catch (e) {{
+        return null;
+      }}
+    }}
+
+    defaultDeviceName() {{
+      const ua = (typeof navigator !== 'undefined' && navigator.userAgent) ? navigator.userAgent : '';
+      const touch = (typeof navigator !== 'undefined' && navigator.maxTouchPoints) ? navigator.maxTouchPoints : 0;
+      if (/iPad/i.test(ua) || (/Macintosh/i.test(ua) && touch > 1)) return 'iPad';
+      if (/iPhone|iPod/i.test(ua)) return 'iPhone';
+      if (/Android/i.test(ua)) return 'Android';
+      if (/Windows/i.test(ua)) return 'Windows-PC';
+      if (/Macintosh|Mac OS/i.test(ua)) return 'Mac';
+      return 'Device';
+    }}
+
+    getConfig() {{
+      const c = this.app.storage.getCloudConfig();
+      if (!c.deviceName) c.deviceName = this.defaultDeviceName();
+      return c;
+    }}
+
+    async setConfig(patch) {{
+      await this.app.storage.setCloudConfig(patch);
+    }}
+
+    isConfigured() {{
+      return Boolean(this.parseSyncLink(this.getConfig().syncLink));
+    }}
+
+    async generateSetupBundle(supabaseUrl, anonKey, retentionDays = 7) {{
+      const bs = this.app.modules.find(m => m.id === 'browser-sync');
+      if (bs && typeof bs.generateSetupBundle === 'function') {{
+        return await bs.generateSetupBundle(supabaseUrl, anonKey, retentionDays);
+      }}
+      return {{ ok: false, error: 'Browser Sync generator unavailable.' }};
+    }}
+
+    _todayStr() {{
+      const d = new Date();
+      return `${{d.getFullYear()}}-${{String(d.getMonth() + 1).padStart(2, '0')}}-${{String(d.getDate()).padStart(2, '0')}}`;
+    }}
+
+    async _recordTraffic(kind, bytesSent, bytesReceived) {{
+      const today = this._todayStr();
+      const s = (await this.app.readSharedState(this.STATS_KEY, null)) || {{
+        day: today, bytesSentToday: 0, bytesReceivedToday: 0, pushesToday: 0, pullsToday: 0,
+        bytesSentTotal: 0, bytesReceivedTotal: 0, pushesTotal: 0, pullsTotal: 0
+      }};
+      if (s.day !== today) {{
+        s.day = today; s.bytesSentToday = 0; s.bytesReceivedToday = 0; s.pushesToday = 0; s.pullsToday = 0;
+      }}
+      s.bytesSentToday += bytesSent;
+      s.bytesReceivedToday += bytesReceived;
+      s.bytesSentTotal += bytesSent;
+      s.bytesReceivedTotal += bytesReceived;
+      if (kind === 'push') {{ s.pushesToday += 1; s.pushesTotal += 1; }}
+      if (kind === 'pull') {{ s.pullsToday += 1; s.pullsTotal += 1; }}
+      await this.app.writeSharedState(this.STATS_KEY, s);
+      return s;
+    }}
+
+    _sendExt(msg) {{
+      return new Promise((resolve) => {{
+        let settled = false;
+        const timer = setTimeout(() => {{
+          if (!settled) {{ settled = true; resolve({{ ok: false, error: 'Extension background worker timed out' }}); }}
+        }}, 20000);
+        try {{
+          chrome.runtime.sendMessage(msg, (resp) => {{
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (chrome.runtime && chrome.runtime.lastError) resolve({{ ok: false, error: chrome.runtime.lastError.message }});
+            else resolve(resp || {{ ok: false, error: 'Empty response from background worker' }});
+          }});
+        }} catch (e) {{
+          if (!settled) {{ settled = true; clearTimeout(timer); resolve({{ ok: false, error: e.message || String(e) }}); }}
+        }}
+      }});
+    }}
+
+    async getInfo() {{
+      if (this.isExtensionMode()) {{
+        return await this._sendExt({{ type: 'besing-cloud:get-info' }});
+      }}
+      const cfg = this.getConfig();
+      const stats = await this.app.readSharedState(this.STATS_KEY, null);
+      return {{
+        ok: true,
+        mode: 'userscript',
+        configured: this.isConfigured(),
+        deviceName: cfg.deviceName,
+        accountLabel: cfg.accountLabel,
+        detectedEmail: '',
+        stats
+      }};
+    }}
+
+    async rpc(fnName, args = {{}}, {{ trafficKind = 'push', syncLink = null, keepalive = false }} = {{}}) {{
+      if (this.isExtensionMode()) {{
+        return await this._sendExt({{ type: 'besing-cloud:rpc', fnName, args, trafficKind, syncLink }});
+      }}
+      const creds = this.parseSyncLink(syncLink || this.getConfig().syncLink);
+      if (!creds) return {{ ok: false, error: 'Cloud database not linked. Configure Sync Link in BESing Settings.' }};
+
+      const endpoint = `${{creds.url}}/rest/v1/rpc/${{fnName}}`;
+      const bodyStr = JSON.stringify(Object.assign({{}}, args || {{}}, {{ p_secret: creds.secret }}));
+      const bytesSent = new TextEncoder().encode(bodyStr).length;
+      const headers = {{
+        'apikey': creds.key,
+        'Authorization': `Bearer ${{creds.key}}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      }};
+
+      const doFetch = async () => {{
+        const opts = {{ method: 'POST', headers, body: bodyStr }};
+        if (keepalive && bytesSent < 60000) opts.keepalive = true;
+        const res = await fetch(endpoint, opts);
+        const text = await res.text();
+        const bytesReceived = new TextEncoder().encode(text).length;
+        await this._recordTraffic(trafficKind, bytesSent, bytesReceived);
+        if (!res.ok) {{
+          let msg = `HTTP ${{res.status}}`;
+          try {{ const j = JSON.parse(text); if (j && j.message) msg = `${{res.status}}: ${{j.message}}`; }} catch (e) {{}}
+          return {{ ok: false, status: res.status, error: msg }};
+        }}
+        return {{ ok: true, data: text ? JSON.parse(text) : {{}} }};
+      }};
+
+      if (keepalive || typeof GM_xmlhttpRequest !== 'function') {{
+        try {{ return await doFetch(); }} catch (e) {{ return {{ ok: false, error: e.message || String(e) }}; }}
+      }}
+
+      return await new Promise((resolve) => {{
+        let done = false;
+        try {{
+          GM_xmlhttpRequest({{
+            method: 'POST',
+            url: endpoint,
+            headers,
+            data: bodyStr,
+            timeout: 20000,
+            onload: async (res) => {{
+              if (done) return;
+              done = true;
+              const text = res.responseText || '';
+              const bytesReceived = new TextEncoder().encode(text).length;
+              await this._recordTraffic(trafficKind, bytesSent, bytesReceived);
+              if (res.status >= 200 && res.status < 300) {{
+                try {{ resolve({{ ok: true, data: text ? JSON.parse(text) : {{}} }}); }} catch (e) {{ resolve({{ ok: true, data: {{}} }}); }}
+              }} else {{
+                let msg = `HTTP ${{res.status}}`;
+                try {{ const j = JSON.parse(text); if (j && j.message) msg = `${{res.status}}: ${{j.message}}`; }} catch (e) {{}}
+                resolve({{ ok: false, status: res.status, error: msg }});
+              }}
+            }},
+            onerror: () => {{
+              if (done) return;
+              done = true;
+              doFetch().then(resolve).catch(e => resolve({{ ok: false, error: e.message || String(e) }}));
+            }},
+            ontimeout: () => {{
+              if (done) return;
+              done = true;
+              resolve({{ ok: false, error: 'Request timed out' }});
+            }}
+          }});
+        }} catch (e) {{
+          if (!done) {{
+            done = true;
+            doFetch().then(resolve).catch(err => resolve({{ ok: false, error: err.message || String(err) }}));
+          }}
+        }}
+      }});
+    }}
+
+    async kvSync(namespace, entries = [], since = null) {{
+      return await this.rpc('besing_kv_sync', {{
+        p_namespace: namespace,
+        p_entries: entries,
+        p_since: since
+      }}, {{ trafficKind: 'pull' }});
+    }}
+
+    async testConnection(syncLink) {{
+      const raw = syncLink || this.getConfig().syncLink;
+      if (!this.parseSyncLink(raw)) {{
+        return {{ ok: false, error: 'Invalid Sync Link format (must be besing-sync://... with HTTPS URL, publishable key, and secret >= 16 chars).' }};
+      }}
+      const t0 = Date.now();
+      const res = await this.rpc('besing_sync_pull', {{
+        p_since: null,
+        p_device_hashes: {{}},
+        p_history_limit: 1
+      }}, {{ trafficKind: 'pull', syncLink: raw }});
+      if (!res || !res.ok) return {{ ok: false, error: (res && res.error) || 'Connection failed' }};
+      const d = res.data || {{}};
+      return {{
+        ok: true,
+        latencyMs: Date.now() - t0,
+        deviceCount: Array.isArray(d.devices) ? d.devices.length : 0,
+        retentionDays: d.retention_days || 7
+      }};
     }}
   }}
 
@@ -1388,6 +1723,7 @@ def build():
       this.host = null;
       this.shadow = null;
       this.widgetEl = null;
+      this.cloud = new BESCloud(this);
       this.menuWrapperEl = null;
       this.searchQuery = '';
       this.currentView = 'extensions';
@@ -1671,7 +2007,7 @@ def build():
       if (hasExtOnChanged && !this._storageChangeListener) {{
         this._storageChangeListener = (changes, areaName) => {{
           if (this.disposed || areaName !== 'local' || !changes) return;
-          const syncKeys = ['site_rules', 'enabled_scripts', 'script_configs', 'global_settings', 'widget_position'];
+          const syncKeys = ['site_rules', 'enabled_scripts', 'script_configs', 'settings_timestamps', 'global_settings', 'widget_position'];
           const extData = {{}};
           let hasRelevant = false;
           for (const k of syncKeys) {{
@@ -2762,9 +3098,48 @@ def build():
       if (this.currentView === 'settings') {{
         const currentHost = window.location.hostname || 'localhost';
         const curTheme = this.storage.getTheme();
+        const cloudCfg = this.cloud.getConfig();
+        const cloudLinked = this.cloud.isConfigured();
+        const escCloud = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
         this.setSafeHTML(body, `
           <div class="besing-settings-section">
+            <div class="besing-update-card" style="border-color:${{cloudLinked ? 'rgba(52,211,153,0.35)' : 'rgba(245,158,11,0.35)'}};">
+              <div class="besing-update-header">
+                <span class="besing-section-title">Cloud Database (Shared Sync)</span>
+                <span class="besing-status-pill ${{cloudLinked ? 'connected' : ''}}" id="besing-cloud-pill" style="${{cloudLinked ? '' : 'background:rgba(245,158,11,0.16);color:#fbbf24;border-color:rgba(245,158,11,0.35);'}}">
+                  <span id="besing-cloud-pill-text">${{cloudLinked ? 'Linked' : 'Not Linked'}}</span>
+                </span>
+              </div>
+              <p style="font-size:10px;color:#94a3b8;margin:4px 0 6px;line-height:1.35;">
+                One Sync Link connects Browser Sync, Settings Sync, Quick Transfer, and future cloud scripts. Nothing is hardcoded.
+              </p>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <input type="password" class="besing-test-input" id="besing-cloud-link" placeholder="Paste besing-sync://... link" value="${{escCloud(cloudCfg.syncLink)}}" style="font-family:monospace;font-size:11px;">
+                <div style="display:flex;gap:6px;">
+                  <input type="text" class="besing-test-input" id="besing-cloud-device" placeholder="Device Name (e.g. Main-PC, iPhone)" value="${{escCloud(cloudCfg.deviceName)}}" style="flex:1;min-width:0;">
+                  <input type="text" class="besing-test-input" id="besing-cloud-account" placeholder="Profile / User" value="${{escCloud(cloudCfg.accountLabel)}}" style="flex:1;min-width:0;">
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-save-test" style="flex:1;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;">Save & Test</button>
+                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-copy">Copy Link</button>
+                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-vis">Show</button>
+                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-unlink" style="color:#fca5a5;">Unlink</button>
+                </div>
+                <div id="besing-cloud-msg" style="font-size:10px;color:#94a3b8;line-height:1.35;"></div>
+                <div id="besing-cloud-traffic" style="font-size:10px;color:#64748b;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"></div>
+                <details style="margin-top:2px;">
+                  <summary style="font-size:10px;color:#a5b4fc;cursor:pointer;user-select:none;">First-Time Supabase Link Generator</summary>
+                  <div style="display:flex;flex-direction:column;gap:5px;margin-top:6px;">
+                    <input type="text" class="besing-test-input" id="besing-cloud-gen-url" placeholder="https://your-project.supabase.co">
+                    <input type="password" class="besing-test-input" id="besing-cloud-gen-key" placeholder="Supabase publishable / anon key">
+                    <button type="button" class="besing-btn-sub-action" id="btn-cloud-generate" style="background:rgba(99,102,241,0.22);border:1px solid rgba(99,102,241,0.45);color:#a5b4fc;">Generate Secret & Sync Link</button>
+                    <textarea class="besing-test-input" id="besing-cloud-gen-sql" readonly rows="3" style="display:none;font-family:monospace;font-size:10px;"></textarea>
+                  </div>
+                </details>
+              </div>
+            </div>
+
             <div class="besing-theme-picker">
               <div class="besing-section-title">Display Pattern & Desktop Pet</div>
               <div class="besing-theme-grid">
@@ -2875,6 +3250,110 @@ def build():
             btn.classList.add('active');
           }};
         }});
+
+        // Manager-level Cloud Database settings handlers
+        (() => {{
+          const cLink = body.querySelector('#besing-cloud-link');
+          const cDev = body.querySelector('#besing-cloud-device');
+          const cAcct = body.querySelector('#besing-cloud-account');
+          const cMsg = body.querySelector('#besing-cloud-msg');
+          const cTraffic = body.querySelector('#besing-cloud-traffic');
+          const cPill = body.querySelector('#besing-cloud-pill-text');
+          const fmtB = (n) => {{
+            const v = Number(n) || 0;
+            if (v < 1024) return `${{v}} B`;
+            if (v < 1024 * 1024) return `${{(v / 1024).toFixed(1)}} KB`;
+            return `${{(v / (1024 * 1024)).toFixed(2)}} MB`;
+          }};
+
+          this.cloud.getInfo().then(info => {{
+            if (!info || !info.ok) return;
+            if (cAcct && info.detectedEmail && !cAcct.value) {{
+              cAcct.placeholder = `Auto: ${{info.detectedEmail}}`;
+            }}
+            if (cTraffic && info.stats) {{
+              cTraffic.textContent = `Traffic today: ↑ ${{fmtB(info.stats.bytesSentToday)}} (${{info.stats.pushesToday || 0}}p) · ↓ ${{fmtB(info.stats.bytesReceivedToday)}} (${{info.stats.pullsToday || 0}}g)`;
+            }}
+          }}).catch(() => {{}});
+
+          const btnVis = body.querySelector('#btn-cloud-vis');
+          if (btnVis && cLink) {{
+            btnVis.onclick = () => {{
+              const show = cLink.type === 'password';
+              cLink.type = show ? 'text' : 'password';
+              btnVis.textContent = show ? 'Hide' : 'Show';
+            }};
+          }}
+
+          const btnCopy = body.querySelector('#btn-cloud-copy');
+          if (btnCopy && cLink) {{
+            btnCopy.onclick = () => {{
+              const v = cLink.value.trim();
+              if (!v) {{ if (cMsg) cMsg.textContent = 'No Sync Link configured yet.'; return; }}
+              copyTextToClipboard(v).then(ok => {{
+                if (cMsg) cMsg.textContent = ok ? 'Sync Link copied! Paste it on your other devices.' : 'Could not copy automatically; click Show and copy manually.';
+              }});
+            }};
+          }}
+
+          const btnSave = body.querySelector('#btn-cloud-save-test');
+          if (btnSave && cLink) {{
+            btnSave.onclick = async () => {{
+              const raw = cLink.value.trim();
+              const dev = (cDev && cDev.value ? cDev.value.trim() : '') || this.cloud.defaultDeviceName();
+              const acct = (cAcct && cAcct.value ? cAcct.value.trim() : '');
+              if (!raw) {{
+                await this.cloud.setConfig({{ deviceName: dev, accountLabel: acct }});
+                if (cMsg) cMsg.textContent = 'Saved device identity.';
+                return;
+              }}
+              if (!this.cloud.parseSyncLink(raw)) {{
+                if (cMsg) cMsg.textContent = 'Invalid Sync Link (must be besing-sync://... with HTTPS URL, publishable key, and secret).';
+                return;
+              }}
+              btnSave.disabled = true;
+              btnSave.textContent = 'Testing...';
+              const res = await this.cloud.testConnection(raw);
+              btnSave.disabled = false;
+              btnSave.textContent = 'Save & Test';
+              if (!res || !res.ok) {{
+                if (cMsg) cMsg.textContent = `Connection failed: ${{(res && res.error) || 'unknown error'}}`;
+                return;
+              }}
+              await this.cloud.setConfig({{ syncLink: raw, deviceName: dev, accountLabel: acct }});
+              if (cPill) cPill.textContent = 'Linked';
+              if (cMsg) cMsg.textContent = `Linked in ${{res.latencyMs}}ms (${{res.deviceCount}} device(s), ${{res.retentionDays}}d retention). Shared by all sync scripts.`;
+            }};
+          }}
+
+          const btnUnlink = body.querySelector('#btn-cloud-unlink');
+          if (btnUnlink && cLink) {{
+            btnUnlink.onclick = async () => {{
+              cLink.value = '';
+              await this.cloud.setConfig({{ syncLink: '' }});
+              await this.applyScriptConfig('browser-sync', {{ syncLink: '' }});
+              if (cPill) cPill.textContent = 'Not Linked';
+              if (cMsg) cMsg.textContent = 'Unlinked from cloud database.';
+            }};
+          }}
+
+          const btnGen = body.querySelector('#btn-cloud-generate');
+          if (btnGen) {{
+            btnGen.onclick = async () => {{
+              const u = (body.querySelector('#besing-cloud-gen-url')?.value || '').trim();
+              const k = (body.querySelector('#besing-cloud-gen-key')?.value || '').trim();
+              const b = await this.cloud.generateSetupBundle(u, k, 7);
+              if (!b || !b.ok) {{
+                if (cMsg) cMsg.textContent = (b && b.error) || 'Failed to generate Sync Link.';
+                return;
+              }}
+              if (cLink) cLink.value = b.syncLink;
+              const sqlEl = body.querySelector('#besing-cloud-gen-sql');
+              if (sqlEl) {{ sqlEl.value = b.sql; sqlEl.style.display = 'block'; }}
+              if (cMsg) cMsg.textContent = 'Generated! Run the SQL below once in Supabase SQL Editor, then click Save & Test.';
+            }};
+          }}
+        }})();
 
         const bootLogList = body.querySelector('#besing-boot-log-list');
         const bootLogMsg = body.querySelector('#besing-boot-log-msg');
@@ -3908,18 +4387,18 @@ def build():
         `;
       }} else if (m.id === 'browser-sync') {{
         const escAttr = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        const hasLink = Boolean(cfg.syncLink && typeof m.parseSyncLink === 'function' && m.parseSyncLink(cfg.syncLink));
+        const sharedCloud = this.cloud.getConfig();
+        const hasLink = this.cloud.isConfigured();
         const activeSubTab = this._bsyncTab || (hasLink ? 'devices' : 'setup');
         const isExt = typeof m.isExtensionMode === 'function' && m.isExtensionMode();
-        const defName = (typeof m.defaultDeviceName === 'function') ? m.defaultDeviceName() : 'Device';
-        const deviceNameVal = escAttr(cfg.deviceName || defName);
-        const accountVal = escAttr(cfg.accountLabel || '');
+        const deviceNameVal = escAttr(sharedCloud.deviceName || this.cloud.defaultDeviceName());
+        const accountVal = escAttr(sharedCloud.accountLabel || '');
         const pullMinVal = Math.max(2, Math.min(120, Number(cfg.pullIntervalMinutes) || 10));
         const retentionVal = Math.max(1, Math.min(90, Number(cfg.retentionDays) || 7));
         const excludeVal = escAttr(cfg.excludeHosts || '');
         const pushEveryVisit = cfg.pushEveryVisit !== false;
         const importNative = cfg.importToNativeHistory === true;
-        const syncLinkVal = escAttr(cfg.syncLink || '');
+        const syncLinkVal = escAttr(sharedCloud.syncLink || '');
 
         specificControls = `
           <div class="besing-config-section" style="padding:10px;border:1px solid rgba(56,189,248,0.22);border-radius:10px;background:rgba(15,23,42,0.55);">
@@ -4049,6 +4528,143 @@ def build():
                   <button type="button" class="besing-btn-sub-action" id="btn-bsync-copy-sql" style="align-self:flex-end;">Copy SQL</button>
                 </div>
               </div>
+            </div>
+          </div>
+        `;
+      }} else if (m.id === 'settings-sync') {{
+        const linked = this.cloud.isConfigured();
+        const syncModes = cfg.syncModes !== false;
+        const syncConfigs = cfg.syncConfigs !== false;
+        const syncSites = cfg.syncSites !== false;
+        const syncTheme = cfg.syncTheme !== false;
+        const pullMin = Math.max(2, Math.min(120, Number(cfg.pullIntervalMinutes) || 10));
+
+        specificControls = `
+          <div class="besing-config-section" style="padding:10px;border:1px solid rgba(56,189,248,0.22);border-radius:10px;background:rgba(15,23,42,0.55);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <div style="min-width:0;flex:1;">
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <span id="ssync-dot" style="width:8px;height:8px;border-radius:50%;background:${{linked ? '#34d399' : '#f59e0b'}};display:inline-block;"></span>
+                  <span id="ssync-status-label" style="font-size:12px;font-weight:700;color:#e2e8f0;">${{linked ? 'Cloud Linked' : 'Not Linked'}}</span>
+                  <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(16,185,129,0.16);color:#34d399;border:1px solid rgba(16,185,129,0.35);">UTC Latest Wins</span>
+                </div>
+                <div id="ssync-meta-line" style="font-size:10px;color:#94a3b8;margin-top:3px;">Checking sync state...</div>
+              </div>
+              <div style="display:flex;gap:5px;">
+                <button type="button" class="besing-btn-sub-action" id="btn-ssync-now" style="padding:6px 10px;font-size:11px;font-weight:700;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;">Sync Now</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-ssync-full" title="Pull every remote key and merge with latest UTC timestamps" style="padding:6px 8px;font-size:10px;">Full</button>
+              </div>
+            </div>
+            ${{!linked ? `<button type="button" class="besing-btn-sub-action" id="btn-ssync-open-cloud" style="margin-top:8px;width:100%;color:#fbbf24;border-color:rgba(245,158,11,0.4);">Configure Shared Sync Link in Settings</button>` : ''}}
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Synced Categories</span>
+            </div>
+            <p style="font-size:10px;color:#94a3b8;margin:4px 0 8px;line-height:1.35;">
+              Every change is stamped in UTC epoch time so conflicts resolve to the newest edit per key. Device-local items (Sync Link, Device Name, Widget Position, Debug Log) are never overwritten.
+            </p>
+            <div class="besing-toggle-row-list">
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Script On / Off Modes</div>
+                  <div class="besing-toggle-desc">Global activation state of bundled modules</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-ssync-modes" ${{syncModes ? 'checked' : ''}}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Script Configurations</div>
+                  <div class="besing-toggle-desc">Zoom levels, Ad Cleaner aggressiveness, colors, intervals</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-ssync-configs" ${{syncConfigs ? 'checked' : ''}}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Site-Specific Rules & Zaps</div>
+                  <div class="besing-toggle-desc">Per-domain overrides, blocklist, and zapped selectors</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-ssync-sites" ${{syncSites ? 'checked' : ''}}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+              <div class="besing-toggle-row">
+                <div>
+                  <div class="besing-toggle-title">Desktop Pet Theme</div>
+                  <div class="besing-toggle-desc">Cyber Pet, Cozy Slime, Pixel Dino, or Minimal</div>
+                </div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-ssync-theme" ${{syncTheme ? 'checked' : ''}}>
+                  <span class="besing-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px;">
+              <label style="font-size:11px;color:#cbd5e1;">Auto-pull interval (min):
+                <input type="number" class="besing-test-input" id="ssync-input-pullmin" min="2" max="120" value="${{pullMin}}" style="width:58px;margin-left:6px;padding:3px 6px;">
+              </label>
+              <button type="button" class="besing-btn-sub-action" id="btn-ssync-save">Save</button>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Recent Remote Updates</span>
+            </div>
+            <div id="ssync-log-list" style="display:flex;flex-direction:column;gap:4px;margin-top:6px;font-size:10px;color:#94a3b8;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;">
+              <div>No remote updates applied yet.</div>
+            </div>
+          </div>
+        `;
+      }} else if (m.id === 'quick-transfer') {{
+        const linked = this.cloud.isConfigured();
+
+        specificControls = `
+          <div class="besing-config-section" style="padding:10px;border:1px solid rgba(56,189,248,0.22);border-radius:10px;background:rgba(15,23,42,0.55);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <div>
+                <div style="font-size:12px;font-weight:700;color:#e2e8f0;">Quick Transfer (Open & Use)</div>
+                <div id="qtx-status-line" style="font-size:10px;color:#94a3b8;margin-top:2px;">${{linked ? 'Works even when OFF · Items expire automatically after 2 days (max 5 MB)' : 'Link your shared Cloud Database in Settings first.'}}</div>
+              </div>
+              <button type="button" class="besing-btn-sub-action" id="btn-qtx-refresh" style="padding:5px 10px;font-size:11px;color:#38bdf8;border-color:rgba(56,189,248,0.4);">Refresh</button>
+            </div>
+            ${{!linked ? `<button type="button" class="besing-btn-sub-action" id="btn-qtx-open-cloud" style="margin-top:8px;width:100%;color:#fbbf24;border-color:rgba(245,158,11,0.4);">Configure Shared Sync Link in Settings</button>` : ''}}
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Send to Other Devices</span>
+              <span style="font-size:10px;color:#64748b;">Max 5 MB · 48h TTL</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+              <input type="text" class="besing-test-input" id="qtx-input-title" placeholder="Name / Label (optional, e.g. Wi-Fi Note or Screenshot)">
+              <textarea class="besing-test-input" id="qtx-input-text" rows="3" placeholder="Type/paste text here — or press Ctrl+V with a copied image to upload it directly!" style="resize:vertical;font-size:11px;"></textarea>
+              <input type="file" id="qtx-input-file" style="display:none;">
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="besing-btn-sub-action" id="btn-qtx-send-text" style="flex:1;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;font-weight:700;">Send Text</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-qtx-paste-img" style="flex:1;background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#c084fc;">Paste Image</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-qtx-pick-file" style="flex:1;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;">Upload File</button>
+              </div>
+              <div id="qtx-send-msg" style="font-size:10px;color:#94a3b8;line-height:1.35;"></div>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <span class="besing-section-title">Active Drops</span>
+              <span id="qtx-count-badge" style="font-size:10px;color:#94a3b8;">--</span>
+            </div>
+            <div id="qtx-preview-box" style="display:none;margin-top:6px;padding:8px;border-radius:8px;background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.35);"></div>
+            <div id="qtx-items-list" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading transfers...</p>
             </div>
           </div>
         `;
@@ -5156,13 +5772,20 @@ def build():
               return;
             }}
             const fields = readSetupFields();
-            await this.applyScriptConfig(m.id, Object.assign({{ syncLink: raw }}, fields));
+            await this.cloud.setConfig({{ syncLink: raw, deviceName: fields.deviceName, accountLabel: fields.accountLabel }});
+            await this.applyScriptConfig(m.id, {{
+              excludeHosts: fields.excludeHosts,
+              pullIntervalMinutes: fields.pullIntervalMinutes,
+              retentionDays: fields.retentionDays,
+              pushEveryVisit: fields.pushEveryVisit,
+              importToNativeHistory: fields.importToNativeHistory
+            }});
             const curHost = this.storage.getCurrentHost();
             if (this.storage.getScriptMode(m.id, curHost) === 'off') {{
               await this.storage.setScriptMode(m.id, 'on', curHost);
               await this.refreshCurrentSiteModules();
             }}
-            if (setupMsg) setupMsg.textContent = `Connected in ${{test.latencyMs}}ms (${{test.deviceCount}} device(s), ${{test.retentionDays}}d retention). Syncing now...`;
+            if (setupMsg) setupMsg.textContent = `Connected in ${{test.latencyMs}}ms (${{test.deviceCount}} device(s), ${{test.retentionDays}}d retention). Shared with all sync tools.`;
             await m.syncNow(true);
             await refreshView();
           }};
@@ -5172,8 +5795,9 @@ def build():
         if (btnClearLink && inputLink) {{
           btnClearLink.onclick = async () => {{
             inputLink.value = '';
+            await this.cloud.setConfig({{ syncLink: '' }});
             await this.applyScriptConfig(m.id, {{ syncLink: '' }});
-            if (setupMsg) setupMsg.textContent = 'Unlinked from database. Local settings cleared.';
+            if (setupMsg) setupMsg.textContent = 'Unlinked from shared cloud database.';
             await refreshView();
           }};
         }}
@@ -5183,11 +5807,17 @@ def build():
           btnSavePrefs.onclick = async () => {{
             const fields = readSetupFields();
             const rawLink = (inputLink && inputLink.value ? inputLink.value.trim() : '');
-            const patch = Object.assign({{}}, fields);
-            if (rawLink && m.parseSyncLink(rawLink)) patch.syncLink = rawLink;
-            await this.applyScriptConfig(m.id, patch);
-            const curLink = patch.syncLink || (this.storage.getScriptConfig(m.id, this.storage.getCurrentHost()) || {{}}).syncLink || '';
-            if (curLink && m.parseSyncLink(curLink)) {{
+            const cloudPatch = {{ deviceName: fields.deviceName, accountLabel: fields.accountLabel }};
+            if (rawLink && m.parseSyncLink(rawLink)) cloudPatch.syncLink = rawLink;
+            await this.cloud.setConfig(cloudPatch);
+            await this.applyScriptConfig(m.id, {{
+              excludeHosts: fields.excludeHosts,
+              pullIntervalMinutes: fields.pullIntervalMinutes,
+              retentionDays: fields.retentionDays,
+              pushEveryVisit: fields.pushEveryVisit,
+              importToNativeHistory: fields.importToNativeHistory
+            }});
+            if (this.cloud.isConfigured()) {{
               await m.setRetentionDays(fields.retentionDays);
             }}
             if (setupMsg) setupMsg.textContent = `Saved settings (${{fields.deviceName}}, pull every ${{fields.pullIntervalMinutes}}m, ${{fields.retentionDays}}d retention).`;
@@ -5220,6 +5850,359 @@ def build():
           btnCopySql.onclick = () => {{
             const sql = el('#bsync-gen-sql')?.value || '';
             if (sql) copyTextToClipboard(sql);
+          }};
+        }}
+      }} else if (m.id === 'settings-sync') {{
+        const el = (sel) => body.querySelector(sel);
+        const fmtAgo = (ts) => {{
+          if (!ts) return 'never';
+          const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+          if (sec < 60) return `${{sec}}s ago`;
+          if (sec < 3600) return `${{Math.floor(sec / 60)}}m ago`;
+          return `${{Math.floor(sec / 3600)}}h ago`;
+        }};
+
+        const refreshSettingsSync = async () => {{
+          if (typeof m.getStatus !== 'function') return;
+          const st = await m.getStatus();
+          const meta = (st && st.meta) || {{}};
+          const dot = el('#ssync-dot');
+          const lbl = el('#ssync-status-label');
+          const metaLine = el('#ssync-meta-line');
+          const logList = el('#ssync-log-list');
+          if (dot) dot.style.background = meta.lastError ? '#ef4444' : (st.configured ? '#34d399' : '#f59e0b');
+          if (lbl) lbl.textContent = meta.lastError ? 'Sync Error' : (st.configured ? 'Cloud Linked' : 'Not Linked');
+          if (metaLine) {{
+            metaLine.textContent = meta.lastError
+              ? meta.lastError
+              : (st.configured ? `Last sync ${{fmtAgo(meta.lastSyncAt)}} · ${{st.trackedKeys || 0}} tracked key(s)` : 'Configure your shared Sync Link in BESing Settings.');
+          }}
+          if (logList) {{
+            while (logList.firstChild) logList.removeChild(logList.firstChild);
+            const logs = Array.isArray(meta.recentLog) ? meta.recentLog : [];
+            if (logs.length === 0) {{
+              const d = document.createElement('div');
+              d.textContent = 'No remote updates applied yet.';
+              logList.appendChild(d);
+            }} else {{
+              logs.forEach(line => {{
+                const d = document.createElement('div');
+                d.textContent = line;
+                d.style.cssText = 'padding:3px 6px;border-radius:5px;background:rgba(30,41,59,0.55);color:#cbd5e1;';
+                logList.appendChild(d);
+              }});
+            }}
+          }}
+        }};
+        refreshSettingsSync();
+
+        const btnOpenCloud = el('#btn-ssync-open-cloud');
+        if (btnOpenCloud) {{
+          btnOpenCloud.onclick = () => {{
+            this.currentView = 'settings';
+            this.renderBody();
+          }};
+        }}
+
+        const runSync = async (full) => {{
+          const b = el(full ? '#btn-ssync-full' : '#btn-ssync-now');
+          if (b) {{ b.disabled = true; b.textContent = 'Syncing...'; }}
+          await m.syncNow({{ full, force: true }});
+          if (b) {{ b.disabled = false; b.textContent = full ? 'Full' : 'Sync Now'; }}
+          await refreshSettingsSync();
+        }};
+        if (el('#btn-ssync-now')) el('#btn-ssync-now').onclick = () => runSync(false);
+        if (el('#btn-ssync-full')) el('#btn-ssync-full').onclick = () => runSync(true);
+
+        const bindToggle = (sel, key) => {{
+          const c = el(sel);
+          if (c) c.onchange = async () => {{ await this.applyScriptConfig(m.id, {{ [key]: c.checked }}); }};
+        }};
+        bindToggle('#chk-ssync-modes', 'syncModes');
+        bindToggle('#chk-ssync-configs', 'syncConfigs');
+        bindToggle('#chk-ssync-sites', 'syncSites');
+        bindToggle('#chk-ssync-theme', 'syncTheme');
+
+        if (el('#btn-ssync-save')) {{
+          el('#btn-ssync-save').onclick = async () => {{
+            const mins = Math.max(2, Math.min(120, parseInt(el('#ssync-input-pullmin')?.value, 10) || 10));
+            await this.applyScriptConfig(m.id, {{ pullIntervalMinutes: mins }});
+            const metaLine = el('#ssync-meta-line');
+            if (metaLine) metaLine.textContent = `Saved auto-pull interval (${{mins}} min).`;
+          }};
+        }}
+      }} else if (m.id === 'quick-transfer') {{
+        const el = (sel) => body.querySelector(sel);
+        const sendMsg = el('#qtx-send-msg');
+        const listEl = el('#qtx-items-list');
+        const previewBox = el('#qtx-preview-box');
+        const countBadge = el('#qtx-count-badge');
+        const titleInput = el('#qtx-input-title');
+        const textInput = el('#qtx-input-text');
+        const fileInput = el('#qtx-input-file');
+
+        const fmtSize = (n) => {{
+          const v = Number(n) || 0;
+          if (v < 1024) return `${{v}} B`;
+          if (v < 1024 * 1024) return `${{(v / 1024).toFixed(1)}} KB`;
+          return `${{(v / (1024 * 1024)).toFixed(2)}} MB`;
+        }};
+
+        const fmtExpires = (iso) => {{
+          const ms = Date.parse(iso || '') - Date.now();
+          if (!Number.isFinite(ms) || ms <= 0) return 'expiring';
+          const hrs = Math.ceil(ms / 3600000);
+          return `expires in ${{hrs}}h`;
+        }};
+
+        const setMsg = (txt, color = '#94a3b8') => {{
+          if (!sendMsg) return;
+          sendMsg.textContent = txt;
+          sendMsg.style.color = color;
+        }};
+
+        const showPreview = (item) => {{
+          if (!previewBox) return;
+          while (previewBox.firstChild) previewBox.removeChild(previewBox.firstChild);
+          previewBox.style.display = 'block';
+          const hdr = document.createElement('div');
+          hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;';
+          const ttl = document.createElement('span');
+          ttl.textContent = item.title || item.file_name || 'Preview';
+          ttl.style.cssText = 'font-size:11px;font-weight:700;color:#e2e8f0;';
+          const closeBtn = document.createElement('button');
+          closeBtn.type = 'button';
+          closeBtn.textContent = 'Close';
+          closeBtn.style.cssText = 'font-size:10px;padding:2px 7px;border-radius:5px;background:rgba(148,163,184,0.18);border:none;color:#cbd5e1;cursor:pointer;';
+          closeBtn.onclick = () => {{ previewBox.style.display = 'none'; }};
+          hdr.appendChild(ttl);
+          hdr.appendChild(closeBtn);
+          previewBox.appendChild(hdr);
+
+          if (item.kind === 'image') {{
+            const img = document.createElement('img');
+            img.src = `data:${{item.mime_type || 'image/png'}};base64,${{item.content || ''}}`;
+            img.alt = item.title || 'Synced image';
+            img.style.cssText = 'max-width:100%;max-height:240px;border-radius:6px;display:block;margin:0 auto;';
+            previewBox.appendChild(img);
+          }} else {{
+            const ta = document.createElement('textarea');
+            ta.readOnly = true;
+            ta.rows = 6;
+            ta.value = item.content || '';
+            ta.style.cssText = 'width:100%;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid rgba(148,163,184,0.25);border-radius:6px;padding:6px;font-family:monospace;font-size:10.5px;';
+            previewBox.appendChild(ta);
+            const copyFull = document.createElement('button');
+            copyFull.type = 'button';
+            copyFull.textContent = 'Copy Text';
+            copyFull.style.cssText = 'margin-top:6px;font-size:10px;padding:4px 10px;border-radius:6px;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;cursor:pointer;';
+            copyFull.onclick = () => {{
+              copyTextToClipboard(item.content || '').then(ok => setMsg(ok ? 'Copied text to clipboard!' : 'Select and copy from the box above.', ok ? '#34d399' : '#fbbf24'));
+            }};
+            previewBox.appendChild(copyFull);
+          }}
+        }};
+
+        const renderList = async () => {{
+          if (!listEl) return;
+          if (!m.isConfigured()) {{
+            while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
+            p.textContent = 'Configure your shared Sync Link in BESing Settings to send & receive drops.';
+            listEl.appendChild(p);
+            if (countBadge) countBadge.textContent = '0';
+            return;
+          }}
+          const res = await m.listTransfers();
+          while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+          if (!res || !res.ok) {{
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#fca5a5;margin:4px 0;';
+            p.textContent = (res && res.error) || 'Failed to load transfers.';
+            listEl.appendChild(p);
+            return;
+          }}
+          const items = res.items || [];
+          if (countBadge) countBadge.textContent = `${{items.length}} active`;
+          if (items.length === 0) {{
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
+            p.textContent = 'No active drops. Send text, paste a screenshot (Ctrl+V), or upload a file above.';
+            listEl.appendChild(p);
+            return;
+          }}
+
+          items.forEach(item => {{
+            const card = document.createElement('div');
+            card.style.cssText = 'padding:7px 8px;border-radius:8px;background:rgba(30,41,59,0.55);border:1px solid rgba(148,163,184,0.16);display:flex;flex-direction:column;gap:4px;';
+
+            const top = document.createElement('div');
+            top.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;';
+            const left = document.createElement('div');
+            left.style.cssText = 'min-width:0;flex:1;';
+            const titleEl = document.createElement('div');
+            titleEl.textContent = item.title || item.file_name || 'Untitled';
+            titleEl.style.cssText = 'font-size:11.5px;font-weight:700;color:#f1f5f9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+            const metaEl = document.createElement('div');
+            metaEl.textContent = `${{(item.kind || 'text').toUpperCase()}} · ${{fmtSize(item.size_bytes)}} · ${{item.sender_name || 'Device'}} · ${{fmtExpires(item.expires_at)}}`;
+            metaEl.style.cssText = 'font-size:9.5px;color:#94a3b8;';
+            left.appendChild(titleEl);
+            left.appendChild(metaEl);
+            top.appendChild(left);
+            card.appendChild(top);
+
+            if (item.preview_text) {{
+              const prev = document.createElement('div');
+              prev.textContent = item.preview_text;
+              prev.style.cssText = 'font-size:10px;color:#cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:rgba(15,23,42,0.5);padding:3px 6px;border-radius:5px;';
+              card.appendChild(prev);
+            }}
+
+            const actions = document.createElement('div');
+            actions.style.cssText = 'display:flex;gap:5px;flex-wrap:wrap;margin-top:2px;';
+            const mkBtn = (label, colorCss, handler) => {{
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.textContent = label;
+              b.style.cssText = `font-size:10px;padding:3px 8px;border-radius:6px;cursor:pointer;${{colorCss}}`;
+              b.onclick = handler;
+              return b;
+            }};
+
+            if (item.kind === 'text') {{
+              if (item.inline_text !== null && item.inline_text !== undefined) {{
+                // Synchronous tap -> clipboard copy works cleanly on iOS Safari!
+                actions.appendChild(mkBtn('Copy', 'background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;font-weight:600;', () => {{
+                  copyTextToClipboard(item.inline_text).then(ok => setMsg(ok ? `Copied "${{item.title}}"` : 'Copy blocked — click View to copy manually.', ok ? '#34d399' : '#fbbf24'));
+                }}));
+              }}
+              actions.appendChild(mkBtn('View', 'background:rgba(99,102,241,0.18);border:1px solid rgba(99,102,241,0.4);color:#a5b4fc;', async () => {{
+                if (item.inline_text !== null && item.inline_text !== undefined) {{
+                  showPreview(Object.assign({{}}, item, {{ content: item.inline_text }}));
+                }} else {{
+                  setMsg('Downloading text...');
+                  const full = await m.fetchTransfer(item.id);
+                  if (full && full.ok) {{ setMsg(''); showPreview(full.item); }}
+                  else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+                }}
+              }}));
+            }} else if (item.kind === 'image') {{
+              actions.appendChild(mkBtn('Preview', 'background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#c084fc;font-weight:600;', async () => {{
+                setMsg('Downloading image...');
+                const full = await m.fetchTransfer(item.id);
+                if (full && full.ok) {{ setMsg(''); showPreview(full.item); }}
+                else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+              }}));
+              actions.appendChild(mkBtn('Download', 'background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;', async () => {{
+                setMsg('Downloading image...');
+                const full = await m.fetchTransfer(item.id);
+                if (full && full.ok) {{ m.triggerDownload(full.item); setMsg('Downloaded!', '#34d399'); }}
+                else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+              }}));
+            }} else {{
+              actions.appendChild(mkBtn('Download', 'background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;font-weight:600;', async () => {{
+                setMsg('Downloading file...');
+                const full = await m.fetchTransfer(item.id);
+                if (full && full.ok) {{ m.triggerDownload(full.item); setMsg('Downloaded!', '#34d399'); }}
+                else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+              }}));
+            }}
+
+            actions.appendChild(mkBtn('Delete', 'background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.35);color:#fca5a5;margin-left:auto;', async () => {{
+              const d = await m.deleteTransfer(item.id);
+              if (d && d.ok) {{ setMsg('Deleted.'); renderList(); }}
+              else setMsg((d && d.error) || 'Delete failed', '#fca5a5');
+            }}));
+
+            card.appendChild(actions);
+            listEl.appendChild(card);
+          }});
+        }};
+
+        renderList();
+
+        if (el('#btn-qtx-open-cloud')) {{
+          el('#btn-qtx-open-cloud').onclick = () => {{
+            this.currentView = 'settings';
+            this.renderBody();
+          }};
+        }}
+        if (el('#btn-qtx-refresh')) el('#btn-qtx-refresh').onclick = () => renderList();
+
+        // Direct Ctrl+V clipboard image capture right inside the text box!
+        if (textInput) {{
+          textInput.addEventListener('paste', async (ev) => {{
+            const items = ev.clipboardData && ev.clipboardData.items ? Array.from(ev.clipboardData.items) : [];
+            const imgItem = items.find(i => i.type && i.type.startsWith('image/'));
+            if (!imgItem) return;
+            ev.preventDefault();
+            const blob = imgItem.getAsFile();
+            if (!blob) return;
+            setMsg('Uploading pasted image...', '#38bdf8');
+            const res = await m.sendBlob(blob, {{ title: (titleInput?.value || '').trim() }});
+            if (res && res.ok) {{
+              if (titleInput) titleInput.value = '';
+              setMsg(`Uploaded image "${{res.item.title}}" (${{fmtSize(res.item.size_bytes)}}).`, '#34d399');
+              renderList();
+            }} else {{
+              setMsg((res && res.error) || 'Image upload failed', '#fca5a5');
+            }}
+          }});
+        }}
+
+        if (el('#btn-qtx-send-text')) {{
+          el('#btn-qtx-send-text').onclick = async () => {{
+            const txt = textInput ? textInput.value : '';
+            const ttl = titleInput ? titleInput.value : '';
+            setMsg('Sending text...', '#38bdf8');
+            const res = await m.sendText(txt, ttl);
+            if (res && res.ok) {{
+              if (textInput) textInput.value = '';
+              if (titleInput) titleInput.value = '';
+              setMsg(`Sent "${{res.item.title}}" (${{fmtSize(res.item.size_bytes)}}). Expires in 48h.`, '#34d399');
+              renderList();
+            }} else {{
+              setMsg((res && res.error) || 'Send failed', '#fca5a5');
+            }}
+          }};
+        }}
+
+        if (el('#btn-qtx-paste-img')) {{
+          el('#btn-qtx-paste-img').onclick = async () => {{
+            setMsg('Reading clipboard image...', '#c084fc');
+            const clip = await m.readClipboardImage();
+            if (!clip || !clip.ok) {{
+              setMsg((clip && clip.error) || 'No image on clipboard', '#fbbf24');
+              return;
+            }}
+            setMsg('Uploading clipboard image...', '#38bdf8');
+            const res = await m.sendBlob(clip.blob, {{ title: (titleInput?.value || '').trim() }});
+            if (res && res.ok) {{
+              if (titleInput) titleInput.value = '';
+              setMsg(`Uploaded "${{res.item.title}}" (${{fmtSize(res.item.size_bytes)}}).`, '#34d399');
+              renderList();
+            }} else {{
+              setMsg((res && res.error) || 'Upload failed', '#fca5a5');
+            }}
+          }};
+        }}
+
+        if (el('#btn-qtx-pick-file') && fileInput) {{
+          el('#btn-qtx-pick-file').onclick = () => fileInput.click();
+          fileInput.onchange = async () => {{
+            const file = fileInput.files && fileInput.files[0];
+            fileInput.value = '';
+            if (!file) return;
+            setMsg(`Uploading ${{file.name}}...`, '#38bdf8');
+            const res = await m.sendBlob(file, {{ title: (titleInput?.value || '').trim(), fileName: file.name }});
+            if (res && res.ok) {{
+              if (titleInput) titleInput.value = '';
+              setMsg(`Uploaded "${{res.item.title}}" (${{fmtSize(res.item.size_bytes)}}).`, '#34d399');
+              renderList();
+            }} else {{
+              setMsg((res && res.error) || 'File upload failed', '#fca5a5');
+            }}
           }};
         }}
       }} else if (m.id === 'prevent-redirect') {{

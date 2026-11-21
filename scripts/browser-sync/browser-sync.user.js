@@ -67,6 +67,19 @@
     // Runtime & Helpers
     // -----------------------------------------------------------------------
 
+    _getCloudConfig() {
+      const cfg = this._config || {};
+      const mgr = this._manager();
+      const cloud = (mgr && mgr.cloud && typeof mgr.cloud.getConfig === 'function')
+        ? mgr.cloud.getConfig()
+        : {};
+      return {
+        syncLink: (cloud.syncLink && String(cloud.syncLink).trim()) || (cfg.syncLink && String(cfg.syncLink).trim()) || '',
+        deviceName: (cloud.deviceName && String(cloud.deviceName).trim()) || (cfg.deviceName && String(cfg.deviceName).trim()) || this.defaultDeviceName(),
+        accountLabel: (cloud.accountLabel && String(cloud.accountLabel).trim()) || (cfg.accountLabel && String(cfg.accountLabel).trim()) || ''
+      };
+    },
+
     _manager() {
       const inst = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
                    (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
@@ -548,7 +561,8 @@
     async _recordCurrentVisit({ forcePush = false } = {}) {
       if (!this._active || this.isExtensionMode()) return;
       const cfg = this._config || {};
-      const creds = this.parseSyncLink(cfg.syncLink || '');
+      const cloud = this._getCloudConfig();
+      const creds = this.parseSyncLink(cloud.syncLink);
       if (!creds) return;
 
       const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(cfg));
@@ -628,7 +642,8 @@
     async _userscriptPush({ includeTabs = true, keepalive = false, force = false } = {}) {
       if (this._pushInFlight && !keepalive) return { ok: true, busy: true };
       const cfg = this._config || {};
-      const creds = this.parseSyncLink(cfg.syncLink || '');
+      const cloud = this._getCloudConfig();
+      const creds = this.parseSyncLink(cloud.syncLink);
       if (!creds) return { ok: false, skipped: true };
 
       this._pushInFlight = true;
@@ -648,11 +663,11 @@
 
         const payload = {
           instance_id: meta.instanceId,
-          device_name: (cfg.deviceName && String(cfg.deviceName).trim()) || this.defaultDeviceName(),
+          device_name: cloud.deviceName,
           browser: this.detectBrowser(),
           platform: this.detectPlatform(),
           mode: 'userscript',
-          account_label: (cfg.accountLabel && String(cfg.accountLabel).trim()) || ''
+          account_label: cloud.accountLabel
         };
         if (tabs) payload.tabs = tabs.slice(0, 50);
         if (histBatch.length > 0) payload.history = histBatch;
@@ -698,7 +713,8 @@
     async _userscriptPull({ full = false, force = false } = {}) {
       if (this._pullInFlight) return { ok: true, busy: true };
       const cfg = this._config || {};
-      const creds = this.parseSyncLink(cfg.syncLink || '');
+      const cloud = this._getCloudConfig();
+      const creds = this.parseSyncLink(cloud.syncLink);
       if (!creds) return { ok: false, skipped: true };
 
       const cache = await this._getCache();
@@ -821,7 +837,7 @@
       if (this.isExtensionMode()) {
         return await this._sendExt({ type: 'besing-sync:get-state' });
       }
-      const cfg = this._config || {};
+      const cloud = this._getCloudConfig();
       const meta = await this._ensureMeta();
       const cache = await this._getCache();
       const stats = await this._readShared(this.SHARED_STATS_KEY, null);
@@ -832,7 +848,7 @@
         detectedEmail: '',
         browser: this.detectBrowser(),
         platform: this.detectPlatform(),
-        configured: Boolean(this.parseSyncLink(cfg.syncLink || '')),
+        configured: Boolean(this.parseSyncLink(cloud.syncLink)),
         enabled: this._active,
         cache,
         stats
@@ -923,7 +939,7 @@
       if (this.isExtensionMode()) {
         return await this._sendExt({ type: 'besing-sync:delete-device', instanceId });
       }
-      const creds = this.parseSyncLink((this._config && this._config.syncLink) || '');
+      const creds = this.parseSyncLink(this._getCloudConfig().syncLink);
       if (!creds) return { ok: false, error: 'Not configured' };
       try {
         await this._rpc(creds, 'besing_sync_delete_device', {
@@ -942,7 +958,7 @@
       if (this.isExtensionMode()) {
         return await this._sendExt({ type: 'besing-sync:set-retention', days: d });
       }
-      const creds = this.parseSyncLink((this._config && this._config.syncLink) || '');
+      const creds = this.parseSyncLink(this._getCloudConfig().syncLink);
       if (!creds) return { ok: false, error: 'Not configured' };
       try {
         const res = await this._rpc(creds, 'besing_sync_set_retention', {
