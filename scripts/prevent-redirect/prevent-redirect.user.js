@@ -790,6 +790,9 @@
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
           return;
         }
+        if (e.isTrusted && isZapperUIEvent(e)) {
+          return;
+        }
         self._recordUserClick(e);
         const link = e.target && e.target.closest ? e.target.closest('a') : null;
         if (!link) return;

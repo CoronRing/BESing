@@ -16,6 +16,8 @@
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @connect      *
+// @connect      supabase.co
+// @connect      *.supabase.co
 // @connect      raw.githubusercontent.com
 // @connect      github.com
 // @connect      update.greasyfork.org

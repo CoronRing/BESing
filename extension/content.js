@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.9.3
+ * Version 1.10.0
  */
 
 (function () {
@@ -13,7 +13,7 @@
   })();
   const FRAME_SAFE_MODULES = new Set(['prevent-redirect', 'force-copy']);
   // Modules whose settings drive state shared by every site, so they cannot be locked to one site.
-  const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder']);
+  const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder', 'browser-sync']);
 
   // Ownership claim shared by every JS world (userscript sandboxes, extension content scripts, page).
   // Worlds do not share globals, and <html> may not exist yet at document-start, but they do share
@@ -687,7 +687,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.9.3',
+          v: '1.10.0',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -874,7 +874,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.9.3), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.10.0), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -3956,6 +3956,9 @@
         if (typeof window !== 'undefined' && window.__BESING_ZAPPER_ACTIVE__) {
           return;
         }
+        if (e.isTrusted && isZapperUIEvent(e)) {
+          return;
+        }
         self._recordUserClick(e);
         const link = e.target && e.target.closest ? e.target.closest('a') : null;
         if (!link) return;
@@ -6978,12 +6981,1084 @@
       mod.author = "BESing Team";
       mod.category = "Tools";
       return mod;
+    })(),
+
+    // Module: Browser Sync
+    (() => {
+      const mod = {
+    id: 'browser-sync',
+    name: 'Browser Sync',
+    version: '1.0.0',
+    description: 'Sync open tabs, tab groups, 7-day history, closed tabs, and active usage time across PC Edge, Safari (Stay), and multiple devices via your own Supabase database.',
+    category: 'Sync',
+
+    SHARED_CACHE_KEY: 'browser_sync_cache',
+    SHARED_STATS_KEY: 'browser_sync_stats',
+    SHARED_META_KEY: 'browser_sync_meta',
+    SHARED_PENDING_KEY: 'browser_sync_pending',
+    SHARED_TABS_KEY: 'browser_sync_tabs',
+    SHARED_DEDUP_KEY: 'browser_sync_dedup',
+
+    SENSITIVE_PARAMS: [
+      'token', 'access_token', 'id_token', 'refresh_token', 'auth', 'auth_token',
+      'key', 'apikey', 'api_key', 'secret', 'password', 'passwd', 'pwd',
+      'session', 'sessionid', 'session_id', 'sid', 'code', 'state', 'sig',
+      'signature', 'jwt', 'bearer', 'oauth', 'nonce', 'csrf', 'xsrf',
+      'credential', 'credentials', 'private_key', 'client_secret'
+    ],
+    TRACKING_PARAMS: [
+      'fbclid', 'gclid', 'dclid', 'msclkid', 'mc_cid', 'mc_eid',
+      'ref_src', 'ref_url', 'igshid', 'sxsrf', 'ved', 'ei'
+    ],
+
+    _config: null,
+    _active: false,
+    _tabId: null,
+    _lastUrl: '',
+    _lastActivityTs: 0,
+    _activeSegmentStart: 0,
+    _usageTimer: null,
+    _pullCheckTimer: null,
+    _visitDelayTimer: null,
+    _boundVisibility: null,
+    _boundPageHide: null,
+    _boundActivity: null,
+    _boundRouteChange: null,
+    _origPushState: null,
+    _origReplaceState: null,
+    _pushInFlight: false,
+    _pullInFlight: false,
+
+    // -----------------------------------------------------------------------
+    // Runtime & Helpers
+    // -----------------------------------------------------------------------
+
+    _manager() {
+      const inst = (typeof window !== 'undefined' && window.__BESING_INSTANCE__) ||
+                   (typeof unsafeWindow !== 'undefined' && unsafeWindow.__BESING_INSTANCE__);
+      return inst && !inst.disposed ? inst : null;
+    },
+
+    isExtensionMode() {
+      return typeof chrome !== 'undefined' && !!chrome.runtime && typeof chrome.runtime.sendMessage === 'function';
+    },
+
+    _sendExt(msg) {
+      return new Promise((resolve) => {
+        if (!this.isExtensionMode()) {
+          resolve({ ok: false, error: 'Not in extension mode' });
+          return;
+        }
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            resolve({ ok: false, error: 'Extension background worker timed out' });
+          }
+        }, 12000);
+        try {
+          chrome.runtime.sendMessage(msg, (resp) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (chrome.runtime && chrome.runtime.lastError) {
+              resolve({ ok: false, error: chrome.runtime.lastError.message });
+            } else {
+              resolve(resp || { ok: false, error: 'Empty response from background worker' });
+            }
+          });
+        } catch (e) {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve({ ok: false, error: e.message || String(e) });
+          }
+        }
+      });
+    },
+
+    async _readShared(key, fallback) {
+      const mgr = this._manager();
+      if (mgr && typeof mgr.readSharedState === 'function') {
+        try {
+          const val = await mgr.readSharedState(key, fallback);
+          return val !== undefined ? val : fallback;
+        } catch (e) {}
+      }
+      if (typeof GM_getValue === 'function') {
+        try {
+          const raw = GM_getValue('shared_' + key, undefined);
+          if (raw !== undefined) return raw;
+        } catch (e) {}
+      }
+      try {
+        const s = window.localStorage.getItem('besing_shared_' + key);
+        return s ? JSON.parse(s) : fallback;
+      } catch (e) {
+        return fallback;
+      }
+    },
+
+    async _writeShared(key, val) {
+      const mgr = this._manager();
+      if (mgr && typeof mgr.writeSharedState === 'function') {
+        try {
+          await mgr.writeSharedState(key, val);
+          return true;
+        } catch (e) {}
+      }
+      if (typeof GM_setValue === 'function') {
+        try {
+          GM_setValue('shared_' + key, val);
+          return true;
+        } catch (e) {}
+      }
+      try {
+        window.localStorage.setItem('besing_shared_' + key, JSON.stringify(val));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    },
+
+    _b64UrlEncode(str) {
+      const bytes = new TextEncoder().encode(String(str || ''));
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    },
+
+    _b64UrlDecode(str) {
+      let b64 = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4) b64 += '=';
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    },
+
+    parseSyncLink(raw) {
+      const s = String(raw || '').trim();
+      if (!s) return null;
+      try {
+        let payloadStr = s;
+        if (s.startsWith('besing-sync://')) {
+          payloadStr = this._b64UrlDecode(s.slice('besing-sync://'.length));
+        } else if (!s.startsWith('{')) {
+          return null;
+        }
+        const obj = JSON.parse(payloadStr);
+        const url = String(obj.u || obj.url || '').trim().replace(/\/+$/, '');
+        const key = String(obj.k || obj.anonKey || obj.key || '').trim();
+        const secret = String(obj.s || obj.secret || '').trim();
+        if (!url || !key || !secret || secret.length < 16) return null;
+        const isHttps = url.startsWith('https://');
+        const isLocalTest = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(url);
+        if (!isHttps && !isLocalTest) return null;
+        return { url, key, secret };
+      } catch (e) {
+        return null;
+      }
+    },
+
+    buildSyncLink(url, anonKey, secret) {
+      const cleanUrl = String(url || '').trim().replace(/\/+$/, '');
+      const cleanKey = String(anonKey || '').trim();
+      const cleanSecret = String(secret || '').trim();
+      if (!cleanUrl || !cleanKey || cleanSecret.length < 16) return null;
+      return 'besing-sync://' + this._b64UrlEncode(JSON.stringify({ v: 1, u: cleanUrl, k: cleanKey, s: cleanSecret }));
+    },
+
+    generateRandomSecret() {
+      const bytes = new Uint8Array(32);
+      if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+        crypto.getRandomValues(bytes);
+      } else {
+        for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+      }
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    },
+
+    async sha256Hex(text) {
+      const bytes = new TextEncoder().encode(String(text || ''));
+      if (typeof crypto !== 'undefined' && crypto.subtle && typeof crypto.subtle.digest === 'function') {
+        try {
+          const digest = await crypto.subtle.digest('SHA-256', bytes);
+          return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+        } catch (e) {}
+      }
+      // Pure JS SHA-256 fallback for non-HTTPS contexts (e.g. local demo server).
+      const K = [
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+      ];
+      let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+      const bitLen = bytes.length * 8;
+      const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
+      const buf = new Uint8Array(paddedLen);
+      buf.set(bytes);
+      buf[bytes.length] = 0x80;
+      const view = new DataView(buf.buffer);
+      view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
+      view.setUint32(paddedLen - 4, bitLen >>> 0, false);
+      const w = new Uint32Array(64);
+      const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+      for (let off = 0; off < paddedLen; off += 64) {
+        for (let i = 0; i < 16; i++) w[i] = view.getUint32(off + i * 4, false);
+        for (let i = 16; i < 64; i++) {
+          const s0 = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >>> 3);
+          const s1 = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >>> 10);
+          w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0;
+        }
+        let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
+        for (let i = 0; i < 64; i++) {
+          const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+          const ch = (e & f) ^ (~e & g);
+          const t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+          const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+          const maj = (a & b) ^ (a & c) ^ (b & c);
+          const t2 = (S0 + maj) >>> 0;
+          h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+        }
+        h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0;
+        h4=(h4+e)>>>0; h5=(h5+f)>>>0; h6=(h6+g)>>>0; h7=(h7+h)>>>0;
+      }
+      return [h0,h1,h2,h3,h4,h5,h6,h7].map(v => v.toString(16).padStart(8, '0')).join('');
+    },
+
+    async generateSetupBundle(supabaseUrl, anonKey, retentionDays = 7) {
+      const cleanUrl = String(supabaseUrl || '').trim().replace(/\/+$/, '');
+      const cleanKey = String(anonKey || '').trim();
+      const isHttps = cleanUrl.startsWith('https://');
+      const isLocal = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(cleanUrl);
+      if (!cleanUrl || (!isHttps && !isLocal)) {
+        return { ok: false, error: 'Supabase URL must start with https://' };
+      }
+      if (!cleanKey || cleanKey.length < 16) {
+        return { ok: false, error: 'Paste your Supabase publishable/anon key (never the service_role key).' };
+      }
+      const secret = this.generateRandomSecret();
+      const spaceHash = await this.sha256Hex(secret);
+      const syncLink = this.buildSyncLink(cleanUrl, cleanKey, secret);
+      const days = Math.max(1, Math.min(90, Number(retentionDays) || 7));
+      const sql = `insert into public.besing_sync_spaces (space_hash, label, retention_days)\nvalues ('${spaceHash}', 'personal', ${days})\non conflict (space_hash) do nothing;`;
+      return { ok: true, syncLink, spaceHash, sql };
+    },
+
+    detectBrowser() {
+      const ua = (typeof navigator !== 'undefined' && navigator.userAgent) ? navigator.userAgent : '';
+      if (/EdgiOS|EdgA|Edg\//i.test(ua)) return 'edge';
+      if (/CriOS/i.test(ua)) return 'chrome';
+      if (/FxiOS|Firefox\//i.test(ua)) return 'firefox';
+      if (/OPR\/|OPiOS/i.test(ua)) return 'opera';
+      if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua)) return 'safari';
+      if (/Chrome\//i.test(ua)) return 'chrome';
+      return 'browser';
+    },
+
+    detectPlatform() {
+      const ua = (typeof navigator !== 'undefined' && navigator.userAgent) ? navigator.userAgent : '';
+      const maxTouch = (typeof navigator !== 'undefined' && navigator.maxTouchPoints) ? navigator.maxTouchPoints : 0;
+      if (/iPad/i.test(ua) || (/Macintosh/i.test(ua) && maxTouch > 1)) return 'ipados';
+      if (/iPhone|iPod/i.test(ua)) return 'ios';
+      if (/Android/i.test(ua)) return 'android';
+      if (/Windows/i.test(ua)) return 'windows';
+      if (/Macintosh|Mac OS/i.test(ua)) return 'macos';
+      if (/Linux/i.test(ua)) return 'linux';
+      return 'web';
+    },
+
+    defaultDeviceName() {
+      const p = this.detectPlatform();
+      if (p === 'ios') return 'iPhone';
+      if (p === 'ipados') return 'iPad';
+      if (p === 'windows') return 'Windows-PC';
+      if (p === 'macos') return 'Mac';
+      if (p === 'android') return 'Android';
+      return 'Device';
+    },
+
+    _todayStr() {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    },
+
+    _parseExcludeHosts(cfg) {
+      const raw = (cfg && typeof cfg.excludeHosts === 'string') ? cfg.excludeHosts : '';
+      return raw.split(/[\s,;]+/).map(h => h.trim().toLowerCase()).filter(Boolean);
+    },
+
+    sanitizeUrl(rawUrl, excludeList = []) {
+      if (!rawUrl || typeof rawUrl !== 'string') return null;
+      let parsed;
+      try { parsed = new URL(rawUrl.trim()); } catch (e) { return null; }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+      const host = (parsed.hostname || '').toLowerCase();
+      if (!host) return null;
+      for (let i = 0; i < excludeList.length; i++) {
+        const rule = excludeList[i];
+        if (host === rule || host.endsWith('.' + rule)) return null;
+      }
+      parsed.username = '';
+      parsed.password = '';
+      parsed.hash = '';
+
+      const sens = new Set(this.SENSITIVE_PARAMS);
+      const track = new Set(this.TRACKING_PARAMS);
+      const del = [];
+      parsed.searchParams.forEach((_, k) => {
+        const lk = k.toLowerCase();
+        if (sens.has(lk) || track.has(lk) || lk.startsWith('utm_')) del.push(k);
+      });
+      for (let i = 0; i < del.length; i++) parsed.searchParams.delete(del[i]);
+
+      let clean = parsed.toString();
+      if (clean.length > 500) clean = clean.slice(0, 500);
+      return { url: clean, host: host.slice(0, 160) };
+    },
+
+    _cleanTitle(raw) {
+      let s = String(raw || '').replace(/\s+/g, ' ').trim();
+      if (/^https?:\/\//i.test(s)) {
+        const cleaned = this.sanitizeUrl(s, []);
+        s = cleaned ? cleaned.url : '';
+      }
+      const re = new RegExp('([?&])(' + this.SENSITIVE_PARAMS.join('|') + ')=[^&\\s#]+', 'gi');
+      s = s.replace(re, '$1$2=[redacted]');
+      return s.slice(0, 200);
+    },
+
+    // -----------------------------------------------------------------------
+    // Userscript-Mode State & Network RPC
+    // -----------------------------------------------------------------------
+
+    async _ensureMeta() {
+      let meta = await this._readShared(this.SHARED_META_KEY, null);
+      if (!meta || !meta.instanceId) {
+        const bytes = new Uint8Array(10);
+        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+          crypto.getRandomValues(bytes);
+        } else {
+          for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+        }
+        const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        meta = { instanceId: 'usr-' + hex, createdAt: Date.now() };
+        await this._writeShared(this.SHARED_META_KEY, meta);
+      }
+      return meta;
+    },
+
+    _getTabId() {
+      if (this._tabId) return this._tabId;
+      try {
+        let id = window.sessionStorage.getItem('__besing_sync_tab_id__');
+        if (!id) {
+          id = 't-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+          window.sessionStorage.setItem('__besing_sync_tab_id__', id);
+        }
+        this._tabId = id;
+        return id;
+      } catch (e) {
+        this._tabId = 't-' + Math.random().toString(36).slice(2, 10);
+        return this._tabId;
+      }
+    },
+
+    async _getCache() {
+      const c = await this._readShared(this.SHARED_CACHE_KEY, null);
+      if (c && typeof c === 'object') {
+        return {
+          devices: Array.isArray(c.devices) ? c.devices : [],
+          history: Array.isArray(c.history) ? c.history : [],
+          usage: Array.isArray(c.usage) ? c.usage : [],
+          lastServerTime: c.lastServerTime || null,
+          lastPullAt: Number(c.lastPullAt) || 0,
+          lastPushAt: Number(c.lastPushAt) || 0,
+          pullLockUntil: Number(c.pullLockUntil) || 0,
+          lastError: c.lastError || null,
+          retentionDays: Number(c.retentionDays) || 7
+        };
+      }
+      return {
+        devices: [], history: [], usage: [],
+        lastServerTime: null, lastPullAt: 0, lastPushAt: 0, pullLockUntil: 0,
+        lastError: null, retentionDays: 7
+      };
+    },
+
+    async _recordTraffic(kind, bytesSent, bytesReceived) {
+      const today = this._todayStr();
+      const s = (await this._readShared(this.SHARED_STATS_KEY, null)) || {
+        day: today, bytesSentToday: 0, bytesReceivedToday: 0, pushesToday: 0, pullsToday: 0,
+        bytesSentTotal: 0, bytesReceivedTotal: 0, pushesTotal: 0, pullsTotal: 0
+      };
+      if (s.day !== today) {
+        s.day = today; s.bytesSentToday = 0; s.bytesReceivedToday = 0; s.pushesToday = 0; s.pullsToday = 0;
+      }
+      s.bytesSentToday += bytesSent;
+      s.bytesReceivedToday += bytesReceived;
+      s.bytesSentTotal += bytesSent;
+      s.bytesReceivedTotal += bytesReceived;
+      if (kind === 'push') { s.pushesToday += 1; s.pushesTotal += 1; }
+      if (kind === 'pull') { s.pullsToday += 1; s.pullsTotal += 1; }
+      await this._writeShared(this.SHARED_STATS_KEY, s);
+      return s;
+    },
+
+    _rpc(creds, fnName, bodyObj, trafficKind, { keepalive = false } = {}) {
+      const endpoint = `${creds.url}/rest/v1/rpc/${fnName}`;
+      const bodyStr = JSON.stringify(bodyObj);
+      const bytesSent = new TextEncoder().encode(bodyStr).length;
+      const headers = {
+        'apikey': creds.key,
+        'Authorization': `Bearer ${creds.key}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      };
+
+      const doFetch = async () => {
+        const opts = { method: 'POST', headers, body: bodyStr };
+        if (keepalive && bytesSent < 60000) opts.keepalive = true;
+        const res = await fetch(endpoint, opts);
+        const text = await res.text();
+        const bytesReceived = new TextEncoder().encode(text).length;
+        await this._recordTraffic(trafficKind, bytesSent, bytesReceived);
+        if (!res.ok) {
+          let msg = `HTTP ${res.status}`;
+          try { const j = JSON.parse(text); if (j && j.message) msg = `${res.status}: ${j.message}`; } catch (e) {}
+          throw new Error(msg);
+        }
+        return text ? JSON.parse(text) : {};
+      };
+
+      // On pagehide/keepalive, native fetch({keepalive:true}) survives unload better than GM_xmlhttpRequest.
+      if (keepalive || typeof GM_xmlhttpRequest !== 'function') {
+        return doFetch();
+      }
+
+      return new Promise((resolve, reject) => {
+        let done = false;
+        try {
+          GM_xmlhttpRequest({
+            method: 'POST',
+            url: endpoint,
+            headers,
+            data: bodyStr,
+            timeout: 12000,
+            onload: async (res) => {
+              if (done) return;
+              done = true;
+              const text = res.responseText || '';
+              const bytesReceived = new TextEncoder().encode(text).length;
+              await this._recordTraffic(trafficKind, bytesSent, bytesReceived);
+              if (res.status >= 200 && res.status < 300) {
+                try { resolve(text ? JSON.parse(text) : {}); } catch (e) { resolve({}); }
+              } else {
+                let msg = `HTTP ${res.status}`;
+                try { const j = JSON.parse(text); if (j && j.message) msg = `${res.status}: ${j.message}`; } catch (e) {}
+                reject(new Error(msg));
+              }
+            },
+            onerror: () => {
+              if (done) return;
+              done = true;
+              // Fallback to native fetch (Supabase PostgREST supports CORS *).
+              doFetch().then(resolve, reject);
+            },
+            ontimeout: () => {
+              if (done) return;
+              done = true;
+              reject(new Error('Request timed out'));
+            }
+          });
+        } catch (e) {
+          if (!done) {
+            done = true;
+            doFetch().then(resolve, reject);
+          }
+        }
+      });
+    },
+
+    async _updateActiveTabRecord(clean, title, remove = false) {
+      const tabId = this._getTabId();
+      const now = Date.now();
+      const cutoff = now - 24 * 60 * 60 * 1000;
+      const list = (await this._readShared(this.SHARED_TABS_KEY, [])) || [];
+      const filtered = list.filter(t => t && t.id !== tabId && (Date.parse(t.lastActiveAt || 0) >= cutoff));
+      if (!remove && clean) {
+        filtered.unshift({
+          id: tabId,
+          url: clean.url,
+          title: this._cleanTitle(title || clean.host),
+          groupId: '',
+          windowId: '',
+          active: document.visibilityState === 'visible',
+          pinned: false,
+          lastActiveAt: new Date(now).toISOString()
+        });
+      }
+      const next = filtered.slice(0, 50);
+      await this._writeShared(this.SHARED_TABS_KEY, next);
+      return next;
+    },
+
+    async _recordCurrentVisit({ forcePush = false } = {}) {
+      if (!this._active || this.isExtensionMode()) return;
+      const cfg = this._config || {};
+      const creds = this.parseSyncLink(cfg.syncLink || '');
+      if (!creds) return;
+
+      const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(cfg));
+      if (!clean) return;
+      const title = this._cleanTitle(document.title || clean.host);
+      this._lastUrl = clean.url;
+
+      await this._updateActiveTabRecord(clean, title, false);
+
+      // Client-side 60s dedup so refreshes/SPA jitter never bloat history.
+      const now = Date.now();
+      const dedup = (await this._readShared(this.SHARED_DEDUP_KEY, {})) || {};
+      const prevTs = Number(dedup[clean.url]) || 0;
+      let queuedVisit = false;
+
+      if (now - prevTs >= 60000) {
+        dedup[clean.url] = now;
+        // Trim dedup map so GM storage stays tiny.
+        const keys = Object.keys(dedup);
+        if (keys.length > 150) {
+          for (let i = 0; i < keys.length; i++) {
+            if (now - Number(dedup[keys[i]]) > 180000) delete dedup[keys[i]];
+          }
+        }
+        await this._writeShared(this.SHARED_DEDUP_KEY, dedup);
+
+        const pending = (await this._readShared(this.SHARED_PENDING_KEY, null)) || { history: [], usage: {} };
+        if (!Array.isArray(pending.history)) pending.history = [];
+        if (!pending.usage || typeof pending.usage !== 'object') pending.usage = {};
+
+        pending.history.push({
+          url: clean.url,
+          host: clean.host,
+          title,
+          visitedAt: new Date(now).toISOString()
+        });
+        if (pending.history.length > 100) pending.history = pending.history.slice(-100);
+
+        const uKey = `${this._todayStr()}|${clean.host}`;
+        if (!pending.usage[uKey]) pending.usage[uKey] = { day: this._todayStr(), host: clean.host, seconds: 0, visits: 0 };
+        pending.usage[uKey].visits += 1;
+
+        await this._writeShared(this.SHARED_PENDING_KEY, pending);
+        queuedVisit = true;
+      }
+
+      if ((queuedVisit && cfg.pushEveryVisit !== false) || forcePush) {
+        await this._userscriptPush({ includeTabs: true });
+      }
+    },
+
+    async _commitUsageSegment() {
+      if (!this._activeSegmentStart || this.isExtensionMode()) return;
+      const now = Date.now();
+      const start = this._activeSegmentStart;
+      this._activeSegmentStart = (document.visibilityState === 'visible') ? now : 0;
+
+      // Only count time if user interacted recently (within 65s).
+      const activeEnd = Math.min(now, (this._lastActivityTs || now) + 65000);
+      const elapsedSec = Math.round((activeEnd - start) / 1000);
+      if (elapsedSec < 2 || elapsedSec > 3600) return;
+
+      const cfg = this._config || {};
+      const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(cfg));
+      if (!clean) return;
+
+      const pending = (await this._readShared(this.SHARED_PENDING_KEY, null)) || { history: [], usage: {} };
+      if (!Array.isArray(pending.history)) pending.history = [];
+      if (!pending.usage || typeof pending.usage !== 'object') pending.usage = {};
+
+      const uKey = `${this._todayStr()}|${clean.host}`;
+      if (!pending.usage[uKey]) pending.usage[uKey] = { day: this._todayStr(), host: clean.host, seconds: 0, visits: 0 };
+      pending.usage[uKey].seconds = Math.min(3600, pending.usage[uKey].seconds + elapsedSec);
+      await this._writeShared(this.SHARED_PENDING_KEY, pending);
+    },
+
+    async _userscriptPush({ includeTabs = true, keepalive = false, force = false } = {}) {
+      if (this._pushInFlight && !keepalive) return { ok: true, busy: true };
+      const cfg = this._config || {};
+      const creds = this.parseSyncLink(cfg.syncLink || '');
+      if (!creds) return { ok: false, skipped: true };
+
+      this._pushInFlight = true;
+      try {
+        await this._commitUsageSegment();
+        const meta = await this._ensureMeta();
+        const pending = (await this._readShared(this.SHARED_PENDING_KEY, null)) || { history: [], usage: {} };
+        const histBatch = Array.isArray(pending.history) ? pending.history.slice(0, 100) : [];
+        const usageBatch = pending.usage
+          ? Object.values(pending.usage).filter(u => u && (u.seconds > 0 || u.visits > 0)).slice(0, 100)
+          : [];
+        const tabs = includeTabs ? ((await this._readShared(this.SHARED_TABS_KEY, [])) || []) : null;
+
+        if (!force && histBatch.length === 0 && usageBatch.length === 0 && (!tabs || tabs.length === 0)) {
+          return { ok: true, skipped: true };
+        }
+
+        const payload = {
+          instance_id: meta.instanceId,
+          device_name: (cfg.deviceName && String(cfg.deviceName).trim()) || this.defaultDeviceName(),
+          browser: this.detectBrowser(),
+          platform: this.detectPlatform(),
+          mode: 'userscript',
+          account_label: (cfg.accountLabel && String(cfg.accountLabel).trim()) || ''
+        };
+        if (tabs) payload.tabs = tabs.slice(0, 50);
+        if (histBatch.length > 0) payload.history = histBatch;
+        if (usageBatch.length > 0) payload.usage = usageBatch;
+
+        const res = await this._rpc(creds, 'besing_sync_push', {
+          p_secret: creds.secret,
+          p_payload: payload
+        }, 'push', { keepalive });
+
+        // Drain flushed items from pending queue.
+        const latest = (await this._readShared(this.SHARED_PENDING_KEY, null)) || { history: [], usage: {} };
+        latest.history = (Array.isArray(latest.history) ? latest.history : []).slice(histBatch.length);
+        if (latest.usage && typeof latest.usage === 'object') {
+          for (let i = 0; i < usageBatch.length; i++) {
+            const u = usageBatch[i];
+            const k = `${u.day}|${u.host}`;
+            if (latest.usage[k]) {
+              latest.usage[k].seconds = Math.max(0, latest.usage[k].seconds - u.seconds);
+              latest.usage[k].visits = Math.max(0, latest.usage[k].visits - u.visits);
+              if (latest.usage[k].seconds === 0 && latest.usage[k].visits === 0) delete latest.usage[k];
+            }
+          }
+        }
+        await this._writeShared(this.SHARED_PENDING_KEY, latest);
+
+        const cache = await this._getCache();
+        cache.lastPushAt = Date.now();
+        cache.lastError = null;
+        if (res && res.retention_days) cache.retentionDays = res.retention_days;
+        await this._writeShared(this.SHARED_CACHE_KEY, cache);
+        return { ok: true, res };
+      } catch (err) {
+        const cache = await this._getCache();
+        cache.lastError = `Push failed: ${err.message || err}`;
+        await this._writeShared(this.SHARED_CACHE_KEY, cache);
+        return { ok: false, error: err.message || String(err) };
+      } finally {
+        this._pushInFlight = false;
+      }
+    },
+
+    async _userscriptPull({ full = false, force = false } = {}) {
+      if (this._pullInFlight) return { ok: true, busy: true };
+      const cfg = this._config || {};
+      const creds = this.parseSyncLink(cfg.syncLink || '');
+      if (!creds) return { ok: false, skipped: true };
+
+      const cache = await this._getCache();
+      const now = Date.now();
+      const intervalMs = Math.max(2, Math.min(120, Number(cfg.pullIntervalMinutes) || 10)) * 60 * 1000;
+
+      if (!force) {
+        if (now - cache.lastPullAt < intervalMs) return { ok: true, skipped: true, cache };
+        if (cache.pullLockUntil && now < cache.pullLockUntil) return { ok: true, skipped: true, cache };
+      }
+
+      // Cross-tab lock so opening multiple tabs at once only pulls once.
+      cache.pullLockUntil = now + 20000;
+      await this._writeShared(this.SHARED_CACHE_KEY, cache);
+
+      this._pullInFlight = true;
+      try {
+        const deviceHashes = {};
+        if (!full) {
+          for (let i = 0; i < cache.devices.length; i++) {
+            const d = cache.devices[i];
+            if (d && d.instance_id && d.snapshot_hash) deviceHashes[d.instance_id] = d.snapshot_hash;
+          }
+        }
+
+        const res = await this._rpc(creds, 'besing_sync_pull', {
+          p_secret: creds.secret,
+          p_since: full ? null : cache.lastServerTime,
+          p_device_hashes: deviceHashes,
+          p_history_limit: full ? 250 : 150
+        }, 'pull');
+
+        const prevMap = new Map(cache.devices.map(d => [d.instance_id, d]));
+        const mergedDevices = [];
+        for (const d of (res.devices || [])) {
+          if (d.unchanged && prevMap.has(d.instance_id)) {
+            const prev = prevMap.get(d.instance_id);
+            mergedDevices.push({
+              ...prev,
+              device_name: d.device_name,
+              browser: d.browser,
+              platform: d.platform,
+              mode: d.mode,
+              account_label: d.account_label,
+              snapshot_hash: d.snapshot_hash,
+              updated_at: d.updated_at
+            });
+          } else {
+            mergedDevices.push({
+              instance_id: d.instance_id,
+              device_name: d.device_name,
+              browser: d.browser,
+              platform: d.platform,
+              mode: d.mode,
+              account_label: d.account_label,
+              tabs: Array.isArray(d.tabs) ? d.tabs : [],
+              groups: Array.isArray(d.groups) ? d.groups : [],
+              closed: Array.isArray(d.closed) ? d.closed : [],
+              snapshot_hash: d.snapshot_hash || '',
+              updated_at: d.updated_at
+            });
+          }
+        }
+
+        const retentionDays = Number(res.retention_days) || Number(cfg.retentionDays) || 7;
+        const cutoffMs = Date.now() - retentionDays * 86400 * 1000;
+        const cutoffDay = new Date(cutoffMs).toISOString().slice(0, 10);
+
+        const histMap = new Map();
+        const baseHist = full ? [] : cache.history;
+        for (const h of [...(res.history || []), ...baseHist]) {
+          if (!h || !h.url) continue;
+          const t = Date.parse(h.visitedAt || '');
+          if (Number.isFinite(t) && t < cutoffMs) continue;
+          const k = h.id ? `id:${h.id}` : `${h.instance_id}|${h.url}|${Math.floor((t || 0) / 300000)}`;
+          if (!histMap.has(k)) histMap.set(k, h);
+        }
+        const mergedHistory = Array.from(histMap.values())
+          .sort((a, b) => Date.parse(b.visitedAt || 0) - Date.parse(a.visitedAt || 0))
+          .slice(0, 600);
+
+        const usageMap = new Map();
+        const baseUsage = full ? [] : cache.usage;
+        for (const u of baseUsage) {
+          if (u && u.host && u.day >= cutoffDay) usageMap.set(`${u.instance_id}|${u.day}|${u.host}`, u);
+        }
+        for (const u of (res.usage || [])) {
+          if (u && u.host && u.day >= cutoffDay) usageMap.set(`${u.instance_id}|${u.day}|${u.host}`, u);
+        }
+
+        const nextCache = {
+          devices: mergedDevices,
+          history: mergedHistory,
+          usage: Array.from(usageMap.values()),
+          lastServerTime: res.server_time || new Date().toISOString(),
+          lastPullAt: Date.now(),
+          lastPushAt: cache.lastPushAt,
+          pullLockUntil: 0,
+          lastError: null,
+          retentionDays
+        };
+        await this._writeShared(this.SHARED_CACHE_KEY, nextCache);
+        return { ok: true, cache: nextCache };
+      } catch (err) {
+        const cur = await this._getCache();
+        cur.pullLockUntil = 0;
+        cur.lastError = `Pull failed: ${err.message || err}`;
+        await this._writeShared(this.SHARED_CACHE_KEY, cur);
+        return { ok: false, error: err.message || String(err) };
+      } finally {
+        this._pullInFlight = false;
+      }
+    },
+
+    // -----------------------------------------------------------------------
+    // Public API for BESing Manager UI (works in both Extension & Userscript mode)
+    // -----------------------------------------------------------------------
+
+    async getState() {
+      if (this.isExtensionMode()) {
+        return await this._sendExt({ type: 'besing-sync:get-state' });
+      }
+      const cfg = this._config || {};
+      const meta = await this._ensureMeta();
+      const cache = await this._getCache();
+      const stats = await this._readShared(this.SHARED_STATS_KEY, null);
+      return {
+        ok: true,
+        mode: 'userscript',
+        instanceId: meta.instanceId,
+        detectedEmail: '',
+        browser: this.detectBrowser(),
+        platform: this.detectPlatform(),
+        configured: Boolean(this.parseSyncLink(cfg.syncLink || '')),
+        enabled: this._active,
+        cache,
+        stats
+      };
+    },
+
+    async syncNow(full = false) {
+      if (this.isExtensionMode()) {
+        return await this._sendExt({ type: 'besing-sync:sync-now', full });
+      }
+      const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(this._config || {}));
+      if (clean) {
+        await this._updateActiveTabRecord(clean, document.title || clean.host, false);
+      }
+      const pushRes = await this._userscriptPush({ includeTabs: true, force: true });
+      const pullRes = await this._userscriptPull({ full, force: true });
+      const stats = await this._readShared(this.SHARED_STATS_KEY, null);
+      return {
+        ok: Boolean(pullRes.ok),
+        error: (pullRes && pullRes.error) || (pushRes && pushRes.error) || null,
+        cache: (pullRes && pullRes.cache) || await this._getCache(),
+        stats
+      };
+    },
+
+    async testConnection(syncLink) {
+      if (this.isExtensionMode()) {
+        return await this._sendExt({ type: 'besing-sync:test-connection', syncLink });
+      }
+      const creds = this.parseSyncLink(syncLink);
+      if (!creds) {
+        return { ok: false, error: 'Invalid Sync Link format (must be besing-sync://... with HTTPS URL, API key, and secret >= 16 chars).' };
+      }
+      const t0 = Date.now();
+      try {
+        const res = await this._rpc(creds, 'besing_sync_pull', {
+          p_secret: creds.secret,
+          p_since: null,
+          p_device_hashes: {},
+          p_history_limit: 5
+        }, 'pull');
+        return {
+          ok: true,
+          latencyMs: Date.now() - t0,
+          deviceCount: Array.isArray(res.devices) ? res.devices.length : 0,
+          retentionDays: res.retention_days || 7
+        };
+      } catch (err) {
+        return { ok: false, error: err.message || String(err) };
+      }
+    },
+
+    async openTab(url) {
+      const clean = this.sanitizeUrl(url, []);
+      if (!clean) return { ok: false, error: 'Invalid URL' };
+      if (this.isExtensionMode()) {
+        return await this._sendExt({ type: 'besing-sync:open-tab', url: clean.url, active: true });
+      }
+      try {
+        window.open(clean.url, '_blank', 'noopener,noreferrer');
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    },
+
+    async openGroup(title, color, urls) {
+      const cleanUrls = (Array.isArray(urls) ? urls : [])
+        .map(u => this.sanitizeUrl(u, []))
+        .filter(Boolean)
+        .map(x => x.url)
+        .slice(0, 30);
+      if (cleanUrls.length === 0) return { ok: false, error: 'No valid URLs' };
+      if (this.isExtensionMode()) {
+        return await this._sendExt({ type: 'besing-sync:open-group', title, color, urls: cleanUrls });
+      }
+      // In Safari/userscript mode, browsers block opening many popups at once; open first tab directly
+      // and let the UI offer individual links or copy-all-URLs for Shortcuts.
+      try {
+        window.open(cleanUrls[0], '_blank', 'noopener,noreferrer');
+        return { ok: true, opened: 1, total: cleanUrls.length, userscriptPopupNote: true };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    },
+
+    async deleteDevice(instanceId) {
+      if (this.isExtensionMode()) {
+        return await this._sendExt({ type: 'besing-sync:delete-device', instanceId });
+      }
+      const creds = this.parseSyncLink((this._config && this._config.syncLink) || '');
+      if (!creds) return { ok: false, error: 'Not configured' };
+      try {
+        await this._rpc(creds, 'besing_sync_delete_device', {
+          p_secret: creds.secret,
+          p_instance_id: String(instanceId || '')
+        }, 'push');
+        const pullRes = await this._userscriptPull({ full: true, force: true });
+        return { ok: true, cache: pullRes.cache || await this._getCache() };
+      } catch (err) {
+        return { ok: false, error: err.message || String(err) };
+      }
+    },
+
+    async setRetentionDays(days) {
+      const d = Math.max(1, Math.min(90, Number(days) || 7));
+      if (this.isExtensionMode()) {
+        return await this._sendExt({ type: 'besing-sync:set-retention', days: d });
+      }
+      const creds = this.parseSyncLink((this._config && this._config.syncLink) || '');
+      if (!creds) return { ok: false, error: 'Not configured' };
+      try {
+        const res = await this._rpc(creds, 'besing_sync_set_retention', {
+          p_secret: creds.secret,
+          p_retention_days: d
+        }, 'push');
+        const pullRes = await this._userscriptPull({ full: true, force: true });
+        return { ok: true, pruned: res.pruned || 0, retentionDays: res.retention_days || d, cache: pullRes.cache || await this._getCache() };
+      } catch (err) {
+        return { ok: false, error: err.message || String(err) };
+      }
+    },
+
+    // -----------------------------------------------------------------------
+    // Lifecycle: init, onConfigChange, destroy
+    // -----------------------------------------------------------------------
+
+    init(config = {}) {
+      this.destroy();
+      this._config = config || {};
+      this._active = true;
+
+      // Extension mode delegates background syncing to background.js so tabs do not duplicate traffic.
+      if (this.isExtensionMode()) return;
+
+      this._lastActivityTs = Date.now();
+      this._activeSegmentStart = (document.visibilityState === 'visible') ? Date.now() : 0;
+
+      // Record initial visit once page title has settled, and pull if >= interval has elapsed.
+      this._visitDelayTimer = setTimeout(async () => {
+        if (!this._active) return;
+        await this._recordCurrentVisit();
+        await this._userscriptPull({ full: false, force: false });
+      }, 1200);
+
+      // Track user activity for accurate foreground usage time (ignores AFK open tabs).
+      this._boundActivity = () => {
+        this._lastActivityTs = Date.now();
+      };
+      ['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach(ev => {
+        window.addEventListener(ev, this._boundActivity, { passive: true });
+      });
+
+      // Visibility change: flush usage when hiding; resume + check 10-min pull when returning.
+      this._boundVisibility = async () => {
+        if (!this._active) return;
+        if (document.visibilityState === 'hidden') {
+          await this._userscriptPush({ includeTabs: true, keepalive: true });
+        } else {
+          this._lastActivityTs = Date.now();
+          this._activeSegmentStart = Date.now();
+          await this._userscriptPull({ full: false, force: false });
+        }
+      };
+      document.addEventListener('visibilitychange', this._boundVisibility);
+
+      // Best-effort flush on page exit / app close.
+      this._boundPageHide = () => {
+        if (!this._active) return;
+        this._userscriptPush({ includeTabs: true, keepalive: true }).catch(() => {});
+      };
+      window.addEventListener('pagehide', this._boundPageHide);
+
+      // SPA route change detection (popstate, hashchange, history.pushState).
+      this._boundRouteChange = () => {
+        if (!this._active) return;
+        if (window.location.href !== this._lastUrl) {
+          setTimeout(() => {
+            if (this._active) this._recordCurrentVisit();
+          }, 500);
+        }
+      };
+      window.addEventListener('popstate', this._boundRouteChange);
+      window.addEventListener('hashchange', this._boundRouteChange);
+
+      try {
+        if (window.history && typeof window.history.pushState === 'function') {
+          this._origPushState = window.history.pushState;
+          const self = this;
+          window.history.pushState = function (...args) {
+            const ret = self._origPushState.apply(this, args);
+            self._boundRouteChange();
+            return ret;
+          };
+        }
+      } catch (e) {}
+
+      // Periodic 60s tick: commit usage + check whether 10-minute auto-pull is due while visible.
+      this._usageTimer = setInterval(async () => {
+        if (!this._active || document.visibilityState !== 'visible') return;
+        await this._commitUsageSegment();
+        const pending = await this._readShared(this.SHARED_PENDING_KEY, null);
+        const hasPendingUsage = pending && pending.usage && Object.values(pending.usage).some(u => u && u.seconds >= 30);
+        if (hasPendingUsage || (pending && Array.isArray(pending.history) && pending.history.length > 0)) {
+          await this._userscriptPush({ includeTabs: false });
+        }
+        await this._userscriptPull({ full: false, force: false });
+      }, 60000);
+    },
+
+    onConfigChange(newConfig) {
+      const prevLink = (this._config && this._config.syncLink) || '';
+      const nextLink = (newConfig && newConfig.syncLink) || '';
+      this._config = newConfig || {};
+      if (!this._active || this.isExtensionMode()) return;
+      if (nextLink && nextLink !== prevLink) {
+        this._userscriptPull({ full: true, force: true }).catch(() => {});
+      }
+    },
+
+    destroy() {
+      this._active = false;
+      if (this._visitDelayTimer) { clearTimeout(this._visitDelayTimer); this._visitDelayTimer = null; }
+      if (this._usageTimer) { clearInterval(this._usageTimer); this._usageTimer = null; }
+      if (this._pullCheckTimer) { clearInterval(this._pullCheckTimer); this._pullCheckTimer = null; }
+      if (this._boundVisibility) {
+        document.removeEventListener('visibilitychange', this._boundVisibility);
+        this._boundVisibility = null;
+      }
+      if (this._boundPageHide) {
+        window.removeEventListener('pagehide', this._boundPageHide);
+        this._boundPageHide = null;
+      }
+      if (this._boundActivity) {
+        ['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach(ev => {
+          window.removeEventListener(ev, this._boundActivity);
+        });
+        this._boundActivity = null;
+      }
+      if (this._boundRouteChange) {
+        window.removeEventListener('popstate', this._boundRouteChange);
+        window.removeEventListener('hashchange', this._boundRouteChange);
+        this._boundRouteChange = null;
+      }
+      if (this._origPushState) {
+        try { window.history.pushState = this._origPushState; } catch (e) {}
+        this._origPushState = null;
+      }
+    }
+  };
+      mod.icon = "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><polyline points=\"23 4 23 10 17 10\"></polyline><polyline points=\"1 20 1 14 7 14\"></polyline><path d=\"M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15\"></path></svg>";
+      mod.author = "BESing Team";
+      mod.category = "Sync";
+      return mod;
     })()
   ];
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.9.3';
+    static CURRENT_VERSION = '1.10.0';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -9662,6 +10737,152 @@
             </div>
           </div>
         `;
+      } else if (m.id === 'browser-sync') {
+        const escAttr = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const hasLink = Boolean(cfg.syncLink && typeof m.parseSyncLink === 'function' && m.parseSyncLink(cfg.syncLink));
+        const activeSubTab = this._bsyncTab || (hasLink ? 'devices' : 'setup');
+        const isExt = typeof m.isExtensionMode === 'function' && m.isExtensionMode();
+        const defName = (typeof m.defaultDeviceName === 'function') ? m.defaultDeviceName() : 'Device';
+        const deviceNameVal = escAttr(cfg.deviceName || defName);
+        const accountVal = escAttr(cfg.accountLabel || '');
+        const pullMinVal = Math.max(2, Math.min(120, Number(cfg.pullIntervalMinutes) || 10));
+        const retentionVal = Math.max(1, Math.min(90, Number(cfg.retentionDays) || 7));
+        const excludeVal = escAttr(cfg.excludeHosts || '');
+        const pushEveryVisit = cfg.pushEveryVisit !== false;
+        const importNative = cfg.importToNativeHistory === true;
+        const syncLinkVal = escAttr(cfg.syncLink || '');
+
+        specificControls = `
+          <div class="besing-config-section" style="padding:10px;border:1px solid rgba(56,189,248,0.22);border-radius:10px;background:rgba(15,23,42,0.55);">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <div style="min-width:0;flex:1;">
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <span id="bsync-status-dot" style="width:8px;height:8px;border-radius:50%;background:${hasLink ? '#34d399' : '#f59e0b'};display:inline-block;flex-shrink:0;"></span>
+                  <span id="bsync-status-label" style="font-size:12px;font-weight:700;color:#e2e8f0;">${hasLink ? 'Linked' : 'Not Linked'}</span>
+                  <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(99,102,241,0.2);color:#a5b4fc;border:1px solid rgba(99,102,241,0.35);">${isExt ? 'Edge Extension' : 'Userscript'}</span>
+                </div>
+                <div id="bsync-meta-line" style="font-size:10px;color:#94a3b8;margin-top:3px;">Loading sync state...</div>
+              </div>
+              <button type="button" class="besing-btn-sub-action" id="btn-bsync-now" style="padding:6px 10px;font-size:11px;font-weight:700;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;white-space:nowrap;">Sync Now</button>
+            </div>
+            <div id="bsync-traffic-line" style="font-size:10px;color:#64748b;margin-top:5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;">Traffic today: --</div>
+          </div>
+
+          <div class="besing-segmented-group" id="group-bsync-tabs" style="margin-top:8px;">
+            <button type="button" class="besing-segmented-btn ${activeSubTab === 'devices' ? 'active' : ''}" data-tab="devices">Devices</button>
+            <button type="button" class="besing-segmented-btn ${activeSubTab === 'history' ? 'active' : ''}" data-tab="history">History</button>
+            <button type="button" class="besing-segmented-btn ${activeSubTab === 'usage' ? 'active' : ''}" data-tab="usage">Usage</button>
+            <button type="button" class="besing-segmented-btn ${activeSubTab === 'setup' ? 'active' : ''}" data-tab="setup">Setup</button>
+          </div>
+
+          <div id="bsync-pane-devices" style="display:${activeSubTab === 'devices' ? 'block' : 'none'};margin-top:8px;">
+            <div id="bsync-devices-list" style="display:flex;flex-direction:column;gap:8px;">
+              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading synced devices...</p>
+            </div>
+          </div>
+
+          <div id="bsync-pane-history" style="display:${activeSubTab === 'history' ? 'block' : 'none'};margin-top:8px;">
+            <div style="display:flex;gap:6px;margin-bottom:8px;">
+              <input type="text" class="besing-test-input" id="bsync-hist-search" placeholder="Search master history..." style="flex:1;min-width:0;">
+              <select class="besing-test-input" id="bsync-hist-filter" style="width:120px;padding:4px 6px;">
+                <option value="all">All Devices</option>
+              </select>
+            </div>
+            <div id="bsync-history-list" style="display:flex;flex-direction:column;gap:5px;">
+              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading master history...</p>
+            </div>
+          </div>
+
+          <div id="bsync-pane-usage" style="display:${activeSubTab === 'usage' ? 'block' : 'none'};margin-top:8px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:8px;">
+              <select class="besing-test-input" id="bsync-usage-filter" style="flex:1;padding:4px 6px;">
+                <option value="all">All Devices</option>
+              </select>
+              <select class="besing-test-input" id="bsync-usage-range" style="width:100px;padding:4px 6px;">
+                <option value="today">Today</option>
+                <option value="all" selected>All (7d)</option>
+              </select>
+            </div>
+            <div id="bsync-usage-list" style="display:flex;flex-direction:column;gap:6px;">
+              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading usage stats...</p>
+            </div>
+          </div>
+
+          <div id="bsync-pane-setup" style="display:${activeSubTab === 'setup' ? 'block' : 'none'};margin-top:8px;">
+            <div class="besing-config-section">
+              <div class="besing-section-header-row">
+                <span class="besing-section-title">Sync Link (1-Paste Setup)</span>
+                <button type="button" class="besing-btn-sub-action" id="btn-bsync-copy-link" style="padding:2px 8px;font-size:10px;">Copy Link</button>
+              </div>
+              <input type="password" class="besing-test-input" id="bsync-input-link" placeholder="Paste besing-sync://... link" value="${syncLinkVal}" style="width:100%;margin-top:6px;font-family:monospace;font-size:11px;">
+              <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
+                <button type="button" class="besing-btn-sub-action" id="btn-bsync-save-test" style="flex:1;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;">Save & Test</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-bsync-toggle-vis" style="padding:4px 8px;">Show</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-bsync-clear-link" style="padding:4px 8px;color:#fca5a5;">Unlink</button>
+              </div>
+              <p id="bsync-setup-msg" style="font-size:10px;color:#94a3b8;margin:6px 0 0;line-height:1.35;">Nothing is hardcoded. Paste your private Sync Link on each device. Cookies and page contents are never synced.</p>
+            </div>
+
+            <div class="besing-config-section">
+              <div class="besing-section-header-row">
+                <span class="besing-section-title">This Device Identity</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
+                <input type="text" class="besing-test-input" id="bsync-input-device" placeholder="Device Name (e.g. Main-PC, iPhone, iPad)" value="${deviceNameVal}">
+                <input type="text" class="besing-test-input" id="bsync-input-account" placeholder="Profile / User Name (auto-fills Edge email if signed in)" value="${accountVal}">
+                <input type="text" class="besing-test-input" id="bsync-input-exclude" placeholder="Excluded domains (e.g. bank.com, intranet.local)" value="${excludeVal}">
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <label style="font-size:11px;color:#cbd5e1;flex:1;">Auto-pull (min):
+                    <input type="number" class="besing-test-input" id="bsync-input-pullmin" min="2" max="120" value="${pullMinVal}" style="width:58px;margin-left:4px;padding:3px 6px;">
+                  </label>
+                  <label style="font-size:11px;color:#cbd5e1;flex:1;">History (days):
+                    <input type="number" class="besing-test-input" id="bsync-input-retention" min="1" max="90" value="${retentionVal}" style="width:54px;margin-left:4px;padding:3px 6px;">
+                  </label>
+                </div>
+                <div class="besing-toggle-row">
+                  <div>
+                    <div class="besing-toggle-title">Push Every Visit</div>
+                    <div class="besing-toggle-desc">Uploads sanitized page visits immediately (deduplicated per 5m bucket)</div>
+                  </div>
+                  <label class="besing-switch besing-switch-sm">
+                    <input type="checkbox" id="chk-bsync-visit" ${pushEveryVisit ? 'checked' : ''}>
+                    <span class="besing-slider"></span>
+                  </label>
+                </div>
+                <div class="besing-toggle-row" style="display:${isExt ? 'flex' : 'none'};">
+                  <div>
+                    <div class="besing-toggle-title">Import Remote Visits to Edge History</div>
+                    <div class="besing-toggle-desc">Adds Safari/other devices' visits into Edge native address bar history</div>
+                  </div>
+                  <label class="besing-switch besing-switch-sm">
+                    <input type="checkbox" id="chk-bsync-import" ${importNative ? 'checked' : ''}>
+                    <span class="besing-slider"></span>
+                  </label>
+                </div>
+                <button type="button" class="besing-btn-sub-action" id="btn-bsync-save-prefs" style="align-self:flex-end;">Save Settings</button>
+              </div>
+            </div>
+
+            <div class="besing-config-section" style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
+              <div class="besing-section-header-row">
+                <span class="besing-section-title">First-Time Supabase Link Generator</span>
+              </div>
+              <p style="font-size:10px;color:#94a3b8;margin:4px 0 6px;line-height:1.35;">
+                Enter your Supabase project URL and <strong>publishable / anon key</strong> (never the service_role key) to mint a random secret, Sync Link, and 1-line SQL allowlist insert.
+              </p>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <input type="text" class="besing-test-input" id="bsync-gen-url" placeholder="https://your-project.supabase.co">
+                <input type="password" class="besing-test-input" id="bsync-gen-key" placeholder="Supabase publishable / anon key">
+                <button type="button" class="besing-btn-sub-action" id="btn-bsync-generate" style="background:rgba(99,102,241,0.22);border:1px solid rgba(99,102,241,0.45);color:#a5b4fc;">Generate Secret & Sync Link</button>
+                <div id="bsync-gen-output" style="display:none;flex-direction:column;gap:5px;margin-top:4px;">
+                  <div style="font-size:10px;color:#34d399;font-weight:600;">1. Run this SQL once in Supabase SQL Editor:</div>
+                  <textarea class="besing-test-input" id="bsync-gen-sql" readonly rows="3" style="font-family:monospace;font-size:10px;resize:vertical;"></textarea>
+                  <button type="button" class="besing-btn-sub-action" id="btn-bsync-copy-sql" style="align-self:flex-end;">Copy SQL</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
       } else if (m.id === 'prevent-redirect') {
         const blockScripts = (cfg.blockScripts === 'third-party' || cfg.blockScripts === 'all') ? cfg.blockScripts : 'off';
         const lateStart = (cfg.lateStart === 'purge-timers' || cfg.lateStart === 'rebuild') ? cfg.lateStart : 'off';
@@ -10302,6 +11523,536 @@
         bindToggle('#chk-grok-thinking', 'includeThinking');
         bindToggle('#chk-grok-timestamps', 'includeTimestamps');
         bindToggle('#chk-grok-sources', 'includeSources');
+      } else if (m.id === 'browser-sync') {
+        const el = (sel) => body.querySelector(sel);
+        const tabGroup = el('#group-bsync-tabs');
+        const panes = {
+          devices: el('#bsync-pane-devices'),
+          history: el('#bsync-pane-history'),
+          usage: el('#bsync-pane-usage'),
+          setup: el('#bsync-pane-setup')
+        };
+        const switchTab = (tabName) => {
+          this._bsyncTab = tabName;
+          if (tabGroup) {
+            tabGroup.querySelectorAll('.besing-segmented-btn').forEach(b => {
+              b.classList.toggle('active', b.getAttribute('data-tab') === tabName);
+            });
+          }
+          Object.keys(panes).forEach(k => {
+            if (panes[k]) panes[k].style.display = (k === tabName) ? 'block' : 'none';
+          });
+        };
+        if (tabGroup) {
+          tabGroup.querySelectorAll('.besing-segmented-btn').forEach(btn => {
+            btn.onclick = () => switchTab(btn.getAttribute('data-tab') || 'devices');
+          });
+        }
+
+        const GROUP_COLORS = {
+          blue: '#3b82f6', red: '#ef4444', yellow: '#eab308', green: '#22c55e',
+          pink: '#ec4899', purple: '#a855f7', cyan: '#06b6d4', orange: '#f97316', grey: '#94a3b8'
+        };
+
+        const fmtBytes = (n) => {
+          const v = Number(n) || 0;
+          if (v < 1024) return `${v} B`;
+          if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+          return `${(v / (1024 * 1024)).toFixed(2)} MB`;
+        };
+
+        const fmtAgo = (isoOrMs) => {
+          const ts = typeof isoOrMs === 'number' ? isoOrMs : Date.parse(isoOrMs || '');
+          if (!ts || isNaN(ts)) return 'never';
+          const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+          if (sec < 60) return `${sec}s ago`;
+          if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+          if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+          return `${Math.floor(sec / 86400)}d ago`;
+        };
+
+        const fmtDur = (sec) => {
+          const s = Math.max(0, Math.round(Number(sec) || 0));
+          if (s < 60) return `${s}s`;
+          const mins = Math.floor(s / 60);
+          if (mins < 60) return `${mins}m`;
+          const hrs = Math.floor(mins / 60);
+          const rem = mins % 60;
+          return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
+        };
+
+        const safeHref = (u) => {
+          const s = String(u || '').trim();
+          return /^https?:\/\//i.test(s) ? s : null;
+        };
+
+        const makeLinkRow = (url, title, subText) => {
+          const href = safeHref(url);
+          const row = document.createElement(href ? 'a' : 'div');
+          if (href) {
+            row.href = href;
+            row.target = '_blank';
+            row.rel = 'noopener noreferrer';
+            row.onclick = (ev) => {
+              if (typeof m.isExtensionMode === 'function' && m.isExtensionMode()) {
+                ev.preventDefault();
+                m.openTab(href);
+              }
+            };
+          }
+          row.style.cssText = 'display:flex;flex-direction:column;gap:1px;padding:5px 7px;border-radius:7px;background:rgba(30,41,59,0.55);border:1px solid rgba(148,163,184,0.12);text-decoration:none;color:#e2e8f0;cursor:pointer;';
+          const tEl = document.createElement('div');
+          tEl.textContent = title || url || '(untitled)';
+          tEl.style.cssText = 'font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#f1f5f9;';
+          const sEl = document.createElement('div');
+          sEl.textContent = subText || url || '';
+          sEl.style.cssText = 'font-size:9.5px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+          row.appendChild(tEl);
+          row.appendChild(sEl);
+          return row;
+        };
+
+        let liveState = null;
+
+        const populateFilters = (devices) => {
+          const histSel = el('#bsync-hist-filter');
+          const usageSel = el('#bsync-usage-filter');
+          [histSel, usageSel].forEach(sel => {
+            if (!sel) return;
+            const prev = sel.value || 'all';
+            while (sel.firstChild) sel.removeChild(sel.firstChild);
+            const allOpt = document.createElement('option');
+            allOpt.value = 'all';
+            allOpt.textContent = 'All Devices';
+            sel.appendChild(allOpt);
+            (devices || []).forEach(d => {
+              const opt = document.createElement('option');
+              opt.value = d.instance_id;
+              opt.textContent = `${d.device_name || 'Device'} (${d.browser || '?'})`;
+              sel.appendChild(opt);
+            });
+            sel.value = Array.from(sel.options).some(o => o.value === prev) ? prev : 'all';
+          });
+        };
+
+        const renderDevices = (state) => {
+          const list = el('#bsync-devices-list');
+          if (!list) return;
+          while (list.firstChild) list.removeChild(list.firstChild);
+          const devices = (state && state.cache && state.cache.devices) || [];
+          if (!state || !state.configured) {
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
+            p.textContent = 'Open the Setup tab to paste your Sync Link or generate a new one.';
+            list.appendChild(p);
+            return;
+          }
+          if (devices.length === 0) {
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
+            p.textContent = 'No synced devices yet. Turn Browser Sync ON and click Sync Now.';
+            list.appendChild(p);
+            return;
+          }
+
+          devices.forEach(d => {
+            const isSelf = state.instanceId && d.instance_id === state.instanceId;
+            const card = document.createElement('div');
+            card.style.cssText = 'padding:8px;border-radius:9px;background:rgba(15,23,42,0.7);border:1px solid rgba(148,163,184,0.18);display:flex;flex-direction:column;gap:6px;';
+
+            const hdr = document.createElement('div');
+            hdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;';
+            const left = document.createElement('div');
+            left.style.cssText = 'min-width:0;flex:1;';
+            const nameRow = document.createElement('div');
+            nameRow.style.cssText = 'font-size:12px;font-weight:700;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+            nameRow.textContent = `${d.device_name || 'Device'} (${d.browser || 'browser'})${isSelf ? ' · This Browser' : ''}`;
+            const subRow = document.createElement('div');
+            subRow.style.cssText = 'font-size:9.5px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+            const acctPart = d.account_label ? `${d.account_label} · ` : '';
+            const tabsArr = Array.isArray(d.tabs) ? d.tabs : [];
+            const groupsArr = Array.isArray(d.groups) ? d.groups : [];
+            const closedArr = Array.isArray(d.closed) ? d.closed : [];
+            subRow.textContent = `${acctPart}${tabsArr.length} tab(s)${groupsArr.length ? ` · ${groupsArr.length} group(s)` : ''} · ${fmtAgo(d.updated_at)}`;
+            left.appendChild(nameRow);
+            left.appendChild(subRow);
+            hdr.appendChild(left);
+
+            if (!isSelf) {
+              const delBtn = document.createElement('button');
+              delBtn.type = 'button';
+              delBtn.textContent = 'Remove';
+              delBtn.style.cssText = 'font-size:9.5px;padding:2px 6px;border-radius:6px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);color:#fca5a5;cursor:pointer;';
+              delBtn.onclick = async () => {
+                delBtn.disabled = true;
+                delBtn.textContent = '...';
+                const r = await m.deleteDevice(d.instance_id);
+                if (r && r.ok) refreshView();
+              };
+              hdr.appendChild(delBtn);
+            }
+            card.appendChild(hdr);
+
+            // Render Tab Groups first
+            const groupedTabIds = new Set();
+            groupsArr.forEach(g => {
+              const gTabs = tabsArr.filter(t => t.groupId && String(t.groupId) === String(g.id));
+              if (gTabs.length === 0) return;
+              gTabs.forEach(t => groupedTabIds.add(t.id || t.url));
+
+              const gBox = document.createElement('div');
+              gBox.style.cssText = 'padding:6px;border-radius:7px;background:rgba(30,41,59,0.45);border:1px solid rgba(148,163,184,0.16);display:flex;flex-direction:column;gap:4px;';
+              const gHdr = document.createElement('div');
+              gHdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;';
+              const gTitle = document.createElement('div');
+              gTitle.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#e2e8f0;min-width:0;';
+              const dot = document.createElement('span');
+              dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${GROUP_COLORS[g.color] || '#94a3b8'};flex-shrink:0;`;
+              const txt = document.createElement('span');
+              txt.textContent = `${g.title || 'Tab Group'} (${gTabs.length})`;
+              txt.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+              gTitle.appendChild(dot);
+              gTitle.appendChild(txt);
+              gHdr.appendChild(gTitle);
+
+              const openGrpBtn = document.createElement('button');
+              openGrpBtn.type = 'button';
+              openGrpBtn.textContent = (typeof m.isExtensionMode === 'function' && m.isExtensionMode()) ? 'Open Group' : 'Open 1st';
+              openGrpBtn.style.cssText = 'font-size:9.5px;padding:2px 7px;border-radius:6px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.4);color:#38bdf8;cursor:pointer;white-space:nowrap;';
+              openGrpBtn.onclick = async () => {
+                await m.openGroup(g.title, g.color, gTabs.map(t => t.url));
+              };
+              gHdr.appendChild(openGrpBtn);
+              gBox.appendChild(gHdr);
+
+              gTabs.slice(0, 25).forEach(t => {
+                let host = '';
+                try { host = new URL(t.url).hostname; } catch (e) {}
+                gBox.appendChild(makeLinkRow(t.url, t.title || host, host));
+              });
+              card.appendChild(gBox);
+            });
+
+            // Ungrouped Open Tabs
+            const ungrouped = tabsArr.filter(t => !groupedTabIds.has(t.id || t.url));
+            if (ungrouped.length > 0) {
+              const uWrap = document.createElement('div');
+              uWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+              ungrouped.slice(0, 25).forEach(t => {
+                let host = '';
+                try { host = new URL(t.url).hostname; } catch (e) {}
+                const badge = t.active ? '● Active · ' : '';
+                uWrap.appendChild(makeLinkRow(t.url, t.title || host, `${badge}${host}`));
+              });
+              if (ungrouped.length > 25) {
+                const more = document.createElement('div');
+                more.style.cssText = 'font-size:10px;color:#64748b;text-align:center;';
+                more.textContent = `+${ungrouped.length - 25} more open tabs`;
+                uWrap.appendChild(more);
+              }
+              card.appendChild(uWrap);
+            }
+
+            // Recently Closed Tabs (collapsible)
+            if (closedArr.length > 0) {
+              const det = document.createElement('details');
+              det.style.cssText = 'margin-top:2px;';
+              const sum = document.createElement('summary');
+              sum.style.cssText = 'font-size:10px;color:#94a3b8;cursor:pointer;user-select:none;';
+              sum.textContent = `Recently Closed (${closedArr.length})`;
+              det.appendChild(sum);
+              const cWrap = document.createElement('div');
+              cWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:4px;';
+              closedArr.slice(0, 15).forEach(c => {
+                cWrap.appendChild(makeLinkRow(c.url, c.title || c.url, `Closed ${fmtAgo(c.closedAt)}`));
+              });
+              det.appendChild(cWrap);
+              card.appendChild(det);
+            }
+
+            list.appendChild(card);
+          });
+        };
+
+        const renderHistory = (state) => {
+          const list = el('#bsync-history-list');
+          if (!list) return;
+          while (list.firstChild) list.removeChild(list.firstChild);
+          const allHist = (state && state.cache && state.cache.history) || [];
+          const q = (el('#bsync-hist-search')?.value || '').trim().toLowerCase();
+          const devFilter = el('#bsync-hist-filter')?.value || 'all';
+          const filtered = allHist.filter(h => {
+            if (devFilter !== 'all' && h.instance_id !== devFilter) return false;
+            if (!q) return true;
+            return (h.title || '').toLowerCase().includes(q) || (h.url || '').toLowerCase().includes(q) || (h.host || '').toLowerCase().includes(q);
+          });
+          if (filtered.length === 0) {
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
+            p.textContent = q ? 'No matching history entries.' : 'No synced history yet (default retention: 7 days).';
+            list.appendChild(p);
+            return;
+          }
+          filtered.slice(0, 80).forEach(h => {
+            const visitsNote = (h.visitCount && h.visitCount > 1) ? ` ×${h.visitCount}` : '';
+            const sub = `${h.device_name || 'Device'} (${h.browser || '?'}) · ${h.host || ''} · ${fmtAgo(h.visitedAt)}${visitsNote}`;
+            list.appendChild(makeLinkRow(h.url, h.title || h.host || h.url, sub));
+          });
+        };
+
+        const renderUsage = (state) => {
+          const list = el('#bsync-usage-list');
+          if (!list) return;
+          while (list.firstChild) list.removeChild(list.firstChild);
+          const allUsage = (state && state.cache && state.cache.usage) || [];
+          const devFilter = el('#bsync-usage-filter')?.value || 'all';
+          const range = el('#bsync-usage-range')?.value || 'all';
+          const today = (typeof m._todayStr === 'function') ? m._todayStr() : new Date().toISOString().slice(0, 10);
+
+          const byHost = new Map();
+          let totalSec = 0;
+          let totalVisits = 0;
+          allUsage.forEach(u => {
+            if (devFilter !== 'all' && u.instance_id !== devFilter) return;
+            if (range === 'today' && u.day !== today) return;
+            const prev = byHost.get(u.host) || { host: u.host, seconds: 0, visits: 0 };
+            prev.seconds += Number(u.seconds) || 0;
+            prev.visits += Number(u.visits) || 0;
+            byHost.set(u.host, prev);
+            totalSec += Number(u.seconds) || 0;
+            totalVisits += Number(u.visits) || 0;
+          });
+
+          const summary = document.createElement('div');
+          summary.style.cssText = 'padding:7px 9px;border-radius:8px;background:rgba(30,41,59,0.65);border:1px solid rgba(56,189,248,0.25);font-size:11px;color:#e2e8f0;display:flex;justify-content:space-between;';
+          summary.textContent = `Total Active: ${fmtDur(totalSec)} · ${totalVisits} visits`;
+          list.appendChild(summary);
+
+          const ranked = Array.from(byHost.values()).sort((a, b) => b.seconds - a.seconds || b.visits - a.visits).slice(0, 30);
+          if (ranked.length === 0) {
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
+            p.textContent = 'No usage data recorded for this filter yet.';
+            list.appendChild(p);
+            return;
+          }
+          const maxSec = Math.max(1, ranked[0].seconds);
+          ranked.forEach(item => {
+            const row = document.createElement('div');
+            row.style.cssText = 'padding:5px 7px;border-radius:7px;background:rgba(15,23,42,0.6);border:1px solid rgba(148,163,184,0.12);';
+            const top = document.createElement('div');
+            top.style.cssText = 'display:flex;justify-content:space-between;font-size:11px;color:#f1f5f9;';
+            const hSpan = document.createElement('span');
+            hSpan.textContent = item.host;
+            hSpan.style.cssText = 'font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+            const tSpan = document.createElement('span');
+            tSpan.textContent = `${fmtDur(item.seconds)} (${item.visits}v)`;
+            tSpan.style.cssText = 'color:#38bdf8;font-family:monospace;flex-shrink:0;margin-left:8px;';
+            top.appendChild(hSpan);
+            top.appendChild(tSpan);
+            const barBg = document.createElement('div');
+            barBg.style.cssText = 'height:4px;border-radius:99px;background:rgba(148,163,184,0.18);margin-top:4px;overflow:hidden;';
+            const bar = document.createElement('div');
+            bar.style.cssText = `height:100%;width:${Math.max(4, Math.round((item.seconds / maxSec) * 100))}%;background:linear-gradient(90deg,#38bdf8,#818cf8);`;
+            barBg.appendChild(bar);
+            row.appendChild(top);
+            row.appendChild(barBg);
+            list.appendChild(row);
+          });
+        };
+
+        const updateHeader = (state) => {
+          const dot = el('#bsync-status-dot');
+          const lbl = el('#bsync-status-label');
+          const metaLine = el('#bsync-meta-line');
+          const trafficLine = el('#bsync-traffic-line');
+          const acctInput = el('#bsync-input-account');
+          if (acctInput && state && state.detectedEmail && !acctInput.value) {
+            acctInput.placeholder = `Auto-detected Edge email: ${state.detectedEmail}`;
+          }
+          if (!state || !state.ok) {
+            if (dot) dot.style.background = '#ef4444';
+            if (lbl) lbl.textContent = 'Unavailable';
+            if (metaLine) metaLine.textContent = (state && state.error) ? state.error : 'Could not read sync state';
+            return;
+          }
+          const c = state.cache || {};
+          if (dot) dot.style.background = c.lastError ? '#ef4444' : (state.configured ? '#34d399' : '#f59e0b');
+          if (lbl) lbl.textContent = c.lastError ? 'Sync Error' : (state.configured ? 'Linked' : 'Not Linked');
+          if (metaLine) {
+            if (c.lastError) {
+              metaLine.textContent = c.lastError;
+            } else if (state.configured) {
+              const devCnt = (c.devices || []).length;
+              metaLine.textContent = `${devCnt} device(s) · Pull ${fmtAgo(c.lastPullAt)} · Push ${fmtAgo(c.lastPushAt)}`;
+            } else {
+              metaLine.textContent = 'Paste a Sync Link in Setup to connect your devices.';
+            }
+          }
+          if (trafficLine) {
+            const s = state.stats;
+            if (s) {
+              trafficLine.textContent = `Today: ↑ ${fmtBytes(s.bytesSentToday)} (${s.pushesToday || 0}p) · ↓ ${fmtBytes(s.bytesReceivedToday)} (${s.pullsToday || 0}g)`;
+            } else {
+              trafficLine.textContent = 'Today: ↑ 0 B · ↓ 0 B';
+            }
+          }
+        };
+
+        const refreshView = async () => {
+          if (typeof m.getState !== 'function') return;
+          liveState = await m.getState();
+          updateHeader(liveState);
+          populateFilters(liveState && liveState.cache ? liveState.cache.devices : []);
+          renderDevices(liveState);
+          renderHistory(liveState);
+          renderUsage(liveState);
+        };
+
+        refreshView();
+
+        const btnNow = el('#btn-bsync-now');
+        if (btnNow) {
+          btnNow.onclick = async () => {
+            btnNow.disabled = true;
+            btnNow.textContent = 'Syncing...';
+            const r = await m.syncNow(false);
+            btnNow.disabled = false;
+            btnNow.textContent = 'Sync Now';
+            await refreshView();
+            const setupMsg = el('#bsync-setup-msg');
+            if (setupMsg && r && r.error) setupMsg.textContent = `Sync error: ${r.error}`;
+          };
+        }
+
+        const histSearch = el('#bsync-hist-search');
+        const histFilter = el('#bsync-hist-filter');
+        const usageFilter = el('#bsync-usage-filter');
+        const usageRange = el('#bsync-usage-range');
+        if (histSearch) histSearch.oninput = () => renderHistory(liveState);
+        if (histFilter) histFilter.onchange = () => renderHistory(liveState);
+        if (usageFilter) usageFilter.onchange = () => renderUsage(liveState);
+        if (usageRange) usageRange.onchange = () => renderUsage(liveState);
+
+        // Setup tab controls
+        const inputLink = el('#bsync-input-link');
+        const setupMsg = el('#bsync-setup-msg');
+        const btnToggleVis = el('#btn-bsync-toggle-vis');
+        if (btnToggleVis && inputLink) {
+          btnToggleVis.onclick = () => {
+            const show = inputLink.type === 'password';
+            inputLink.type = show ? 'text' : 'password';
+            btnToggleVis.textContent = show ? 'Hide' : 'Show';
+          };
+        }
+
+        const btnCopyLink = el('#btn-bsync-copy-link');
+        if (btnCopyLink && inputLink) {
+          btnCopyLink.onclick = () => {
+            if (!inputLink.value.trim()) {
+              if (setupMsg) setupMsg.textContent = 'No Sync Link to copy yet.';
+              return;
+            }
+            copyTextToClipboard(inputLink.value.trim()).then(ok => {
+              if (setupMsg) setupMsg.textContent = ok ? 'Sync Link copied! Paste it on your other devices.' : 'Could not copy automatically — click Show and copy manually.';
+            });
+          };
+        }
+
+        const readSetupFields = () => ({
+          deviceName: (el('#bsync-input-device')?.value || '').trim() || m.defaultDeviceName(),
+          accountLabel: (el('#bsync-input-account')?.value || '').trim(),
+          excludeHosts: (el('#bsync-input-exclude')?.value || '').trim(),
+          pullIntervalMinutes: Math.max(2, Math.min(120, parseInt(el('#bsync-input-pullmin')?.value, 10) || 10)),
+          retentionDays: Math.max(1, Math.min(90, parseInt(el('#bsync-input-retention')?.value, 10) || 7)),
+          pushEveryVisit: el('#chk-bsync-visit')?.checked !== false,
+          importToNativeHistory: el('#chk-bsync-import')?.checked === true
+        });
+
+        const btnSaveTest = el('#btn-bsync-save-test');
+        if (btnSaveTest && inputLink) {
+          btnSaveTest.onclick = async () => {
+            const raw = inputLink.value.trim();
+            if (!m.parseSyncLink(raw)) {
+              if (setupMsg) setupMsg.textContent = 'Invalid Sync Link. Must start with besing-sync:// and contain an HTTPS URL, publishable key, and secret.';
+              return;
+            }
+            btnSaveTest.disabled = true;
+            btnSaveTest.textContent = 'Testing...';
+            const test = await m.testConnection(raw);
+            btnSaveTest.disabled = false;
+            btnSaveTest.textContent = 'Save & Test';
+            if (!test || !test.ok) {
+              if (setupMsg) setupMsg.textContent = `Connection failed: ${(test && test.error) || 'unknown error'}`;
+              return;
+            }
+            const fields = readSetupFields();
+            await this.applyScriptConfig(m.id, Object.assign({ syncLink: raw }, fields));
+            const curHost = this.storage.getCurrentHost();
+            if (this.storage.getScriptMode(m.id, curHost) === 'off') {
+              await this.storage.setScriptMode(m.id, 'on', curHost);
+              await this.refreshCurrentSiteModules();
+            }
+            if (setupMsg) setupMsg.textContent = `Connected in ${test.latencyMs}ms (${test.deviceCount} device(s), ${test.retentionDays}d retention). Syncing now...`;
+            await m.syncNow(true);
+            await refreshView();
+          };
+        }
+
+        const btnClearLink = el('#btn-bsync-clear-link');
+        if (btnClearLink && inputLink) {
+          btnClearLink.onclick = async () => {
+            inputLink.value = '';
+            await this.applyScriptConfig(m.id, { syncLink: '' });
+            if (setupMsg) setupMsg.textContent = 'Unlinked from database. Local settings cleared.';
+            await refreshView();
+          };
+        }
+
+        const btnSavePrefs = el('#btn-bsync-save-prefs');
+        if (btnSavePrefs) {
+          btnSavePrefs.onclick = async () => {
+            const fields = readSetupFields();
+            const rawLink = (inputLink && inputLink.value ? inputLink.value.trim() : '');
+            const patch = Object.assign({}, fields);
+            if (rawLink && m.parseSyncLink(rawLink)) patch.syncLink = rawLink;
+            await this.applyScriptConfig(m.id, patch);
+            const curLink = patch.syncLink || (this.storage.getScriptConfig(m.id, this.storage.getCurrentHost()) || {}).syncLink || '';
+            if (curLink && m.parseSyncLink(curLink)) {
+              await m.setRetentionDays(fields.retentionDays);
+            }
+            if (setupMsg) setupMsg.textContent = `Saved settings (${fields.deviceName}, pull every ${fields.pullIntervalMinutes}m, ${fields.retentionDays}d retention).`;
+            await refreshView();
+          };
+        }
+
+        const btnGen = el('#btn-bsync-generate');
+        if (btnGen) {
+          btnGen.onclick = async () => {
+            const url = (el('#bsync-gen-url')?.value || '').trim();
+            const key = (el('#bsync-gen-key')?.value || '').trim();
+            const retention = Math.max(1, Math.min(90, parseInt(el('#bsync-input-retention')?.value, 10) || 7));
+            const bundle = await m.generateSetupBundle(url, key, retention);
+            if (!bundle || !bundle.ok) {
+              if (setupMsg) setupMsg.textContent = (bundle && bundle.error) || 'Failed to generate Sync Link.';
+              return;
+            }
+            if (inputLink) inputLink.value = bundle.syncLink;
+            const outBox = el('#bsync-gen-output');
+            const sqlArea = el('#bsync-gen-sql');
+            if (sqlArea) sqlArea.value = bundle.sql;
+            if (outBox) outBox.style.display = 'flex';
+            if (setupMsg) setupMsg.textContent = 'Generated Sync Link! Run the SQL below once in Supabase SQL Editor, then click Save & Test.';
+          };
+        }
+
+        const btnCopySql = el('#btn-bsync-copy-sql');
+        if (btnCopySql) {
+          btnCopySql.onclick = () => {
+            const sql = el('#bsync-gen-sql')?.value || '';
+            if (sql) copyTextToClipboard(sql);
+          };
+        }
       } else if (m.id === 'prevent-redirect') {
         const bindChoice = (groupSelector, attr, key) => {
           const group = body.querySelector(groupSelector);
