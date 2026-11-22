@@ -26,7 +26,7 @@
   {
     "id": "text-size-control",
     "name": "Text Size Enhancer",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Scales text & page zoom (125%, 150%, 200%+) with smart paragraph unlock & text-only mode for novel/article reading.",
     "category": "Accessibility",
     "author": "BESing Team",

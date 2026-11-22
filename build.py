@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.11.0"
+VERSION = "1.11.1"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -885,7 +885,14 @@ def build():
     }}
 
     isExtensionMode() {{
-      return typeof chrome !== 'undefined' && !!chrome.runtime && typeof chrome.runtime.sendMessage === 'function';
+      if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') return false;
+      return typeof chrome !== 'undefined'
+        && !!chrome.runtime
+        && typeof chrome.runtime.id === 'string'
+        && chrome.runtime.id.length > 0
+        && typeof chrome.runtime.sendMessage === 'function'
+        && !!chrome.storage
+        && !!chrome.storage.local;
     }}
 
     _b64UrlEncode(str) {{

@@ -87,7 +87,14 @@
     },
 
     isExtensionMode() {
-      return typeof chrome !== 'undefined' && !!chrome.runtime && typeof chrome.runtime.sendMessage === 'function';
+      if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') return false;
+      return typeof chrome !== 'undefined'
+        && !!chrome.runtime
+        && typeof chrome.runtime.id === 'string'
+        && chrome.runtime.id.length > 0
+        && typeof chrome.runtime.sendMessage === 'function'
+        && !!chrome.storage
+        && !!chrome.storage.local;
     },
 
     _sendExt(msg) {
