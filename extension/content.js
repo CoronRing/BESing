@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.11.1
+ * Version 1.12.0
  */
 
 (function () {
@@ -14,6 +14,12 @@
   const FRAME_SAFE_MODULES = new Set(['prevent-redirect', 'force-copy']);
   // Modules whose settings drive state shared by every site, so they cannot be locked to one site.
   const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder', 'browser-sync', 'settings-sync', 'quick-transfer']);
+  // Per-script activation policies: 'none' (open-and-use tool), 'global' (OFF | ON only), or 'site' (default).
+  const NO_ACTIVATION_SCRIPTS = new Set(['quick-transfer']);
+  const GLOBAL_ONLY_ACTIVATION = new Set(['rest-reminder', 'browser-sync', 'settings-sync']);
+  const ALERT_WINDOW_MS = 30000;
+  const ALERT_MAX_FLASHES = 5;
+  const ALERT_MIN_FLASH_GAP_MS = 350;
 
   // Ownership claim shared by every JS world (userscript sandboxes, extension content scripts, page).
   // Worlds do not share globals, and <html> may not exist yet at document-start, but they do share
@@ -268,6 +274,8 @@
         updateChannel: 'github',
         autoCheckUpdates: true,
         cloudSync: {},
+        scriptSort: 'smart',
+        scriptLastUsed: {},
         ...readLocal('global_settings', {})
       };
     }
@@ -279,7 +287,9 @@
         authToken: '',
         updateChannel: 'github',
         autoCheckUpdates: true,
-        cloudSync: {}
+        cloudSync: {},
+        scriptSort: 'smart',
+        scriptLastUsed: {}
       };
     }
 
@@ -437,8 +447,24 @@
       await BESAdapter.set('site_rules', this.siteRules);
     }
 
-    // Mode: 'off' | 'site' | 'site-off' | 'on'
+    getActivationMode(scriptId) {
+      const mod = BUILTIN_MODULES.find(m => m.id === scriptId);
+      if (mod && (mod.activationMode === 'none' || mod.activationMode === 'global' || mod.activationMode === 'site')) {
+        return mod.activationMode;
+      }
+      if (NO_ACTIVATION_SCRIPTS.has(scriptId)) return 'none';
+      if (GLOBAL_ONLY_ACTIVATION.has(scriptId)) return 'global';
+      return 'site';
+    }
+
+    // Mode: 'none' | 'off' | 'site' | 'site-off' | 'on'
     getScriptMode(scriptId, host = this.getCurrentHost()) {
+      const actMode = this.getActivationMode(scriptId);
+      if (actMode === 'none') return 'none';
+      if (actMode === 'global') {
+        return this.enabledScripts[scriptId] ? 'on' : 'off';
+      }
+
       const h = (host || '').toLowerCase().trim();
       const siteConfig = this.siteRules[h];
 
@@ -454,8 +480,15 @@
     }
 
     isScriptActiveOnSite(scriptId, host = this.getCurrentHost()) {
+      const actMode = this.getActivationMode(scriptId);
+      if (actMode === 'none') return false;
+
       const h = (host || '').toLowerCase().trim();
       if (this.isSiteDisabledAll(h)) return false;
+
+      if (actMode === 'global') {
+        return Boolean(this.enabledScripts[scriptId]);
+      }
 
       const siteConfig = this.siteRules[h];
       if (siteConfig && siteConfig.scripts && siteConfig.scripts[scriptId] !== undefined) {
@@ -473,6 +506,12 @@
     // Modes only decide where a script runs. Settings locked to a site (see isConfigLocked) are never
     // touched here; the only way to drop them is to switch the lock back to global.
     async setScriptMode(scriptId, mode, host = this.getCurrentHost()) {
+      const actMode = this.getActivationMode(scriptId);
+      if (actMode === 'none') return;
+      if (actMode === 'global') {
+        mode = (mode === 'on' || mode === 'site') ? 'on' : 'off';
+      }
+
       const h = (host || '').toLowerCase().trim();
       this._writeSeq++;
       if (!this.siteRules[h]) this.siteRules[h] = { disableAll: false, scripts: {}, configs: {} };
@@ -498,7 +537,7 @@
 
       this.cleanupSiteRule(h);
       this._touchTimestamp(`enabled:${scriptId}`);
-      this._touchTimestamp(`site:${h}`);
+      if (actMode === 'site') this._touchTimestamp(`site:${h}`);
       await BESAdapter.set('enabled_scripts', this.enabledScripts);
       await BESAdapter.set('site_rules', this.siteRules);
       await BESAdapter.set('settings_timestamps', this.settingsTimestamps);
@@ -554,6 +593,7 @@
     }
 
     async setSiteOverride(scriptId, host, mode) {
+      if (this.getActivationMode(scriptId) !== 'site') return;
       const h = (host || '').toLowerCase().trim();
       if (!h) return;
       this._writeSeq++;
@@ -695,6 +735,28 @@
       this._writeSeq++;
       this.settings = { ...this.settings, ...patch };
       await BESAdapter.set('global_settings', this.settings);
+    }
+
+    getScriptSort() {
+      return this.settings && this.settings.scriptSort === 'recent' ? 'recent' : 'smart';
+    }
+
+    async setScriptSort(sortMode) {
+      const next = sortMode === 'recent' ? 'recent' : 'smart';
+      if (this.settings.scriptSort === next) return;
+      this._writeSeq++;
+      this.settings.scriptSort = next;
+      await BESAdapter.set('global_settings', this.settings);
+    }
+
+    recordScriptUsed(scriptId) {
+      if (!scriptId) return;
+      if (!this.settings.scriptLastUsed || typeof this.settings.scriptLastUsed !== 'object') {
+        this.settings.scriptLastUsed = {};
+      }
+      this.settings.scriptLastUsed[scriptId] = Date.now();
+      this._writeSeq++;
+      BESAdapter.set('global_settings', this.settings).catch(() => {});
     }
 
     _touchTimestamp(entryKey) {
@@ -1029,7 +1091,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.11.1',
+          v: '1.12.0',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -1216,7 +1278,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.11.1), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.12.0), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -3006,13 +3068,22 @@
 
     _applyCtx(ctx) {
       const hiddenAds = [];
+      let newlyHidden = 0;
       ctx.hide.forEach(([target, reason]) => {
-        if ((reason === 'zap' || !ctx.protect.has(target)) && this._hide(target, reason) && this.AD_REASONS.includes(reason)) {
-          hiddenAds.push(target);
+        if ((reason === 'zap' || !ctx.protect.has(target)) && this._hide(target, reason)) {
+          newlyHidden++;
+          if (this.AD_REASONS.includes(reason)) hiddenAds.push(target);
         }
       });
       this._collapseShells(hiddenAds, ctx);
       ctx.statics.forEach(target => this._setStyle(target, 'position', 'static'));
+      if (newlyHidden > 0) {
+        try {
+          window.dispatchEvent(new CustomEvent('besing:tool-activity', {
+            detail: { id: 'ad-cleaner', count: this._hidden ? this._hidden.size : newlyHidden, mode: 'set', flash: false }
+          }));
+        } catch (e) {}
+      }
     },
 
     // Runs inside the MutationObserver callback, which the browser runs before it paints, so an ad that is
@@ -6442,6 +6513,7 @@
     id: 'rest-reminder',
     name: 'Rest Reminder',
     version: '1.2.0',
+    activationMode: 'global',
     description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
     category: 'Productivity',
     SHARED_KEY: 'rest_reminder',
@@ -7507,7 +7579,8 @@
       const mod = {
     id: 'browser-sync',
     name: 'Browser Sync',
-    version: '1.0.0',
+    version: '1.1.0',
+    activationMode: 'global',
     description: 'Sync open tabs, tab groups, 7-day history, closed tabs, and active usage time across PC Edge, Safari (Stay), and multiple devices via your own Supabase database.',
     category: 'Sync',
 
@@ -8351,6 +8424,12 @@
       if (this.isExtensionMode()) {
         return await this._sendExt({ type: 'besing-sync:sync-now', full });
       }
+      if (!this._active) {
+        return { ok: false, error: 'Browser Sync is OFF. Turn it ON above to sync.', cache: await this._getCache(), stats: await this._readShared(this.SHARED_STATS_KEY, null) };
+      }
+      if (!this.parseSyncLink(this._getCloudConfig().syncLink)) {
+        return { ok: false, error: 'Cloud database not linked. Open BESing Settings -> Cloud Database to paste your Sync Link.', cache: await this._getCache(), stats: await this._readShared(this.SHARED_STATS_KEY, null) };
+      }
       const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(this._config || {}));
       if (clean) {
         await this._updateActiveTabRecord(clean, document.title || clean.host, false);
@@ -8602,7 +8681,8 @@
       const mod = {
     id: 'settings-sync',
     name: 'Settings Sync',
-    version: '1.0.0',
+    version: '1.1.0',
+    activationMode: 'global',
     description: 'Sync BESing script modes, configs, site rules, and pet theme across devices with UTC Last-Write-Wins conflict resolution.',
     category: 'Sync',
 
@@ -8809,10 +8889,13 @@
     },
 
     async syncNow({ full = false, force = true } = {}) {
+      if (!this._active) {
+        return { ok: false, error: 'Settings Sync is OFF. Turn it ON above to sync.' };
+      }
       if (this._syncing) return { ok: true, busy: true };
       const mgr = this._manager();
       if (!mgr || !mgr.cloud || !mgr.cloud.isConfigured()) {
-        return { ok: false, error: 'Cloud database not linked. Configure Sync Link in BESing Settings.' };
+        return { ok: false, error: 'Cloud database not linked. Open BESing Settings -> Cloud Database to paste your Sync Link.' };
       }
 
       const meta = await this._readMeta();
@@ -8946,6 +9029,7 @@
     id: 'quick-transfer',
     name: 'Quick Transfer',
     version: '1.0.0',
+    activationMode: 'none',
     description: 'Send copied strings, clipboard screenshots, or files (up to 5 MB) between PC, iPhone, and iPad with automatic 2-day expiry. Open and use anytime without enabling.',
     category: 'Sync',
 
@@ -9159,7 +9243,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.11.1';
+    static CURRENT_VERSION = '1.12.0';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -9345,6 +9429,12 @@
       this._storageSyncing = false;
       this._storageSyncPending = false;
       this._pendingExternalChanges = null;
+      this._activityMap = new Map();
+      this._lastFlashMs = 0;
+      this._alertClearTimer = null;
+      this._lastWorkingCount = -1;
+      this._boundRedirectAlert = null;
+      this._boundToolActivity = null;
     }
 
     // Full shutdown used when another instance replaces this one: stops timers, modules and UI,
@@ -9363,8 +9453,32 @@
         window.removeEventListener('focus', this._boundWindowFocusSync);
         this._boundWindowFocusSync = null;
       }
+      if (this._boundRedirectAlert) {
+        window.removeEventListener('besing:redirect-blocked', this._boundRedirectAlert);
+        this._boundRedirectAlert = null;
+      }
+      if (this._boundToolActivity) {
+        window.removeEventListener('besing:tool-activity', this._boundToolActivity);
+        this._boundToolActivity = null;
+      }
+      this._clearActivityTimers();
       this.teardown();
       this.detachViewportTracking();
+    }
+
+    _clearActivityTimers() {
+      if (this._alertClearTimer) {
+        clearTimeout(this._alertClearTimer);
+        this._alertClearTimer = null;
+      }
+      if (this._activityMap) {
+        this._activityMap.forEach(entry => {
+          if (entry && entry.expireTimer) {
+            clearTimeout(entry.expireTimer);
+            entry.expireTimer = null;
+          }
+        });
+      }
     }
 
     initPreemptiveShields() {
@@ -9855,6 +9969,7 @@
     }
 
     openScriptConfig(scriptId) {
+      this.storage.recordScriptUsed(scriptId);
       this.activeConfigScriptId = scriptId;
       this.currentView = 'script-config';
       this.renderBody();
@@ -9953,9 +10068,20 @@
       }
 
       if (!this._redirectListenerAttached) {
-        window.addEventListener('besing:redirect-blocked', () => {
-          this.blinkRedirectAlert();
-        });
+        this._boundRedirectAlert = () => {
+          this.recordToolActivity('prevent-redirect', { count: 1, flash: true });
+        };
+        this._boundToolActivity = (ev) => {
+          const d = ev && ev.detail;
+          if (!d || !d.id) return;
+          this.recordToolActivity(String(d.id), {
+            count: d.count !== undefined ? d.count : 1,
+            mode: d.mode === 'set' ? 'set' : 'add',
+            flash: Boolean(d.flash)
+          });
+        };
+        window.addEventListener('besing:redirect-blocked', this._boundRedirectAlert);
+        window.addEventListener('besing:tool-activity', this._boundToolActivity);
         this._redirectListenerAttached = true;
       }
     }
@@ -10131,15 +10257,193 @@
 
     blinkRedirectAlert() {
       if (!this.widgetEl) return;
+      const now = Date.now();
+      if (now - this._lastFlashMs < ALERT_MIN_FLASH_GAP_MS) return;
+      this._lastFlashMs = now;
       this.widgetEl.classList.remove('redirect-alert');
       void this.widgetEl.offsetWidth;
       this.widgetEl.classList.add('redirect-alert');
-      setTimeout(() => {
+      if (this._alertClearTimer) clearTimeout(this._alertClearTimer);
+      this._alertClearTimer = setTimeout(() => {
+        this._alertClearTimer = null;
         if (this.widgetEl) this.widgetEl.classList.remove('redirect-alert');
-      }, 1200);
+      }, 1100);
+    }
+
+    // Tracks tool invocations with minimal overhead:
+    // - Flash-requesting tools (e.g. prevent-redirect) may flash red at most 5 times within 30s.
+    // - Once a tool exceeds 5 flashes in 30s (or reports silent background work like ad-cleaner),
+    //   it folds into the bottom-right green working badge until 30s of quiet pass.
+    recordToolActivity(scriptId, { count = 1, flash = false, mode = 'add' } = {}) {
+      if (this.disposed || !scriptId) return;
+      const now = Date.now();
+      let entry = this._activityMap.get(scriptId);
+      if (!entry) {
+        entry = { totalCount: 0, recentFlashTimes: [], folded: false, active: false, expireTimer: null, lastEventAt: 0 };
+        this._activityMap.set(scriptId, entry);
+      }
+      const num = Number(count);
+      if (mode === 'set') {
+        entry.totalCount = Number.isFinite(num) ? Math.max(0, Math.floor(num)) : entry.totalCount;
+      } else {
+        entry.totalCount += Number.isFinite(num) && num > 0 ? Math.floor(num) : 1;
+      }
+      entry.lastEventAt = now;
+
+      if (flash) {
+        // Keep only flashes within the rolling 30s window (bounded at 5 timestamps).
+        const cutoff = now - ALERT_WINDOW_MS;
+        let keep = 0;
+        for (let i = 0; i < entry.recentFlashTimes.length; i++) {
+          if (entry.recentFlashTimes[i] >= cutoff) {
+            entry.recentFlashTimes[keep++] = entry.recentFlashTimes[i];
+          }
+        }
+        entry.recentFlashTimes.length = keep;
+
+        if (!entry.folded && entry.recentFlashTimes.length < ALERT_MAX_FLASHES) {
+          entry.recentFlashTimes.push(now);
+          this.blinkRedirectAlert();
+        } else {
+          entry.folded = true;
+          entry.active = true;
+        }
+      } else {
+        entry.active = true;
+      }
+
+      // Single resettable 30s silence timer per tool: removes it from working badge and resets flash budget.
+      if (entry.expireTimer) clearTimeout(entry.expireTimer);
+      entry.expireTimer = setTimeout(() => {
+        entry.expireTimer = null;
+        entry.active = false;
+        entry.folded = false;
+        entry.recentFlashTimes.length = 0;
+        this.updateWorkingBadge();
+      }, ALERT_WINDOW_MS);
+
+      this.updateWorkingBadge();
+    }
+
+    updateWorkingBadge() {
+      if (!this.widgetEl) return;
+      let workingCount = 0;
+      const activeNames = [];
+      this._activityMap.forEach((entry, id) => {
+        if (entry && entry.active) {
+          workingCount++;
+          const mod = this.modules.find(m => m.id === id);
+          activeNames.push((mod && mod.name) || id);
+        }
+      });
+
+      let badge = this.widgetEl.querySelector('.besing-badge-working');
+      if (workingCount === this._lastWorkingCount && badge) return;
+      this._lastWorkingCount = workingCount;
+
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'besing-badge-working';
+        this.widgetEl.appendChild(badge);
+      }
+      badge.textContent = String(workingCount);
+      badge.style.display = workingCount > 0 ? 'flex' : 'none';
+      badge.title = workingCount > 0 ? `Actively working: ${activeNames.join(', ')}` : '';
+    }
+
+    _formatCompactAgo(ts) {
+      if (!ts || !Number.isFinite(Number(ts))) return '';
+      const sec = Math.max(0, Math.floor((Date.now() - Number(ts)) / 1000));
+      if (sec < 60) return `${sec}s ago`;
+      if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+      if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+      return `${Math.floor(sec / 86400)}d ago`;
+    }
+
+    // Zero-polling lazy card summary stat evaluated once when the Extensions list renders.
+    getCardStatSync(m, currentMode) {
+      if (!m) return '';
+      if (typeof m.getSummaryStat === 'function') {
+        try {
+          const s = m.getSummaryStat();
+          if (s) return String(s);
+        } catch (e) {}
+      }
+      const act = this._activityMap.get(m.id);
+      if (m.id === 'prevent-redirect') {
+        const n = act ? act.totalCount : 0;
+        if (n > 0) return `${n} blocked`;
+        return currentMode === 'off' || currentMode === 'site-off' ? '' : '0 blocked';
+      }
+      if (m.id === 'ad-cleaner') {
+        const hidden = (m._hidden && typeof m._hidden.size === 'number') ? m._hidden.size : (act ? act.totalCount : 0);
+        if (hidden > 0) return `${hidden} hidden`;
+        return currentMode === 'off' || currentMode === 'site-off' ? '' : '0 hidden';
+      }
+      if (m.id === 'rest-reminder') {
+        if (currentMode === 'off') return '';
+        const due = m._state && Number(m._state.due);
+        if (due && due > Date.now()) {
+          const mins = Math.max(1, Math.ceil((due - Date.now()) / 60000));
+          return `${mins}m left`;
+        }
+        return 'active';
+      }
+      if (m.id === 'quick-transfer') {
+        return this.cloud && this.cloud.isConfigured() ? 'ready' : 'not linked';
+      }
+      if (m.id === 'browser-sync' || m.id === 'settings-sync') {
+        if (currentMode === 'off') return '';
+        return (this.cloud && this.cloud.isConfigured()) ? '' : 'not linked';
+      }
+      return '';
+    }
+
+    // Single lazy async hydration for sync scripts' last-sync timestamps when the script list opens.
+    async populateAsyncCardStats(container) {
+      if (!container || !container.isConnected) return;
+      const updateSlot = (id, text, isErr = false) => {
+        const slot = container.querySelector(`.besing-card-stat[data-stat-id="${id}"]`);
+        if (!slot || !slot.isConnected) return;
+        slot.textContent = text;
+        slot.style.display = text ? 'block' : 'none';
+        slot.classList.toggle('is-error', Boolean(isErr));
+      };
+
+      const bsMod = this.modules.find(m => m.id === 'browser-sync');
+      if (bsMod && this.storage.getScriptMode('browser-sync') === 'on' && this.cloud.isConfigured()) {
+        try {
+          const st = typeof bsMod.getState === 'function' ? await bsMod.getState() : null;
+          if (st && st.cache) {
+            if (st.cache.lastError) {
+              updateSlot('browser-sync', 'sync err', true);
+            } else {
+              const latest = Math.max(Number(st.cache.lastPullAt) || 0, Number(st.cache.lastPushAt) || 0);
+              updateSlot('browser-sync', latest ? `sync ${this._formatCompactAgo(latest)}` : 'linked', false);
+            }
+          }
+        } catch (e) {}
+      }
+
+      const ssMod = this.modules.find(m => m.id === 'settings-sync');
+      if (ssMod && this.storage.getScriptMode('settings-sync') === 'on' && this.cloud.isConfigured()) {
+        try {
+          const st = typeof ssMod.getStatus === 'function' ? await ssMod.getStatus() : null;
+          if (st && st.meta) {
+            if (st.meta.lastError) {
+              updateSlot('settings-sync', 'sync err', true);
+            } else {
+              const ts = Number(st.meta.lastSyncAt) || 0;
+              updateSlot('settings-sync', ts ? `sync ${this._formatCompactAgo(ts)}` : 'linked', false);
+            }
+          }
+        } catch (e) {}
+      }
     }
 
     teardown() {
+      this._clearActivityTimers();
+      this._lastWorkingCount = -1;
       if (this._heartbeatInterval) {
         clearInterval(this._heartbeatInterval);
         this._heartbeatInterval = null;
@@ -10188,8 +10492,10 @@
       }
 
       this.widgetEl = btn;
+      this._lastWorkingCount = -1;
       this.updatePetIcon(btn);
       this.updateBadge();
+      this.updateWorkingBadge();
       this.setupDragging(btn);
       shadow.appendChild(btn);
 
@@ -10826,7 +11132,7 @@
               <div class="besing-add-override-row" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
                 <input type="text" class="besing-input-sm" id="besing-settings-new-host" placeholder="domain (e.g. google.com, rbc.com)" style="flex:1 1 100%;min-width:0;">
                 <select class="besing-select-sm" id="besing-settings-new-script" style="flex:1 1 0;min-width:0;">
-                  ${this.modules.map(mod => `<option value="${mod.id}">${mod.name}</option>`).join('')}
+                  ${this.modules.filter(mod => this.storage.getActivationMode(mod.id) === 'site').map(mod => `<option value="${mod.id}">${mod.name}</option>`).join('')}
                 </select>
                 <select class="besing-select-sm" id="besing-settings-new-mode" style="flex:1 1 0;min-width:0;">
                   <option value="site">Site Only (ON)</option>
@@ -11280,20 +11586,59 @@
           this.setSafeHTML(extContainer, '');
           const q = this.searchQuery;
           const currentHost = this.storage.getCurrentHost();
+          const sortMode = this.storage.getScriptSort();
+          const lastUsedMap = (this.storage.settings && this.storage.settings.scriptLastUsed) || {};
+
           const filtered = this.modules.filter(m => {
             if (!q) return true;
             return (m.name || '').toLowerCase().includes(q) || (m.description || '').toLowerCase().includes(q);
           });
 
+          const modeRank = (m) => {
+            const actMode = this.storage.getActivationMode(m.id);
+            if (actMode === 'none') return 2;
+            const st = this.storage.getScriptMode(m.id, currentHost);
+            if (st === 'on') return 0;
+            if (st === 'site') return 1;
+            return 3;
+          };
+
+          const sorted = filtered.slice().sort((a, b) => {
+            if (sortMode === 'recent') {
+              const ta = Number(lastUsedMap[a.id]) || 0;
+              const tb = Number(lastUsedMap[b.id]) || 0;
+              if (tb !== ta) return tb - ta;
+              return (a.name || a.id).localeCompare(b.name || b.id);
+            }
+            const ra = modeRank(a);
+            const rb = modeRank(b);
+            if (ra !== rb) return ra - rb;
+            return (a.name || a.id).localeCompare(b.name || b.id);
+          });
+
           const header = document.createElement('div');
           header.className = 'besing-section-heading';
           this.setSafeHTML(header, `
-            <span>Installed Scripts</span>
-            <span class="besing-pill-count">${filtered.length}</span>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span>Installed Scripts</span>
+              <span class="besing-pill-count">${sorted.length}</span>
+            </div>
+            <div class="besing-sort-group" title="Sort scripts">
+              <button type="button" class="besing-sort-btn ${sortMode === 'smart' ? 'active' : ''}" data-sort="smart" title="Global ON -> Site ON -> Tools -> Off (A-Z)">Smart</button>
+              <button type="button" class="besing-sort-btn ${sortMode === 'recent' ? 'active' : ''}" data-sort="recent" title="Most recently opened configuration first">Recent</button>
+            </div>
           `);
+          header.querySelectorAll('.besing-sort-btn').forEach(btn => {
+            btn.onclick = async (e) => {
+              e.stopPropagation();
+              const nextSort = btn.getAttribute('data-sort') || 'smart';
+              await this.storage.setScriptSort(nextSort);
+              renderCards();
+            };
+          });
           extContainer.appendChild(header);
 
-          if (!filtered.length) {
+          if (!sorted.length) {
             const empty = document.createElement('div');
             empty.className = 'besing-empty-state';
             empty.textContent = q ? 'No scripts match your search.' : 'No scripts found.';
@@ -11302,24 +11647,41 @@
             return;
           }
 
-          filtered.forEach(m => {
+          sorted.forEach(m => {
             const card = document.createElement('div');
             card.className = 'besing-ext-card';
             card.setAttribute('data-id', m.id);
-            let currentMode = this.storage.getScriptMode(m.id, currentHost); // 'off' | 'site' | 'site-off' | 'on'
+            const actMode = this.storage.getActivationMode(m.id); // 'site' | 'global' | 'none'
+            let currentMode = this.storage.getScriptMode(m.id, currentHost); // 'none' | 'off' | 'site' | 'site-off' | 'on'
 
-            let rotatorText = 'off';
-            let rotatorTitle = 'State: OFF. Click to turn ON globally';
-            if (currentMode === 'on') {
-              rotatorText = 'on';
-              rotatorTitle = 'State: GLOBAL ON. Click to activate on THIS SITE ONLY';
-            } else if (currentMode === 'site') {
-              rotatorText = 'site on';
-              rotatorTitle = `State: SITE ON (${currentHost}). Click to turn OFF globally`;
-            } else if (currentMode === 'site-off') {
-              rotatorText = 'site off';
-              rotatorTitle = `State: EXCLUDED on ${currentHost}. Click to turn OFF globally`;
-            }
+            const describeRotator = (mode) => {
+              if (actMode === 'global') {
+                return mode === 'on'
+                  ? { text: 'on', title: 'State: GLOBAL ON. Click to turn OFF' }
+                  : { text: 'off', title: 'State: OFF. Click to turn ON globally' };
+              }
+              if (mode === 'on') return { text: 'on', title: 'State: GLOBAL ON. Click to activate on THIS SITE ONLY' };
+              if (mode === 'site') return { text: 'site on', title: `State: SITE ON (${currentHost}). Click to turn OFF globally` };
+              if (mode === 'site-off') return { text: 'site off', title: `State: EXCLUDED on ${currentHost}. Click to turn OFF globally` };
+              return { text: 'off', title: 'State: OFF. Click to turn ON globally' };
+            };
+
+            const rot = describeRotator(currentMode);
+            const statText = this.getCardStatSync(m, currentMode);
+
+            const controlsHtml = actMode === 'none'
+              ? `
+                <button type="button" class="besing-tool-pill" data-script-id="${m.id}" title="Open ${m.name} (no activation needed)">Open</button>
+              `
+              : `
+                <button type="button" class="besing-btn-script-gear" data-script-id="${m.id}" title="Configure ${m.name}">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                </button>
+                <button type="button" class="besing-rotator-toggle mode-${currentMode}" data-script-id="${m.id}" title="${rot.title}">
+                  <span class="besing-rotator-knob"></span>
+                  <span class="besing-rotator-text">${rot.text}</span>
+                </button>
+              `;
 
             this.setSafeHTML(card, `
               <div class="besing-ext-info-group">
@@ -11331,54 +11693,57 @@
                   <p class="besing-ext-desc">${m.description || ''}</p>
                 </div>
               </div>
-              <div class="besing-ext-actions">
-                <button type="button" class="besing-btn-script-gear" data-script-id="${m.id}" title="Configure ${m.name}">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                </button>
-                <button type="button" class="besing-rotator-toggle mode-${currentMode}" data-script-id="${m.id}" title="${rotatorTitle}">
-                  <span class="besing-rotator-knob"></span>
-                  <span class="besing-rotator-text">${rotatorText}</span>
-                </button>
+              <div class="besing-ext-right">
+                <div class="besing-ext-actions">
+                  ${controlsHtml}
+                </div>
+                <div class="besing-card-stat" data-stat-id="${m.id}" style="display:${statText ? 'block' : 'none'};">${statText}</div>
               </div>
             `);
 
+            const toolBtn = card.querySelector('.besing-tool-pill');
+            if (toolBtn) {
+              toolBtn.onclick = (e) => {
+                e.stopPropagation();
+                this.openScriptConfig(m.id);
+              };
+            }
+
             const rotatorBtn = card.querySelector('.besing-rotator-toggle');
-            rotatorBtn.onclick = async (e) => {
-              e.stopPropagation();
-              let nextMode = 'on';
-              if (currentMode === 'off') {
-                nextMode = 'on';
-              } else if (currentMode === 'on') {
-                nextMode = 'site';
-              } else if (currentMode === 'site') {
-                nextMode = 'off';
-              } else if (currentMode === 'site-off') {
-                nextMode = 'off';
-              }
-              currentMode = nextMode;
-              await this.onScriptModeChanged(m.id, nextMode);
-              await this.storage.setScriptMode(m.id, nextMode, currentHost);
+            if (rotatorBtn) {
+              rotatorBtn.onclick = async (e) => {
+                e.stopPropagation();
+                let nextMode = 'on';
+                if (actMode === 'global') {
+                  nextMode = currentMode === 'on' ? 'off' : 'on';
+                } else if (currentMode === 'off') {
+                  nextMode = 'on';
+                } else if (currentMode === 'on') {
+                  nextMode = 'site';
+                } else {
+                  nextMode = 'off';
+                }
+                currentMode = nextMode;
+                await this.onScriptModeChanged(m.id, nextMode);
+                await this.storage.setScriptMode(m.id, nextMode, currentHost);
 
-              // Update toggle state in-place to prevent resetting scroll position to top
-              rotatorBtn.className = `besing-rotator-toggle mode-${nextMode}`;
-              let rText = 'off';
-              let rTitle = 'State: OFF. Click to turn ON globally';
-              if (nextMode === 'on') {
-                rText = 'on';
-                rTitle = 'State: GLOBAL ON. Click to activate on THIS SITE ONLY';
-              } else if (nextMode === 'site') {
-                rText = 'site on';
-                rTitle = `State: SITE ON (${currentHost}). Click to turn OFF globally`;
-              } else if (nextMode === 'site-off') {
-                rText = 'site off';
-                rTitle = `State: EXCLUDED on ${currentHost}. Click to turn OFF globally`;
-              }
-              rotatorBtn.title = rTitle;
-              const textSpan = rotatorBtn.querySelector('.besing-rotator-text');
-              if (textSpan) textSpan.textContent = rText;
+                // Update toggle state in-place to prevent resetting scroll position to top
+                rotatorBtn.className = `besing-rotator-toggle mode-${nextMode}`;
+                const nextRot = describeRotator(nextMode);
+                rotatorBtn.title = nextRot.title;
+                const textSpan = rotatorBtn.querySelector('.besing-rotator-text');
+                if (textSpan) textSpan.textContent = nextRot.text;
 
-              this.refreshCurrentSiteModules();
-            };
+                this.refreshCurrentSiteModules();
+                const statEl = card.querySelector('.besing-card-stat');
+                if (statEl) {
+                  const nextStat = this.getCardStatSync(m, nextMode);
+                  statEl.textContent = nextStat;
+                  statEl.style.display = nextStat ? 'block' : 'none';
+                  statEl.classList.remove('is-error');
+                }
+              };
+            }
 
             const btnGear = card.querySelector('.besing-btn-script-gear');
             if (btnGear) {
@@ -11400,6 +11765,8 @@
 
             extContainer.appendChild(card);
           });
+
+          this.populateAsyncCardStats(extContainer);
 
           if (body && prevScroll > 0) body.scrollTop = prevScroll;
           requestAnimationFrame(() => {
@@ -11442,11 +11809,29 @@
       }
 
       const currentHost = this.storage.getCurrentHost();
+      const actMode = this.storage.getActivationMode(m.id);
       const currentMode = this.storage.getScriptMode(m.id, currentHost);
       const cfg = this.storage.getScriptConfig(m.id, currentHost);
 
       let scopeNotice = '';
-      if (currentMode === 'site') {
+      if (actMode === 'none') {
+        scopeNotice = '';
+      } else if (actMode === 'global') {
+        if (currentMode === 'on') {
+          scopeNotice = `
+            <div class="besing-config-scope global">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/></svg>
+              <div><strong>Global ON:</strong> Runs across all sites. Turn OFF above to pause background activity.</div>
+            </div>
+          `;
+        } else {
+          scopeNotice = `
+            <div class="besing-config-scope off">
+              <div>⚪ <strong>Script is currently OFF.</strong> Choose <strong>ON</strong> above to enable it globally.</div>
+            </div>
+          `;
+        }
+      } else if (currentMode === 'site') {
         scopeNotice = `
           <div class="besing-config-scope site">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></svg>
@@ -12330,16 +12715,30 @@
         `;
       }
 
-      // All four modes live here; the script list keeps its simpler off / on / site on cycle.
-      const triButtonsHtml = `
-        <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off" title="Turn off on every site">OFF</button>
-        <button type="button" class="besing-tri-btn ${currentMode === 'site-off' ? 'active active-site-off' : ''}" data-mode="site-off" title="Turn off on ${currentHost} only; other sites keep their setting">SITE OFF</button>
-        <button type="button" class="besing-tri-btn ${currentMode === 'site' ? 'active active-site' : ''}" data-mode="site" title="Run on ${currentHost} only; off on other sites">SITE ONLY</button>
-        <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on" title="Run on every site">ON</button>
-      `;
+      // Activation controls reflect the script's activation policy ('site' | 'global' | 'none').
+      let headerToggleHtml = '';
+      if (actMode === 'none') {
+        headerToggleHtml = `<span class="besing-tool-badge" title="On-demand tool with no background activation">Tool · Open &amp; Use</span>`;
+      } else if (actMode === 'global') {
+        headerToggleHtml = `
+          <div class="besing-tri-toggle" title="Global status">
+            <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off" title="Turn off everywhere">OFF</button>
+            <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on" title="Run globally">ON</button>
+          </div>
+        `;
+      } else {
+        headerToggleHtml = `
+          <div class="besing-tri-toggle" title="Status on ${currentHost}">
+            <button type="button" class="besing-tri-btn ${currentMode === 'off' ? 'active active-off' : ''}" data-mode="off" title="Turn off on every site">OFF</button>
+            <button type="button" class="besing-tri-btn ${currentMode === 'site-off' ? 'active active-site-off' : ''}" data-mode="site-off" title="Turn off on ${currentHost} only; other sites keep their setting">SITE OFF</button>
+            <button type="button" class="besing-tri-btn ${currentMode === 'site' ? 'active active-site' : ''}" data-mode="site" title="Run on ${currentHost} only; off on other sites">SITE ONLY</button>
+            <button type="button" class="besing-tri-btn ${currentMode === 'on' ? 'active active-on' : ''}" data-mode="on" title="Run on every site">ON</button>
+          </div>
+        `;
+      }
 
       // Settings lock: where this script's settings are read from and saved to on this site.
-      const canLock = hasSettings && !GLOBAL_ONLY_SETTINGS.has(m.id);
+      const canLock = hasSettings && actMode === 'site' && !GLOBAL_ONLY_SETTINGS.has(m.id);
       const isLocked = canLock && this.storage.isConfigLocked(m.id, currentHost);
       const lockHtml = canLock ? `
         <div class="besing-config-section">
@@ -12365,9 +12764,7 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
               <span>All Scripts</span>
             </button>
-            <div class="besing-tri-toggle" title="Status on ${currentHost}">
-              ${triButtonsHtml}
-            </div>
+            ${headerToggleHtml}
           </div>
           <div class="besing-secondary-title-group">
             <div class="besing-ext-icon sm">${m.icon || ''}</div>
@@ -13243,7 +13640,7 @@
           });
         };
 
-        const updateHeader = (state) => {
+        const updateHeader = (state, overrideError = null) => {
           const dot = el('#bsync-status-dot');
           const lbl = el('#bsync-status-label');
           const metaLine = el('#bsync-meta-line');
@@ -13255,20 +13652,31 @@
           if (!state || !state.ok) {
             if (dot) dot.style.background = '#ef4444';
             if (lbl) lbl.textContent = 'Unavailable';
-            if (metaLine) metaLine.textContent = (state && state.error) ? state.error : 'Could not read sync state';
+            if (metaLine) {
+              metaLine.textContent = overrideError || ((state && state.error) ? state.error : 'Could not read sync state');
+              metaLine.style.color = '#fca5a5';
+            }
             return;
           }
           const c = state.cache || {};
-          if (dot) dot.style.background = c.lastError ? '#ef4444' : (state.configured ? '#34d399' : '#f59e0b');
-          if (lbl) lbl.textContent = c.lastError ? 'Sync Error' : (state.configured ? 'Linked' : 'Not Linked');
+          const isEnabled = this.storage.getScriptMode('browser-sync') === 'on';
+          const errText = overrideError || c.lastError || null;
+          if (dot) dot.style.background = errText ? '#ef4444' : (!isEnabled ? '#64748b' : (state.configured ? '#34d399' : '#f59e0b'));
+          if (lbl) lbl.textContent = errText ? 'Sync Error' : (!isEnabled ? 'Sync OFF' : (state.configured ? 'Linked' : 'Not Linked'));
           if (metaLine) {
-            if (c.lastError) {
-              metaLine.textContent = c.lastError;
+            if (errText) {
+              metaLine.textContent = errText;
+              metaLine.style.color = '#fca5a5';
+            } else if (!isEnabled) {
+              metaLine.textContent = 'Browser Sync is OFF. Turn it ON above to resume syncing.';
+              metaLine.style.color = '#94a3b8';
             } else if (state.configured) {
               const devCnt = (c.devices || []).length;
               metaLine.textContent = `${devCnt} device(s) · Pull ${fmtAgo(c.lastPullAt)} · Push ${fmtAgo(c.lastPushAt)}`;
+              metaLine.style.color = '#94a3b8';
             } else {
-              metaLine.textContent = 'Paste a Sync Link in Setup to connect your devices.';
+              metaLine.textContent = 'Cloud database not linked. Paste a Sync Link in Settings or Setup.';
+              metaLine.style.color = '#fbbf24';
             }
           }
           if (trafficLine) {
@@ -13281,10 +13689,10 @@
           }
         };
 
-        const refreshView = async () => {
+        const refreshView = async (overrideError = null) => {
           if (typeof m.getState !== 'function') return;
           liveState = await m.getState();
-          updateHeader(liveState);
+          updateHeader(liveState, overrideError);
           populateFilters(liveState && liveState.cache ? liveState.cache.devices : []);
           renderDevices(liveState);
           renderHistory(liveState);
@@ -13301,9 +13709,13 @@
             const r = await m.syncNow(false);
             btnNow.disabled = false;
             btnNow.textContent = 'Sync Now';
-            await refreshView();
+            const manualErr = (r && !r.ok) ? (r.error || 'Sync failed.') : null;
+            await refreshView(manualErr);
             const setupMsg = el('#bsync-setup-msg');
-            if (setupMsg && r && r.error) setupMsg.textContent = `Sync error: ${r.error}`;
+            if (setupMsg && manualErr) {
+              setupMsg.textContent = manualErr;
+              setupMsg.style.color = '#fca5a5';
+            }
           };
         }
 
@@ -13459,20 +13871,32 @@
           return `${Math.floor(sec / 3600)}h ago`;
         };
 
-        const refreshSettingsSync = async () => {
+        const refreshSettingsSync = async (overrideError = null) => {
           if (typeof m.getStatus !== 'function') return;
           const st = await m.getStatus();
           const meta = (st && st.meta) || {};
+          const isEnabled = this.storage.getScriptMode('settings-sync') === 'on';
+          const errText = overrideError || meta.lastError || null;
           const dot = el('#ssync-dot');
           const lbl = el('#ssync-status-label');
           const metaLine = el('#ssync-meta-line');
           const logList = el('#ssync-log-list');
-          if (dot) dot.style.background = meta.lastError ? '#ef4444' : (st.configured ? '#34d399' : '#f59e0b');
-          if (lbl) lbl.textContent = meta.lastError ? 'Sync Error' : (st.configured ? 'Cloud Linked' : 'Not Linked');
+          if (dot) dot.style.background = errText ? '#ef4444' : (!isEnabled ? '#64748b' : (st.configured ? '#34d399' : '#f59e0b'));
+          if (lbl) lbl.textContent = errText ? 'Sync Error' : (!isEnabled ? 'Sync OFF' : (st.configured ? 'Cloud Linked' : 'Not Linked'));
           if (metaLine) {
-            metaLine.textContent = meta.lastError
-              ? meta.lastError
-              : (st.configured ? `Last sync ${fmtAgo(meta.lastSyncAt)} · ${st.trackedKeys || 0} tracked key(s)` : 'Configure your shared Sync Link in BESing Settings.');
+            if (errText) {
+              metaLine.textContent = errText;
+              metaLine.style.color = '#fca5a5';
+            } else if (!isEnabled) {
+              metaLine.textContent = 'Settings Sync is OFF. Turn it ON above to resume syncing.';
+              metaLine.style.color = '#94a3b8';
+            } else if (st.configured) {
+              metaLine.textContent = `Last sync ${fmtAgo(meta.lastSyncAt)} · ${st.trackedKeys || 0} tracked key(s)`;
+              metaLine.style.color = '#94a3b8';
+            } else {
+              metaLine.textContent = 'Configure your shared Sync Link in BESing Settings.';
+              metaLine.style.color = '#fbbf24';
+            }
           }
           if (logList) {
             while (logList.firstChild) logList.removeChild(logList.firstChild);
@@ -13504,9 +13928,10 @@
         const runSync = async (full) => {
           const b = el(full ? '#btn-ssync-full' : '#btn-ssync-now');
           if (b) { b.disabled = true; b.textContent = 'Syncing...'; }
-          await m.syncNow({ full, force: true });
+          const r = await m.syncNow({ full, force: true });
           if (b) { b.disabled = false; b.textContent = full ? 'Full' : 'Sync Now'; }
-          await refreshSettingsSync();
+          const manualErr = (r && !r.ok) ? (r.error || 'Settings sync failed.') : null;
+          await refreshSettingsSync(manualErr);
         };
         if (el('#btn-ssync-now')) el('#btn-ssync-now').onclick = () => runSync(false);
         if (el('#btn-ssync-full')) el('#btn-ssync-full').onclick = () => runSync(true);
@@ -13878,6 +14303,7 @@
         .besing-trigger.besing-pulse-alert { border-color: #38bdf8 !important; box-shadow: 0 0 25px rgba(56, 189, 248, 1), 0 0 50px rgba(99, 102, 241, 0.8) !important; animation: besingPulsePop 0.6s cubic-bezier(0.16, 1, 0.3, 1) 3 !important; }
         @keyframes besingPulsePop { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.35); } }
         .besing-badge-count { position: absolute; top: -2px; right: -2px; background: linear-gradient(135deg, #06b6d4, #3b82f6); color: #fff; font-size: 10px; font-weight: 700; height: 18px; min-width: 18px; border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #0f172a; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
+        .besing-badge-working { position: absolute; bottom: -2px; right: -2px; background: linear-gradient(135deg, #10b981, #059669); color: #fff; font-size: 9.5px; font-weight: 700; height: 17px; min-width: 17px; border-radius: 9px; display: none; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid #0f172a; box-shadow: 0 2px 6px rgba(16, 185, 129, 0.45); }
         .besing-pet-eye { transform-origin: center; animation: petBlink 4.5s infinite; }
         @media (hover: hover) { .besing-pet-face:hover .besing-pet-eye { animation: none; transform: scaleY(0.2) translateY(1px); } }
         @keyframes petBlink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
@@ -13980,7 +14406,17 @@
         .besing-section-heading { display: flex; align-items: center; justify-content: space-between; font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.6px; margin: 4px 0 2px 0; }
         .besing-pill-count { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
         .besing-cat-badge { font-size: 9px; font-weight: 600; padding: 1px 6px; border-radius: 6px; background: rgba(99, 102, 241, 0.15); color: #a5b4fc; margin-left: 4px; }
+        .besing-ext-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
         .besing-ext-actions { display: flex; align-items: center; gap: 8px; }
+        .besing-card-stat { font-size: 9.5px; font-weight: 600; color: #94a3b8; line-height: 1.15; letter-spacing: 0.1px; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+        .besing-card-stat.is-error { color: #fca5a5; }
+        .besing-sort-group { display: inline-flex; align-items: center; background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 7px; padding: 2px; gap: 2px; }
+        .besing-sort-btn { background: transparent; border: none; color: #94a3b8; font-size: 9.5px; font-weight: 600; padding: 2px 7px; border-radius: 5px; cursor: pointer; text-transform: none; letter-spacing: 0.1px; transition: all 0.15s ease; }
+        .besing-sort-btn:hover { color: #e2e8f0; background: rgba(255, 255, 255, 0.06); }
+        .besing-sort-btn.active { background: rgba(99, 102, 241, 0.35); color: #e0e7ff; font-weight: 700; }
+        .besing-tool-pill { background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8; font-size: 10.5px; font-weight: 700; height: 24px; min-width: 62px; padding: 0 12px; border-radius: 12px; cursor: pointer; transition: all 0.15s ease; }
+        .besing-tool-pill:hover { background: rgba(56, 189, 248, 0.25); color: #e0f2fe; transform: scale(1.02); }
+        .besing-tool-badge { font-size: 10px; font-weight: 700; color: #38bdf8; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); padding: 4px 10px; border-radius: 8px; white-space: nowrap; }
         .besing-btn-script-gear { background: transparent; border: none; color: #64748b; width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; }
         .besing-btn-script-gear:hover { background: rgba(255, 255, 255, 0.08); color: #cbd5e1; transform: rotate(30deg); }
         .besing-secondary-header { display: flex; flex-direction: column; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }

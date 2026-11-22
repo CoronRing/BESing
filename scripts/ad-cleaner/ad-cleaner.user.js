@@ -788,13 +788,22 @@
 
     _applyCtx(ctx) {
       const hiddenAds = [];
+      let newlyHidden = 0;
       ctx.hide.forEach(([target, reason]) => {
-        if ((reason === 'zap' || !ctx.protect.has(target)) && this._hide(target, reason) && this.AD_REASONS.includes(reason)) {
-          hiddenAds.push(target);
+        if ((reason === 'zap' || !ctx.protect.has(target)) && this._hide(target, reason)) {
+          newlyHidden++;
+          if (this.AD_REASONS.includes(reason)) hiddenAds.push(target);
         }
       });
       this._collapseShells(hiddenAds, ctx);
       ctx.statics.forEach(target => this._setStyle(target, 'position', 'static'));
+      if (newlyHidden > 0) {
+        try {
+          window.dispatchEvent(new CustomEvent('besing:tool-activity', {
+            detail: { id: 'ad-cleaner', count: this._hidden ? this._hidden.size : newlyHidden, mode: 'set', flash: false }
+          }));
+        } catch (e) {}
+      }
     },
 
     // Runs inside the MutationObserver callback, which the browser runs before it paints, so an ad that is

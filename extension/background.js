@@ -699,13 +699,25 @@ async function pullSync({ full = false, force = false } = {}) {
 }
 
 async function syncNow(fullPull = false, manual = true) {
+  const conf = await getConfig();
+  if (!conf.enabled) {
+    return { ok: false, error: 'Browser Sync is OFF. Turn it ON above to sync.' };
+  }
+  if (!conf.creds) {
+    return { ok: false, error: 'Cloud database not linked. Open BESing Settings -> Cloud Database to paste your Sync Link.' };
+  }
   if (syncingNow) return { ok: true, busy: true };
   syncingNow = true;
   try {
     refreshProfileEmail();
-    const pushRes = await pushSync({ includeSnapshot: true, forceSnapshot: true, force: manual });
-    const pullRes = await pullSync({ full: fullPull, force: manual });
-    return { ok: Boolean(pullRes.ok), push: pushRes, pull: pullRes };
+    const pushRes = await pushSync({ includeSnapshot: true, forceSnapshot: true, force: false });
+    const pullRes = await pullSync({ full: fullPull, force: false });
+    return {
+      ok: Boolean(pullRes.ok),
+      error: (pullRes && pullRes.error) || (pushRes && pushRes.error) || null,
+      push: pushRes,
+      pull: pullRes
+    };
   } finally {
     syncingNow = false;
   }
@@ -766,6 +778,12 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area !== 'local') return;
   if (changes.enabled_scripts || changes.script_configs || changes.global_settings) {
+    const conf = await getConfig();
+    if (!conf.enabled) {
+      if (snapshotTimer) { clearTimeout(snapshotTimer); snapshotTimer = null; }
+      if (visitTimer) { clearTimeout(visitTimer); visitTimer = null; }
+      activeSession = null;
+    }
     refreshProfileEmail();
     await setupAlarms();
   }
@@ -958,10 +976,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg.type === 'besing-sync:sync-now') {
-        const result = await syncNow(Boolean(msg.full));
+        const result = await syncNow(Boolean(msg.full), true);
         const cache = await getCache();
         const res = await storageGet([STORAGE_STATS_KEY]);
-        sendResponse({ ok: result.ok, error: result.pull?.error || result.push?.error || null, cache, stats: res[STORAGE_STATS_KEY] || null });
+        sendResponse({ ok: result.ok, error: result.error || result.pull?.error || result.push?.error || null, cache, stats: res[STORAGE_STATS_KEY] || null });
         return;
       }
 

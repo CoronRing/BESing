@@ -134,7 +134,7 @@
   {
     "id": "browser-sync",
     "name": "Browser Sync",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Sync open tabs, tab groups, 7-day history, closed tabs, and usage time across PC Edge, Safari (Stay), and multiple devices via your own Supabase database.",
     "category": "Sync",
     "author": "BESing Team",
@@ -146,7 +146,7 @@
   {
     "id": "settings-sync",
     "name": "Settings Sync",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Sync BESing script modes, configs, site rules, and pet theme across devices with UTC Last-Write-Wins conflict resolution.",
     "category": "Sync",
     "author": "BESing Team",

@@ -23,6 +23,7 @@
     id: 'rest-reminder',
     name: 'Rest Reminder',
     version: '1.2.0',
+    activationMode: 'global',
     description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
     category: 'Productivity',
     SHARED_KEY: 'rest_reminder',

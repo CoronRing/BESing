@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Settings Sync
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.0
+// @version      1.1.0
 // @description  Sync BESing script modes, configs, site rules, and pet theme across devices with UTC Last-Write-Wins conflict resolution.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,8 @@
   const SettingsSync = {
     id: 'settings-sync',
     name: 'Settings Sync',
-    version: '1.0.0',
+    version: '1.1.0',
+    activationMode: 'global',
     description: 'Sync BESing script modes, configs, site rules, and pet theme across devices with UTC Last-Write-Wins conflict resolution.',
     category: 'Sync',
 
@@ -223,10 +224,13 @@
     },
 
     async syncNow({ full = false, force = true } = {}) {
+      if (!this._active) {
+        return { ok: false, error: 'Settings Sync is OFF. Turn it ON above to sync.' };
+      }
       if (this._syncing) return { ok: true, busy: true };
       const mgr = this._manager();
       if (!mgr || !mgr.cloud || !mgr.cloud.isConfigured()) {
-        return { ok: false, error: 'Cloud database not linked. Configure Sync Link in BESing Settings.' };
+        return { ok: false, error: 'Cloud database not linked. Open BESing Settings -> Cloud Database to paste your Sync Link.' };
       }
 
       const meta = await this._readMeta();

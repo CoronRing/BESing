@@ -17,6 +17,7 @@
     id: 'quick-transfer',
     name: 'Quick Transfer',
     version: '1.0.0',
+    activationMode: 'none',
     description: 'Send copied strings, clipboard screenshots, or files (up to 5 MB) between PC, iPhone, and iPad with automatic 2-day expiry. Open and use anytime without enabling.',
     category: 'Sync',
 

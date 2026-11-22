@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Browser Sync
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.0
+// @version      1.1.0
 // @description  Sync open tabs, tab groups, 7-day history, closed tabs, and active usage time across PC Edge, Safari (Stay), and multiple devices via your own Supabase database.
 // @author       BESing Team
 // @license      MIT
@@ -22,7 +22,8 @@
   const BrowserSync = {
     id: 'browser-sync',
     name: 'Browser Sync',
-    version: '1.0.0',
+    version: '1.1.0',
+    activationMode: 'global',
     description: 'Sync open tabs, tab groups, 7-day history, closed tabs, and active usage time across PC Edge, Safari (Stay), and multiple devices via your own Supabase database.',
     category: 'Sync',
 
@@ -865,6 +866,12 @@
     async syncNow(full = false) {
       if (this.isExtensionMode()) {
         return await this._sendExt({ type: 'besing-sync:sync-now', full });
+      }
+      if (!this._active) {
+        return { ok: false, error: 'Browser Sync is OFF. Turn it ON above to sync.', cache: await this._getCache(), stats: await this._readShared(this.SHARED_STATS_KEY, null) };
+      }
+      if (!this.parseSyncLink(this._getCloudConfig().syncLink)) {
+        return { ok: false, error: 'Cloud database not linked. Open BESing Settings -> Cloud Database to paste your Sync Link.', cache: await this._getCache(), stats: await this._readShared(this.SHARED_STATS_KEY, null) };
       }
       const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(this._config || {}));
       if (clean) {
