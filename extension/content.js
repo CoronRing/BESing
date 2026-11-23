@@ -276,6 +276,7 @@
         cloudSync: {},
         scriptSort: 'smart',
         scriptLastUsed: {},
+        logSyncMode: 'off',
         ...readLocal('global_settings', {})
       };
     }
@@ -289,7 +290,8 @@
         autoCheckUpdates: true,
         cloudSync: {},
         scriptSort: 'smart',
-        scriptLastUsed: {}
+        scriptLastUsed: {},
+        logSyncMode: 'off'
       };
     }
 
@@ -741,6 +743,18 @@
       return this.settings && this.settings.scriptSort === 'recent' ? 'recent' : 'smart';
     }
 
+    getLogSyncMode() {
+      const m = this.settings && this.settings.logSyncMode;
+      return (m === 'device' || m === 'all') ? m : 'off';
+    }
+
+    async setLogSyncMode(mode) {
+      const next = (mode === 'device' || mode === 'all') ? mode : 'off';
+      this._writeSeq++;
+      this.settings.logSyncMode = next;
+      await BESAdapter.set('global_settings', this.settings);
+    }
+
     async setScriptSort(sortMode) {
       const next = sortMode === 'recent' ? 'recent' : 'smart';
       if (this.settings.scriptSort === next) return;
@@ -1058,6 +1072,281 @@
         deviceCount: Array.isArray(d.devices) ? d.devices.length : 0,
         retentionDays: d.retention_days || 7
       };
+    }
+  }
+
+  // Write-only Cloud Debug Log Sync (24h TTL inside besing_script_kv namespace 'debug_logs').
+  // Supports 3 modes: 'off', 'device' (this device only), and 'all' (remote toggle for all devices).
+  class BESLogSync {
+    constructor(app) {
+      this.app = app;
+      this.NAMESPACE = 'debug_logs';
+      this.META_KEY = 'debug_log_sync_meta';
+      this.TTL_HOURS = 24;
+      this.PUSH_MIN_INTERVAL_MS = 180000; // 3 min throttle across tabs
+      this.POLICY_CHECK_INTERVAL_MS = 900000; // 15 min lightweight delta check
+      this.MAX_PAYLOAD_BYTES = 18000;
+      this._busy = false;
+    }
+
+    _sanitizeStr(s) {
+      return String(s || '')
+        .replace(/besing-sync:\/\/[A-Za-z0-9_=-]+/gi, 'besing-sync://[REDACTED]')
+        .replace(/([?&](?:token|key|apikey|secret|password|auth|session|code)=)[^&\s]+/gi, '$1[REDACTED]');
+    }
+
+    async _getMeta() {
+      const m = await this.app.readSharedState(this.META_KEY, null);
+      if (m && typeof m === 'object' && m.deviceId) return m;
+      const rand = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      const next = {
+        deviceId: 'd_' + rand,
+        lastPushAt: 0,
+        lastPolicyCheckAt: 0,
+        lastPolicyServerTime: null,
+        remoteAllEnabled: false,
+        remoteAllBy: '',
+        remoteAllUpdatedMs: 0
+      };
+      await this.app.writeSharedState(this.META_KEY, next);
+      return next;
+    }
+
+    async _saveMeta(meta) {
+      await this.app.writeSharedState(this.META_KEY, meta);
+    }
+
+    _effectiveMode(meta) {
+      const local = this.app.storage.getLogSyncMode();
+      if (local === 'all') return 'all';
+      if (meta && meta.remoteAllEnabled) return 'all';
+      return local;
+    }
+
+    async _buildCompactPayload() {
+      const cfg = this.app.cloud.getConfig();
+      const env = describeEnvironment();
+      const rawEntries = await BESBootLog.read();
+      const compact = [];
+      for (const e of (rawEntries || []).slice(0, 20)) {
+        if (!e || typeof e !== 'object') continue;
+        compact.push({
+          t: e.t || 0,
+          host: String(e.host || '').slice(0, 80),
+          path: this._sanitizeStr(String(e.path || '').split('?')[0]).slice(0, 80),
+          status: BESBootLog.statusOf(e),
+          stages: e.stages || {},
+          errors: (Array.isArray(e.errors) ? e.errors : []).slice(0, 6).map(x => this._sanitizeStr(x).slice(0, 180)),
+          events: (Array.isArray(e.events) ? e.events : []).slice(-10).map(x => this._sanitizeStr(x).slice(0, 140))
+        });
+      }
+      const payload = {
+        deviceName: String(cfg.deviceName || 'Device').slice(0, 80),
+        accountLabel: String(cfg.accountLabel || '').slice(0, 80),
+        mode: env.mode || 'userscript',
+        manager: env.manager || '',
+        ua: String((typeof navigator !== 'undefined' && navigator.userAgent) || '').slice(0, 160),
+        version: BESUpdater.CURRENT_VERSION,
+        updatedAt: new Date().toISOString(),
+        entries: compact
+      };
+      // Trim older entries if payload exceeds 18 KB cap.
+      while (payload.entries.length > 3 && JSON.stringify(payload).length > this.MAX_PAYLOAD_BYTES) {
+        payload.entries.pop();
+      }
+      return payload;
+    }
+
+    async pushOwnLog({ force = false } = {}) {
+      if (!this.app.cloud.isConfigured()) return { ok: false, error: 'Cloud DB not linked.' };
+      if (this._busy && !force) return { ok: true, skipped: true };
+      const meta = await this._getMeta();
+      const now = Date.now();
+      if (!force && now - (meta.lastPushAt || 0) < this.PUSH_MIN_INTERVAL_MS) {
+        return { ok: true, skipped: true };
+      }
+      this._busy = true;
+      try {
+        const payload = await this._buildCompactPayload();
+        // Future p_since makes besing_kv_sync return entries: [] (true write-only push, ~110 B response).
+        const res = await this.app.cloud.rpc('besing_kv_sync', {
+          p_namespace: this.NAMESPACE,
+          p_entries: [{
+            key: 'device:' + meta.deviceId,
+            value: payload,
+            deleted: false,
+            ttl_hours: this.TTL_HOURS,
+            updated_ms: now,
+            updated_by: payload.deviceName
+          }],
+          p_since: new Date(now + 60000).toISOString()
+        }, { trafficKind: 'push' });
+        if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Log push failed' };
+        meta.lastPushAt = now;
+        await this._saveMeta(meta);
+        return { ok: true };
+      } finally {
+        this._busy = false;
+      }
+    }
+
+    async refreshPolicy({ force = false } = {}) {
+      if (!this.app.cloud.isConfigured()) return { ok: false, configured: false, mode: this.app.storage.getLogSyncMode() };
+      const meta = await this._getMeta();
+      const now = Date.now();
+      if (!force && now - (meta.lastPolicyCheckAt || 0) < this.POLICY_CHECK_INTERVAL_MS) {
+        return { ok: true, configured: true, mode: this._effectiveMode(meta), meta };
+      }
+      const res = await this.app.cloud.rpc('besing_kv_sync', {
+        p_namespace: this.NAMESPACE,
+        p_entries: [],
+        p_since: force ? null : meta.lastPolicyServerTime
+      }, { trafficKind: 'pull' });
+      if (!res || !res.ok) return { ok: false, configured: true, mode: this._effectiveMode(meta), error: (res && res.error) || 'Policy check failed' };
+
+      const data = res.data || {};
+      const rows = Array.isArray(data.entries) ? data.entries : [];
+      const policyRow = rows.find(r => r && r.key === 'policy:all');
+      if (policyRow) {
+        const enabled = Boolean(!policyRow.deleted && policyRow.value && policyRow.value.enabled);
+        meta.remoteAllEnabled = enabled;
+        meta.remoteAllBy = (policyRow.value && policyRow.value.setBy) || policyRow.updated_by || '';
+        meta.remoteAllUpdatedMs = Number(policyRow.updated_ms) || now;
+        if (!enabled && this.app.storage.getLogSyncMode() === 'all') {
+          await this.app.storage.setLogSyncMode('off');
+        }
+      } else if (force) {
+        // Full fetch saw no active policy:all row (expired after 24h or never set).
+        meta.remoteAllEnabled = false;
+        if (this.app.storage.getLogSyncMode() === 'all') {
+          await this.app.storage.setLogSyncMode('off');
+        }
+      }
+      meta.lastPolicyCheckAt = now;
+      if (data.server_time) meta.lastPolicyServerTime = data.server_time;
+      await this._saveMeta(meta);
+      return { ok: true, configured: true, mode: this._effectiveMode(meta), meta };
+    }
+
+    async setMode(mode) {
+      const next = (mode === 'device' || mode === 'all') ? mode : 'off';
+      if (next !== 'off' && !this.app.cloud.isConfigured()) {
+        return { ok: false, error: 'Cloud DB not linked. Paste Sync Link in Cloud Database above.' };
+      }
+      await this.app.storage.setLogSyncMode(next);
+      if (!this.app.cloud.isConfigured()) {
+        return { ok: true, mode: 'off' };
+      }
+
+      const meta = await this._getMeta();
+      const cfg = this.app.cloud.getConfig();
+      const now = Date.now();
+      const entries = [];
+
+      if (next === 'all') {
+        entries.push({
+          key: 'policy:all',
+          value: { enabled: true, setBy: cfg.deviceName || 'Device', updatedAt: new Date(now).toISOString() },
+          deleted: false,
+          ttl_hours: this.TTL_HOURS,
+          updated_ms: now,
+          updated_by: cfg.deviceName || 'Device'
+        });
+        meta.remoteAllEnabled = true;
+        meta.remoteAllBy = cfg.deviceName || 'Device';
+      } else {
+        // Switching to 'off' or 'device' clears any global 'all' broadcast so other devices stop uploading.
+        entries.push({
+          key: 'policy:all',
+          value: { enabled: false, setBy: cfg.deviceName || 'Device', updatedAt: new Date(now).toISOString() },
+          deleted: false,
+          ttl_hours: this.TTL_HOURS,
+          updated_ms: now,
+          updated_by: cfg.deviceName || 'Device'
+        });
+        meta.remoteAllEnabled = false;
+      }
+
+      if (next === 'device' || next === 'all') {
+        const payload = await this._buildCompactPayload();
+        entries.push({
+          key: 'device:' + meta.deviceId,
+          value: payload,
+          deleted: false,
+          ttl_hours: this.TTL_HOURS,
+          updated_ms: now,
+          updated_by: payload.deviceName
+        });
+        meta.lastPushAt = now;
+      }
+
+      const res = await this.app.cloud.rpc('besing_kv_sync', {
+        p_namespace: this.NAMESPACE,
+        p_entries: entries,
+        p_since: new Date(now + 60000).toISOString()
+      }, { trafficKind: 'push' });
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Failed to update log sync' };
+      meta.lastPolicyCheckAt = now;
+      await this._saveMeta(meta);
+      return { ok: true, mode: next };
+    }
+
+    async checkAndAutoPush() {
+      if (!this.app.cloud.isConfigured()) return;
+      const pol = await this.refreshPolicy({ force: false });
+      const activeMode = (pol && pol.mode) || this.app.storage.getLogSyncMode();
+      if (activeMode === 'device' || activeMode === 'all') {
+        await this.pushOwnLog({ force: false });
+      }
+    }
+
+    async fetchAllCloudLogsReport() {
+      if (!this.app.cloud.isConfigured()) {
+        return { ok: false, error: 'Cloud DB not linked. Paste Sync Link in Cloud Database above.' };
+      }
+      const res = await this.app.cloud.rpc('besing_kv_sync', {
+        p_namespace: this.NAMESPACE,
+        p_entries: [],
+        p_since: null
+      }, { trafficKind: 'pull' });
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Failed to fetch cloud logs' };
+
+      const rows = (res.data && Array.isArray(res.data.entries)) ? res.data.entries : [];
+      const devRows = rows
+        .filter(r => r && !r.deleted && typeof r.key === 'string' && r.key.startsWith('device:') && r.value)
+        .sort((a, b) => (Number(b.updated_ms) || 0) - (Number(a.updated_ms) || 0));
+
+      const lines = [
+        `BESing Cloud Debug Logs (24h retention) - ${new Date().toISOString()}`,
+        `Active devices with logs: ${devRows.length}`,
+        ''
+      ];
+      if (devRows.length === 0) {
+        lines.push('No cloud logs uploaded in the last 24 hours.');
+      }
+      devRows.forEach(r => {
+        const v = r.value || {};
+        lines.push(`================ ${v.deviceName || r.updated_by || r.key} (${v.mode || '?'}, v${v.version || '?'}) ================`);
+        lines.push(`Updated: ${v.updatedAt || new Date(Number(r.updated_ms) || 0).toISOString()}`);
+        if (v.ua) lines.push(`UA: ${v.ua}`);
+        const entries = Array.isArray(v.entries) ? v.entries : [];
+        if (entries.length === 0) {
+          lines.push('  (no page loads recorded)');
+        } else {
+          entries.forEach(e => {
+            const ts = e.t ? new Date(e.t).toISOString().slice(11, 19) : '??:??:??';
+            lines.push(`  [${ts}] ${e.status || '?'} ${e.host || ''}${e.path || ''}`);
+            if (Array.isArray(e.errors) && e.errors.length) {
+              e.errors.forEach(err => lines.push(`    ERR: ${err}`));
+            }
+            if (Array.isArray(e.events) && e.events.length) {
+              lines.push(`    EVT: ${e.events.slice(-4).join(' | ')}`);
+            }
+          });
+        }
+        lines.push('');
+      });
+      return { ok: true, deviceCount: devRows.length, report: lines.join('\n') };
     }
   }
 
@@ -9898,6 +10187,7 @@
       this.shadow = null;
       this.widgetEl = null;
       this.cloud = new BESCloud(this);
+      this.logSync = new BESLogSync(this);
       this.menuWrapperEl = null;
       this.searchQuery = '';
       this.currentView = 'extensions';
@@ -10198,6 +10488,13 @@
       }
 
       this.ensureMounted('init');
+
+      // Lazy write-only Cloud Debug Log sync check (runs 6s after boot; 0 calls if DB unlinked).
+      setTimeout(() => {
+        if (!this.disposed && this.logSync) {
+          this.logSync.checkAndAutoPush().catch(() => {});
+        }
+      }, 6000);
     }
 
     // Heartbeat DOM guardian (every 2.5s) to catch any random DOM detachments
@@ -11619,16 +11916,23 @@
 
             <div class="besing-update-card" style="background:rgba(148,163,184,0.05);border-color:rgba(148,163,184,0.2);">
               <div class="besing-update-header">
-                <span class="besing-section-title">Recent Page Loads</span>
+                <span class="besing-section-title">Debug Log</span>
                 <button type="button" class="besing-btn-sub-action" id="besing-btn-clear-boot-log">Clear</button>
               </div>
-              <div style="font-size:10px;color:#94a3b8;line-height:1.35;">
-                Each page load BESing ran on, newest first. If a load you made is missing, your userscript manager never started BESing on it. "Stopped" means BESing started but the icon never appeared. The debug log holds the last ${BOOT_LOG_LIMIT} loads with timings and errors for a bug report.
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:2px;">
+                <span style="font-size:10.5px;color:#cbd5e1;font-weight:600;">Save to DB (24h)</span>
+                <span id="besing-logsync-status" style="font-size:9.5px;color:#94a3b8;">${this.storage.getLogSyncMode() === 'all' ? 'All Devices' : (this.storage.getLogSyncMode() === 'device' ? 'This Device' : 'Off')}</span>
               </div>
-              <div style="display:flex;gap:6px;">
-                <button type="button" class="besing-btn-sub-action" id="besing-btn-copy-boot-log" style="flex:1;min-height:34px;font-size:11px;color:#38bdf8;border-color:rgba(56,189,248,0.3);">Copy Debug Log</button>
-                ${navigator.share ? '<button type="button" class="besing-btn-sub-action" id="besing-btn-share-boot-log" style="flex:1;min-height:34px;font-size:11px;">Share</button>' : ''}
-                <button type="button" class="besing-btn-sub-action" id="besing-btn-view-boot-log" style="flex:1;min-height:34px;font-size:11px;">View Full Screen</button>
+              <div class="besing-segmented-group" id="group-log-sync-mode" style="margin-top:2px;">
+                <button type="button" class="besing-segmented-btn ${this.storage.getLogSyncMode() === 'off' ? 'active' : ''}" data-log-mode="off">Off</button>
+                <button type="button" class="besing-segmented-btn ${this.storage.getLogSyncMode() === 'device' ? 'active' : ''}" data-log-mode="device">This Device</button>
+                <button type="button" class="besing-segmented-btn ${this.storage.getLogSyncMode() === 'all' ? 'active' : ''}" data-log-mode="all">All Devices</button>
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button type="button" class="besing-btn-sub-action" id="besing-btn-copy-boot-log" style="flex:1;min-height:32px;font-size:11px;color:#38bdf8;border-color:rgba(56,189,248,0.3);">Copy Local</button>
+                <button type="button" class="besing-btn-sub-action" id="besing-btn-cloud-logs" style="flex:1;min-height:32px;font-size:11px;color:#34d399;border-color:rgba(16,185,129,0.35);">Cloud Logs</button>
+                ${navigator.share ? '<button type="button" class="besing-btn-sub-action" id="besing-btn-share-boot-log" style="flex:1;min-height:32px;font-size:11px;">Share</button>' : ''}
+                <button type="button" class="besing-btn-sub-action" id="besing-btn-view-boot-log" style="flex:1;min-height:32px;font-size:11px;">View</button>
               </div>
               <div id="besing-boot-log-msg" style="font-size:10px;color:#34d399;display:none;"></div>
               <div id="besing-boot-log-list" style="display:flex;flex-direction:column;gap:4px;max-height:150px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#cbd5e1;">Loading...</div>
@@ -11855,6 +12159,62 @@
             await BESBootLog.clear();
             if (bootLogMsg) bootLogMsg.style.display = 'none';
             renderBootLog();
+          };
+        }
+
+        // 3-stage Cloud Debug Log selector (Off | This Device | All Devices) + All-Device Log Viewer
+        const logSyncGroup = body.querySelector('#group-log-sync-mode');
+        const logSyncStatus = body.querySelector('#besing-logsync-status');
+        const updateLogSyncUI = (activeMode, remoteBy = '') => {
+          if (logSyncGroup) {
+            logSyncGroup.querySelectorAll('.besing-segmented-btn').forEach(b => {
+              b.classList.toggle('active', b.getAttribute('data-log-mode') === activeMode);
+            });
+          }
+          if (logSyncStatus) {
+            if (activeMode === 'all') logSyncStatus.textContent = remoteBy ? `All (by ${remoteBy})` : 'All Devices';
+            else if (activeMode === 'device') logSyncStatus.textContent = 'This Device';
+            else logSyncStatus.textContent = 'Off';
+          }
+        };
+        if (this.cloud.isConfigured()) {
+          this.logSync.refreshPolicy({ force: true }).then(pol => {
+            if (pol && pol.ok) updateLogSyncUI(pol.mode, pol.meta && pol.meta.remoteAllBy);
+          }).catch(() => {});
+        }
+        if (logSyncGroup) {
+          logSyncGroup.querySelectorAll('.besing-segmented-btn').forEach(btn => {
+            btn.onclick = async () => {
+              const mode = btn.getAttribute('data-log-mode') || 'off';
+              showBootLogMsg('Updating cloud log mode...', '#94a3b8');
+              const r = await this.logSync.setMode(mode);
+              if (r && r.ok) {
+                updateLogSyncUI(r.mode);
+                showBootLogMsg(
+                  r.mode === 'all' ? 'Cloud log ON for all devices (auto-expires in 24h).'
+                  : (r.mode === 'device' ? 'Cloud log ON for this device (24h TTL).' : 'Cloud log OFF for all devices.'),
+                  '#34d399'
+                );
+              } else {
+                showBootLogMsg((r && r.error) || 'Failed to update log mode.', '#fca5a5');
+              }
+            };
+          });
+        }
+        const cloudLogsBtn = body.querySelector('#besing-btn-cloud-logs');
+        if (cloudLogsBtn) {
+          cloudLogsBtn.onclick = async () => {
+            cloudLogsBtn.disabled = true;
+            cloudLogsBtn.textContent = 'Loading...';
+            const r = await this.logSync.fetchAllCloudLogsReport();
+            cloudLogsBtn.disabled = false;
+            cloudLogsBtn.textContent = 'Cloud Logs';
+            if (r && r.ok) {
+              showBootLogMsg(`Loaded logs from ${r.deviceCount} device(s).`, '#34d399');
+              openBootLogViewer(r.report);
+            } else {
+              showBootLogMsg((r && r.error) || 'Failed to load cloud logs.', '#fca5a5');
+            }
           };
         }
 
