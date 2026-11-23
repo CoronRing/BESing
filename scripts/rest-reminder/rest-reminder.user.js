@@ -24,7 +24,7 @@
     name: 'Rest Reminder',
     version: '1.2.0',
     activationMode: 'global',
-    description: 'Repeating eye & body rest reminders displayed as an anchored pet chat bubble with Repeat and Off controls.',
+    description: 'Repeating eye and body rest reminder bubble.',
     category: 'Productivity',
     SHARED_KEY: 'rest_reminder',
     LOCAL_KEY: 'besing_rest_reminder_state',

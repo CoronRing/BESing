@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Prevent Redirect & Tab Hijack
+// @name         AD Prevent Redirect
 // @namespace    https://github.com/CoronRing/BESing
 // @version      1.7.0
-// @description  Prevents unwanted automatic redirects, mobile touch/sensor traps, popups, and malicious ad network script injections while preserving normal site navigation.
+// @description  Blocks auto-redirects, popups, and malicious script traps.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -15,9 +15,9 @@
 
   const PreventRedirect = {
     id: 'prevent-redirect',
-    name: 'Prevent Redirect',
+    name: 'AD Prevent Redirect',
     version: '1.7.0',
-    description: 'Strictly blocks automatic redirects, mobile sensor traps, new tab popups, and malicious ad network script injections while preserving legitimate site navigation.',
+    description: 'Blocks auto-redirects, popups, and malicious script traps.',
     category: 'Security',
     _cfg: null,
     _gateCount: 0,

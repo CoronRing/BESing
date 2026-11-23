@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Text Size Enhancer
+// @name         Page Text Zoom
 // @namespace    https://github.com/CoronRing/BESing
 // @version      1.2.0
-// @description  Intelligently scales text and page size with custom percentage controls (125%, 150%, 200%, 300%) for comfortable reading on desktop and iOS Safari.
+// @description  Scales text and page zoom beyond 200% for comfortable reading.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -15,9 +15,9 @@
 
   const TextSizeControl = {
     id: 'text-size-control',
-    name: 'Text Size Enhancer',
+    name: 'Page Text Zoom',
     version: '1.2.0',
-    description: 'Enlarges text and page zoom (125%, 150%, 200%+) so small website fonts and novel paragraphs become easily readable on both desktop and iOS Safari.',
+    description: 'Scales text and page zoom beyond 200% for comfortable reading.',
     category: 'Accessibility',
     _styleNode: null,
     _adoptedSheet: null,

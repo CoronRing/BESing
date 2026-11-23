@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Page Color & Brightness
+// @name         Page Color
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.2.0
-// @description  Customizes page background colors with comfort presets (Eye Protect, Old Paper, Dark) and live brightness dragger on top of site background, with customizable text color presets.
+// @version      1.3.0
+// @description  Background presets, brightness, text color, and night dimmer.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -15,21 +15,26 @@
 
   const ColorChange = {
     id: 'color-change',
-    name: 'Page Color & Brightness',
-    version: '1.2.0',
-    description: 'Adjusts background color presets (Eye Protect, Old Paper, Dark), site background brightness, and high-contrast text colors.',
+    name: 'Page Color',
+    version: '1.3.0',
+    description: 'Background presets, brightness, text color, and night dimmer.',
     category: 'Visual',
     _prevBodyBg: null,
     _prevHtmlBg: null,
     _presetOverlay: null,
     _brightnessOverlay: null,
+    _dimmerOverlay: null,
+    _textColorSheet: null,
     _textColorStyle: null,
     _config: {
-      brightness: 0, // -100 (lighten) to +100 (deepen / darken)
-      preset: 'eye-protect', // 'none' | 'eye-protect' | 'old-paper' | 'dark' | 'soft-sepia' | 'cool-mint' | 'custom'
+      brightness: 0, // -100 (lighten) to +100 (darken)
+      preset: 'eye-protect',
       customColor: '#cce8cf',
-      textColor: 'default', // 'default' | 'white' | 'black' | 'charcoal' | 'gray' | 'amber' | 'custom'
-      customTextColor: '#ffffff'
+      textColor: 'default',
+      customTextColor: '#ffffff',
+      nightDimmer: false,
+      nightDimmerOpacity: 32, // 10..75 (%)
+      nightDimmerTint: 'slate' // 'slate' | 'warm' | 'pitch'
     },
 
     PRESETS: {
@@ -50,6 +55,12 @@
       'amber': { name: 'Warm Cream', color: '#fef3c7', text: '#fef3c7', border: '#fde68a' }
     },
 
+    DIMMER_TINTS: {
+      slate: '15, 23, 42',
+      warm: '45, 26, 10',
+      pitch: '0, 0, 0'
+    },
+
     init(cfg) {
       this.destroy();
       if (cfg && typeof cfg === 'object') {
@@ -64,34 +75,31 @@
     },
 
     _createOverlays() {
-      // 1. Preset tint overlay (z-index 2147483625)
+      const mountRoot = document.documentElement || document.body;
+      if (!mountRoot) return;
+
       if (!this._presetOverlay) {
         const pLayer = document.createElement('div');
         pLayer.id = 'besing-bg-preset-overlay';
-        pLayer.style.cssText = `
-          position: fixed !important;
-          inset: 0 !important;
-          pointer-events: none !important;
-          z-index: 2147483625 !important;
-          transition: background-color 0.2s ease, opacity 0.2s ease !important;
-        `;
-        (document.body || document.documentElement).appendChild(pLayer);
+        pLayer.style.cssText = 'position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483625!important;transition:background-color 0.2s ease,opacity 0.2s ease!important;';
+        mountRoot.appendChild(pLayer);
         this._presetOverlay = pLayer;
       }
 
-      // 2. Brightness dragger overlay (z-index 2147483630, above preset tint but below BESing root 2147483642)
       if (!this._brightnessOverlay) {
         const bLayer = document.createElement('div');
         bLayer.id = 'besing-bg-brightness-overlay';
-        bLayer.style.cssText = `
-          position: fixed !important;
-          inset: 0 !important;
-          pointer-events: none !important;
-          z-index: 2147483630 !important;
-          transition: background-color 0.15s ease, opacity 0.15s ease !important;
-        `;
-        (document.body || document.documentElement).appendChild(bLayer);
+        bLayer.style.cssText = 'position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483630!important;transition:background-color 0.15s ease,opacity 0.15s ease!important;';
+        mountRoot.appendChild(bLayer);
         this._brightnessOverlay = bLayer;
+      }
+
+      if (!this._dimmerOverlay) {
+        const dLayer = document.createElement('div');
+        dLayer.id = 'besing-night-dimmer-overlay';
+        dLayer.style.cssText = 'position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483635!important;display:none;transition:opacity 0.25s ease,background-color 0.25s ease!important;';
+        mountRoot.appendChild(dLayer);
+        this._dimmerOverlay = dLayer;
       }
     },
 
@@ -100,6 +108,43 @@
         this._config = { ...this._config, ...cfg };
       }
       this.applyConfig();
+    },
+
+    _applyTextColorCss(css) {
+      try {
+        if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in document) {
+          if (!this._textColorSheet) this._textColorSheet = new CSSStyleSheet();
+          this._textColorSheet.replaceSync(css);
+          if (!document.adoptedStyleSheets.includes(this._textColorSheet)) {
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets, this._textColorSheet];
+          }
+          return;
+        }
+      } catch (e) {
+        this._textColorSheet = null;
+      }
+      if (!this._textColorStyle) {
+        const s = document.createElement('style');
+        s.id = 'besing-text-color-style';
+        (document.head || document.documentElement).appendChild(s);
+        this._textColorStyle = s;
+      }
+      this._textColorStyle.textContent = css;
+    },
+
+    _clearTextColorCss() {
+      if (this._textColorSheet) {
+        try {
+          document.adoptedStyleSheets = document.adoptedStyleSheets.filter(s => s !== this._textColorSheet);
+        } catch (e) {}
+        this._textColorSheet = null;
+      }
+      if (this._textColorStyle) {
+        this._textColorStyle.remove();
+        this._textColorStyle = null;
+      }
+      const s = document.getElementById('besing-text-color-style');
+      if (s) s.remove();
     },
 
     applyConfig() {
@@ -117,13 +162,12 @@
         presetOverlayColor = this.PRESETS[presetKey].overlay;
       }
 
-      // Apply Background Preset
       if (presetKey !== 'none') {
         if (document.documentElement) document.documentElement.style.backgroundColor = presetColor;
         if (document.body) document.body.style.backgroundColor = presetColor;
         if (this._presetOverlay) {
           this._presetOverlay.style.backgroundColor = presetOverlayColor;
-          this._presetOverlay.style.mixBlendMode = presetKey === 'dark' ? 'multiply' : 'multiply';
+          this._presetOverlay.style.mixBlendMode = 'multiply';
         }
       } else {
         if (document.documentElement) document.documentElement.style.backgroundColor = this._prevHtmlBg || '';
@@ -133,7 +177,7 @@
         }
       }
 
-      // Apply Brightness Dragger
+      // Brightness dragger
       const bVal = Math.max(-100, Math.min(100, Number(this._config.brightness) || 0));
       if (this._brightnessOverlay) {
         if (bVal < 0) {
@@ -149,7 +193,25 @@
         }
       }
 
-      // Apply Text Color Adjust
+      // Integrated Night Comfort Dimmer
+      if (this._dimmerOverlay) {
+        if (this._config.nightDimmer) {
+          const pct = Math.max(10, Math.min(75, Number(this._config.nightDimmerOpacity) || 32));
+          const alpha = (pct / 100).toFixed(2);
+          const rgb = this.DIMMER_TINTS[this._config.nightDimmerTint] || this.DIMMER_TINTS.slate;
+          this._dimmerOverlay.style.display = 'block';
+          this._dimmerOverlay.style.backgroundColor = `rgba(${rgb}, ${alpha})`;
+          this._dimmerOverlay.style.backdropFilter = 'contrast(0.95) brightness(0.92)';
+          this._dimmerOverlay.style.webkitBackdropFilter = 'contrast(0.95) brightness(0.92)';
+        } else {
+          this._dimmerOverlay.style.display = 'none';
+          this._dimmerOverlay.style.backgroundColor = 'transparent';
+          this._dimmerOverlay.style.backdropFilter = 'none';
+          this._dimmerOverlay.style.webkitBackdropFilter = 'none';
+        }
+      }
+
+      // Text Color
       const tKey = this._config.textColor || 'default';
       let resolvedTextColor = null;
       if (tKey === 'custom') {
@@ -159,14 +221,7 @@
       }
 
       if (resolvedTextColor) {
-        if (!this._textColorStyle) {
-          const s = document.createElement('style');
-          s.id = 'besing-text-color-style';
-          (document.head || document.documentElement).appendChild(s);
-          this._textColorStyle = s;
-        }
-        this._textColorStyle.textContent = `
-          /* Apply high-contrast text color while strictly protecting BESing UI components and form fields */
+        this._applyTextColorCss(`
           body *:not(#__besing_root__):not(#__besing_root__ *):not([id^="besing"]):not([class*="besing"]):not(input):not(textarea):not(select):not(button),
           p:not(#__besing_root__ *), span:not(#__besing_root__ *),
           a:not(#__besing_root__ *), li:not(#__besing_root__ *),
@@ -181,14 +236,9 @@
           .entry-content:not(#__besing_root__ *), .entry-content *:not(#__besing_root__ *):not(input):not(textarea):not(button) {
             color: ${resolvedTextColor} !important;
           }
-        `;
+        `);
       } else {
-        if (this._textColorStyle) {
-          this._textColorStyle.remove();
-          this._textColorStyle = null;
-        }
-        const s = document.getElementById('besing-text-color-style');
-        if (s) s.remove();
+        this._clearTextColorCss();
       }
     },
 
@@ -199,24 +249,17 @@
       if (document.body) {
         document.body.style.backgroundColor = this._prevBodyBg || '';
       }
-      if (this._presetOverlay) {
-        this._presetOverlay.remove();
-        this._presetOverlay = null;
-      }
-      if (this._brightnessOverlay) {
-        this._brightnessOverlay.remove();
-        this._brightnessOverlay = null;
-      }
-      if (this._textColorStyle) {
-        this._textColorStyle.remove();
-        this._textColorStyle = null;
-      }
-      const p1 = document.getElementById('besing-bg-preset-overlay');
-      if (p1) p1.remove();
-      const p2 = document.getElementById('besing-bg-brightness-overlay');
-      if (p2) p2.remove();
-      const p3 = document.getElementById('besing-text-color-style');
-      if (p3) p3.remove();
+      [this._presetOverlay, this._brightnessOverlay, this._dimmerOverlay].forEach(el => {
+        if (el) el.remove();
+      });
+      this._presetOverlay = null;
+      this._brightnessOverlay = null;
+      this._dimmerOverlay = null;
+      this._clearTextColorCss();
+      ['besing-bg-preset-overlay', 'besing-bg-brightness-overlay', 'besing-night-dimmer-overlay'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.remove();
+      });
     }
   };
 

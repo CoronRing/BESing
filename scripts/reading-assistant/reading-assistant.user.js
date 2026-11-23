@@ -17,7 +17,7 @@
     id: 'reading-assistant',
     name: 'Reading Assistant',
     version: '1.0.0',
-    description: 'Calculates word count, reading duration, and provides a quick jump heading outline.',
+    description: 'Word count, read time, and quick heading outline.',
     category: 'Productivity',
     _dom: null,
 

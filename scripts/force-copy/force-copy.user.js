@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Force Allow Copy & Paste
+// @name         Force Copy
 // @namespace    https://github.com/CoronRing/BESing
 // @version      1.0.0
-// @description  Forcefully unlocks text selection, copy, cut, paste, and right-click context menu on sites that disable them.
+// @description  Unlocks disabled text selection, copy, paste, and right-click.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -15,9 +15,9 @@
 
   const ForceCopy = {
     id: 'force-copy',
-    name: 'Force Allow Copy & Paste',
+    name: 'Force Copy',
     version: '1.0.0',
-    description: 'Enables text selection, copy, cut, paste, and right-click on sites that attempt to disable them.',
+    description: 'Unlocks disabled text selection, copy, paste, and right-click.',
     category: 'Tools',
     _styleNode: null,
     _listeners: [],

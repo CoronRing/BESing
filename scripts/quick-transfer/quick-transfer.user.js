@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Quick Transfer
+// @name         Sync Transfer
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.0.0
-// @description  Send copied strings, clipboard screenshots, or files (up to 5 MB) between PC, iPhone, and iPad with automatic 2-day expiry. Open and use anytime without enabling.
+// @version      1.1.0
+// @description  Send text, screenshots, or files (5 MB, 48h) across devices.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -15,10 +15,10 @@
 
   const QuickTransfer = {
     id: 'quick-transfer',
-    name: 'Quick Transfer',
-    version: '1.0.0',
+    name: 'Sync Transfer',
+    version: '1.1.0',
     activationMode: 'none',
-    description: 'Send copied strings, clipboard screenshots, or files (up to 5 MB) between PC, iPhone, and iPad with automatic 2-day expiry. Open and use anytime without enabling.',
+    description: 'Send text, screenshots, or files (5 MB, 48h) across devices.',
     category: 'Sync',
 
     MAX_BYTES: 5 * 1024 * 1024, // 5 MB raw limit
@@ -209,12 +209,59 @@
         a.href = url;
         a.download = item.file_name || `${(item.title || 'transfer').replace(/[^a-z0-9._-]+/gi, '_')}.${item.kind === 'text' ? 'txt' : 'bin'}`;
         a.style.display = 'none';
-        (document.body || document.documentElement).appendChild(a);
+        a.addEventListener('click', (ev) => ev.stopPropagation());
+        const mgr = this._manager();
+        if (mgr) mgr._suppressOutsideCloseUntil = Date.now() + 600;
+        const container = (mgr && mgr.shadow) ? mgr.shadow : (document.body || document.documentElement);
+        container.appendChild(a);
         a.click();
         setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1500);
         return true;
       } catch (e) {
         return false;
+      }
+    },
+
+    async saveToAlbum(item) {
+      if (!item || item.kind !== 'image') return { ok: false, error: 'Not an image.' };
+      try {
+        const mime = item.mime_type || 'image/png';
+        const blob = this._base64ToBlob(item.content || '', mime);
+        const ext = (mime.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+        const name = item.file_name || `photo-${Date.now()}.${ext}`;
+        const file = new File([blob], name, { type: mime });
+        if (typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+          await navigator.share({ files: [file], title: item.title || name });
+          return { ok: true, shared: true };
+        }
+        return { ok: false, fallbackPreview: true, error: 'Tap Preview, then long-press the image to Save to Photos.' };
+      } catch (err) {
+        if (err && err.name === 'AbortError') return { ok: true, cancelled: true };
+        return { ok: false, fallbackPreview: true, error: 'Tap Preview, then long-press the image to Save to Photos.' };
+      }
+    },
+
+    async copyImageToClipboard(item) {
+      if (!item || item.kind !== 'image') return { ok: false, error: 'Not an image.' };
+      try {
+        if (typeof ClipboardItem === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.write !== 'function') {
+          return { ok: false, error: 'Image clipboard unsupported here.' };
+        }
+        const mime = item.mime_type || 'image/png';
+        let blob = this._base64ToBlob(item.content || '', mime);
+        // ClipboardItem most reliably accepts image/png across browsers.
+        if (mime !== 'image/png') {
+          const bmp = await createImageBitmap(blob);
+          const canvas = document.createElement('canvas');
+          canvas.width = bmp.width;
+          canvas.height = bmp.height;
+          canvas.getContext('2d').drawImage(bmp, 0, 0);
+          blob = await new Promise((res) => canvas.toBlob(b => res(b || blob), 'image/png'));
+        }
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: 'Clipboard image copy blocked.' };
       }
     },
 

@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Browser Sync
+// @name         Sync History
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.1.0
-// @description  Sync open tabs, tab groups, 7-day history, closed tabs, and active usage time across PC Edge, Safari (Stay), and multiple devices via your own Supabase database.
+// @version      1.2.0
+// @description  Sync tabs, groups, 7-day history, and usage across devices.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -21,10 +21,10 @@
 
   const BrowserSync = {
     id: 'browser-sync',
-    name: 'Browser Sync',
-    version: '1.1.0',
+    name: 'Sync History',
+    version: '1.2.0',
     activationMode: 'global',
-    description: 'Sync open tabs, tab groups, 7-day history, closed tabs, and active usage time across PC Edge, Safari (Stay), and multiple devices via your own Supabase database.',
+    description: 'Sync tabs, groups, 7-day history, and usage across devices.',
     category: 'Sync',
 
     SHARED_CACHE_KEY: 'browser_sync_cache',
@@ -32,6 +32,7 @@
     SHARED_META_KEY: 'browser_sync_meta',
     SHARED_PENDING_KEY: 'browser_sync_pending',
     SHARED_TABS_KEY: 'browser_sync_tabs',
+    SHARED_CLOSED_KEY: 'browser_sync_closed',
     SHARED_DEDUP_KEY: 'browser_sync_dedup',
 
     SENSITIVE_PARAMS: [
@@ -664,8 +665,9 @@
           ? Object.values(pending.usage).filter(u => u && (u.seconds > 0 || u.visits > 0)).slice(0, 100)
           : [];
         const tabs = includeTabs ? ((await this._readShared(this.SHARED_TABS_KEY, [])) || []) : null;
+        const closed = includeTabs ? ((await this._readShared(this.SHARED_CLOSED_KEY, [])) || []) : null;
 
-        if (!force && histBatch.length === 0 && usageBatch.length === 0 && (!tabs || tabs.length === 0)) {
+        if (!force && !includeTabs && histBatch.length === 0 && usageBatch.length === 0) {
           return { ok: true, skipped: true };
         }
 
@@ -677,7 +679,10 @@
           mode: 'userscript',
           account_label: cloud.accountLabel
         };
-        if (tabs) payload.tabs = tabs.slice(0, 50);
+        if (includeTabs) {
+          payload.tabs = (tabs || []).slice(0, 50);
+          payload.closed = (closed || []).slice(0, 25);
+        }
         if (histBatch.length > 0) payload.history = histBatch;
         if (usageBatch.length > 0) payload.usage = usageBatch;
 
@@ -868,10 +873,10 @@
         return await this._sendExt({ type: 'besing-sync:sync-now', full });
       }
       if (!this._active) {
-        return { ok: false, error: 'Browser Sync is OFF. Turn it ON above to sync.', cache: await this._getCache(), stats: await this._readShared(this.SHARED_STATS_KEY, null) };
+        return { ok: false, error: 'Sync History is OFF. Turn it ON to sync.', cache: await this._getCache(), stats: await this._readShared(this.SHARED_STATS_KEY, null) };
       }
       if (!this.parseSyncLink(this._getCloudConfig().syncLink)) {
-        return { ok: false, error: 'Cloud database not linked. Open BESing Settings -> Cloud Database to paste your Sync Link.', cache: await this._getCache(), stats: await this._readShared(this.SHARED_STATS_KEY, null) };
+        return { ok: false, error: 'Cloud DB not linked. Paste Sync Link in Settings.', cache: await this._getCache(), stats: await this._readShared(this.SHARED_STATS_KEY, null) };
       }
       const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(this._config || {}));
       if (clean) {
@@ -939,14 +944,19 @@
       if (this.isExtensionMode()) {
         return await this._sendExt({ type: 'besing-sync:open-group', title, color, urls: cleanUrls });
       }
-      // In Safari/userscript mode, browsers block opening many popups at once; open first tab directly
-      // and let the UI offer individual links or copy-all-URLs for Shortcuts.
-      try {
-        window.open(cleanUrls[0], '_blank', 'noopener,noreferrer');
-        return { ok: true, opened: 1, total: cleanUrls.length, userscriptPopupNote: true };
-      } catch (e) {
-        return { ok: false, error: e.message };
+      // In userscript/Safari mode, attempt to open up to 10 tabs in the same click gesture.
+      let opened = 0;
+      const batch = cleanUrls.slice(0, 10);
+      for (let i = 0; i < batch.length; i++) {
+        try {
+          const w = window.open(batch[i], '_blank', 'noopener,noreferrer');
+          if (w) opened++;
+        } catch (e) {}
       }
+      if (opened === 0) {
+        try { window.open(batch[0], '_blank', 'noopener,noreferrer'); opened = 1; } catch (e) {}
+      }
+      return { ok: true, opened, total: cleanUrls.length, userscriptPopupNote: opened < cleanUrls.length };
     },
 
     async deleteDevice(instanceId) {
@@ -1029,10 +1039,82 @@
       };
       document.addEventListener('visibilitychange', this._boundVisibility);
 
-      // Best-effort flush on page exit / app close.
+      // Best-effort flush on tab close / page exit: synchronously remove this tab from open list,
+      // append to recently closed, and dispatch a keepalive push before the browser terminates the tab.
       this._boundPageHide = () => {
         if (!this._active) return;
-        this._userscriptPush({ includeTabs: true, keepalive: true }).catch(() => {});
+        const tabId = this._getTabId();
+        const cfg = this._config || {};
+        const cloud = this._getCloudConfig();
+        const creds = this.parseSyncLink(cloud.syncLink);
+        const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(cfg));
+        const now = Date.now();
+        const cutoff = now - 24 * 60 * 60 * 1000;
+
+        const hasSyncGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+        if (hasSyncGM) {
+          try {
+            const tabsKey = 'shared_' + this.SHARED_TABS_KEY;
+            const closedKey = 'shared_' + this.SHARED_CLOSED_KEY;
+            const metaKey = 'shared_' + this.SHARED_META_KEY;
+            const curTabs = GM_getValue(tabsKey, []) || [];
+            const nextTabs = (Array.isArray(curTabs) ? curTabs : [])
+              .filter(t => t && t.id !== tabId && Date.parse(t.lastActiveAt || 0) >= cutoff)
+              .slice(0, 50);
+            GM_setValue(tabsKey, nextTabs);
+
+            const curClosed = GM_getValue(closedKey, []) || [];
+            let nextClosed = (Array.isArray(curClosed) ? curClosed : []).filter(c => c && (!clean || c.url !== clean.url));
+            if (clean) {
+              nextClosed.unshift({
+                url: clean.url,
+                title: this._cleanTitle(document.title || clean.host),
+                closedAt: new Date(now).toISOString()
+              });
+            }
+            nextClosed = nextClosed.slice(0, 25);
+            GM_setValue(closedKey, nextClosed);
+
+            const meta = GM_getValue(metaKey, null);
+            if (creds && meta && meta.instanceId && typeof fetch === 'function') {
+              const payload = {
+                instance_id: meta.instanceId,
+                device_name: cloud.deviceName,
+                browser: this.detectBrowser(),
+                platform: this.detectPlatform(),
+                mode: 'userscript',
+                account_label: cloud.accountLabel,
+                tabs: nextTabs,
+                closed: nextClosed
+              };
+              fetch(`${creds.url}/rest/v1/rpc/besing_sync_push`, {
+                method: 'POST',
+                keepalive: true,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'apikey': creds.anonKey,
+                  'Authorization': `Bearer ${creds.anonKey}`
+                },
+                body: JSON.stringify({ p_secret: creds.secret, p_payload: payload })
+              }).catch(() => {});
+              return;
+            }
+          } catch (e) {}
+        }
+
+        // Async fallback when GM_* is unavailable
+        (async () => {
+          await this._updateActiveTabRecord(clean, document.title || '', true);
+          if (clean) {
+            const curClosed = (await this._readShared(this.SHARED_CLOSED_KEY, [])) || [];
+            const nextClosed = [
+              { url: clean.url, title: this._cleanTitle(document.title || clean.host), closedAt: new Date(now).toISOString() },
+              ...curClosed.filter(c => c && c.url !== clean.url)
+            ].slice(0, 25);
+            await this._writeShared(this.SHARED_CLOSED_KEY, nextClosed);
+          }
+          await this._userscriptPush({ includeTabs: true, keepalive: true, force: true });
+        })().catch(() => {});
       };
       window.addEventListener('pagehide', this._boundPageHide);
 

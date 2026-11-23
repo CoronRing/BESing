@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Ad Cleaner & Element Zapper
+// @name         AD Block
 // @namespace    https://github.com/CoronRing/BESing
 // @version      2.1.0
-// @description  Aggressive page cleaner: finds the main content and hides popups, floating and sticky bars, ads, third-party frames and side widgets around it. Includes a tap-to-hide Element Zapper.
+// @description  Hides ads, popups, sticky bars, and clutter with Element Zapper.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -15,9 +15,9 @@
 
   const AdCleaner = {
     id: 'ad-cleaner',
-    name: 'Ad Cleaner & Element Zapper',
+    name: 'AD Block',
     version: '2.1.0',
-    description: 'Aggressive page cleaner with a 0 to 4 aggressiveness level: hides popups, floating and sticky bars, ads, third-party frames and everything around the main content. Includes a tap-to-hide Element Zapper.',
+    description: 'Hides ads, popups, sticky bars, and clutter with Element Zapper.',
     category: 'Privacy',
 
     DEFAULT_LEVEL: 3.4,

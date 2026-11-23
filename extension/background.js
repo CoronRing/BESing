@@ -657,12 +657,22 @@ async function pullSync({ full = false, force = false } = {}) {
 
     // Optional: import remote non-self visits into native Edge history.
     if (conf.importToNativeHistory && chrome.history && typeof chrome.history.addUrl === 'function') {
-      for (const h of incomingHist) {
+      const impRes = await storageGet(['besing_sync_imported_urls']);
+      const persisted = Array.isArray(impRes.besing_sync_imported_urls) ? impRes.besing_sync_imported_urls : [];
+      persisted.forEach(u => importedUrls.add(u));
+      let addedAny = false;
+      for (const h of mergedHistory) {
         if (!h || h.instance_id === conf.instanceId || !h.url) continue;
         if (importedUrls.has(h.url)) continue;
         importedUrls.add(h.url);
-        if (importedUrls.size > 500) importedUrls.clear();
+        addedAny = true;
         try { chrome.history.addUrl({ url: h.url }); } catch (e) {}
+      }
+      if (addedAny) {
+        const trimmed = Array.from(importedUrls).slice(-800);
+        importedUrls.clear();
+        trimmed.forEach(u => importedUrls.add(u));
+        await storageSet({ besing_sync_imported_urls: trimmed });
       }
     }
 
@@ -701,10 +711,10 @@ async function pullSync({ full = false, force = false } = {}) {
 async function syncNow(fullPull = false, manual = true) {
   const conf = await getConfig();
   if (!conf.enabled) {
-    return { ok: false, error: 'Browser Sync is OFF. Turn it ON above to sync.' };
+    return { ok: false, error: 'Sync History is OFF. Turn it ON to sync.' };
   }
   if (!conf.creds) {
-    return { ok: false, error: 'Cloud database not linked. Open BESing Settings -> Cloud Database to paste your Sync Link.' };
+    return { ok: false, error: 'Cloud DB not linked. Paste Sync Link in Settings.' };
   }
   if (syncingNow) return { ok: true, busy: true };
   syncingNow = true;

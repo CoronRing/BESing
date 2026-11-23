@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -149,9 +149,9 @@ def build():
   }})();
   const FRAME_SAFE_MODULES = new Set(['prevent-redirect', 'force-copy']);
   // Modules whose settings drive state shared by every site, so they cannot be locked to one site.
-  const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder', 'browser-sync', 'settings-sync', 'quick-transfer']);
+  const GLOBAL_ONLY_SETTINGS = new Set(['rest-reminder', 'browser-sync', 'settings-sync', 'quick-transfer', 'quick-copy']);
   // Per-script activation policies: 'none' (open-and-use tool), 'global' (OFF | ON only), or 'site' (default).
-  const NO_ACTIVATION_SCRIPTS = new Set(['quick-transfer']);
+  const NO_ACTIVATION_SCRIPTS = new Set(['quick-transfer', 'quick-copy']);
   const GLOBAL_ONLY_ACTIVATION = new Set(['rest-reminder', 'browser-sync', 'settings-sync']);
   const ALERT_WINDOW_MS = 30000;
   const ALERT_MAX_FLASHES = 5;
@@ -1823,6 +1823,9 @@ def build():
       this._lastWorkingCount = -1;
       this._boundRedirectAlert = null;
       this._boundToolActivity = null;
+      this._suppressOutsideCloseUntil = 0;
+      this._searchRevealed = false;
+      this._prevConfigScriptId = null;
     }}
 
     // Full shutdown used when another instance replaces this one: stops timers, modules and UI,
@@ -2368,7 +2371,8 @@ def build():
       if (this.storage.isCurrentBlocked()) return;
 
       try {{
-        const docRoot = document.body || document.documentElement;
+        // Prefer <html> over <body> so SPA hydration on sites like Reddit and LinkedIn does not strip the widget.
+        const docRoot = document.documentElement || document.body;
         if (!docRoot) return;
 
         // Discard stale host from old document (WebKit / iPadOS refresh or bfcache)
@@ -2410,7 +2414,7 @@ def build():
 
     mount(reason = '') {{
       if (this.disposed || !IS_TOP_FRAME) return;
-      const docRoot = document.body || document.documentElement;
+      const docRoot = document.documentElement || document.body;
       if (!docRoot) return;
 
       // Discard stale host from old document
@@ -2908,8 +2912,12 @@ def build():
       if (!htmlStr) return document.createDocumentFragment();
       const frag = document.createDocumentFragment();
       const svgNS = 'http://www.w3.org/2000/svg';
+      const decodeEntities = (s) => String(s || '').replace(/&(amp|lt|gt|quot|#39|nbsp);/g, (_, e) => ({{
+        amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", nbsp: '\u00a0'
+      }}[e] || '&' + e + ';'));
 
-      const tokenRegex = /<!--[\\s\\S]*?-->|<\\s*(\\/?)\\s*([a-zA-Z0-9\\-:]+)([^>]*?)(\\/?>)|([^<]+)/g;
+      // Quoted-attribute-aware tokenizer so '>' inside title="..." never prematurely closes a tag.
+      const tokenRegex = /<!--[\\s\\S]*?-->|<\\s*(\\/?)\\s*([a-zA-Z0-9\\-:]+)((?:"[^"]*"|'[^']*'|[^>"'])*?)(\\/?>)|([^<]+)/g;
       const attrRegex = /([a-zA-Z0-9\\-:]+)(?:\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+)))?/g;
 
       const voidElements = new Set([
@@ -2924,7 +2932,7 @@ def build():
       while ((match = tokenRegex.exec(htmlStr)) !== null) {{
         if (match[0].startsWith('<!--')) continue;
         if (match[5]) {{
-          const text = match[5];
+          const text = decodeEntities(match[5]);
           if (text) {{
             stack[stack.length - 1].node.appendChild(document.createTextNode(text));
           }}
@@ -2955,7 +2963,8 @@ def build():
           while ((aMatch = attrRegex.exec(rawAttrs)) !== null) {{
             const aName = aMatch[1];
             if (aName === '/' || !aName) continue;
-            const aVal = aMatch[2] !== undefined ? aMatch[2] : (aMatch[3] !== undefined ? aMatch[3] : (aMatch[4] !== undefined ? aMatch[4] : ''));
+            const rawVal = aMatch[2] !== undefined ? aMatch[2] : (aMatch[3] !== undefined ? aMatch[3] : (aMatch[4] !== undefined ? aMatch[4] : ''));
+            const aVal = decodeEntities(rawVal);
             if (aName.startsWith('on')) continue;
             if (aName === 'class') {{
               if (!isSVGTag) el.className = aVal;
@@ -3310,6 +3319,9 @@ def build():
         if (!this.menuWrapperEl || this.menuWrapperEl !== wrapper) return;
         this.outsideClickHandler = (e) => {{
           if (!this.menuWrapperEl) return;
+          // Ignore programmatic clicks (e.g. file downloads) and brief file-picker/download guards.
+          if (e && e.isTrusted === false) return;
+          if (Date.now() < (this._suppressOutsideCloseUntil || 0)) return;
           const path = e.composedPath ? e.composedPath() : [];
           if (!path.includes(wrapper) && (!this.widgetEl || !path.includes(this.widgetEl))) {{
             this.closeModal();
@@ -3381,10 +3393,16 @@ def build():
       const body = this.menuWrapperEl ? this.menuWrapperEl.querySelector('#besing-body') : null;
       if (!body) return;
       const prevScroll = body.scrollTop;
-      const isSameView = this._prevRenderedView === this.currentView;
+      const isSameView = this._prevRenderedView === this.currentView
+        && (this.currentView !== 'script-config' || this._prevConfigScriptId === this.activeConfigScriptId);
       this._prevRenderedView = this.currentView;
+      this._prevConfigScriptId = this.currentView === 'script-config' ? this.activeConfigScriptId : null;
       try {{
         this.setSafeHTML(body, '');
+        if (!isSameView) {{
+          body.scrollTop = 0;
+          requestAnimationFrame(() => {{ if (body) body.scrollTop = 0; }});
+        }}
 
       if (this.currentView === 'settings') {{
         const currentHost = window.location.hostname || 'localhost';
@@ -3395,15 +3413,31 @@ def build():
 
         this.setSafeHTML(body, `
           <div class="besing-settings-section">
+            <div class="besing-site-card">
+              <div class="besing-site-card-header">
+                <div>
+                  <div class="besing-section-title" style="color:#38bdf8;">Current Website</div>
+                  <div class="besing-current-domain">${{currentHost}}</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;">
+                  <span style="font-size:11px;color:${{this.storage.isCurrentBlocked() ? '#f87171' : '#94a3b8'}};">${{this.storage.isCurrentBlocked() ? 'Site Disabled' : 'Disable on this site'}}</span>
+                  <label class="besing-switch" title="Disable all scripts on ${{currentHost}}">
+                    <input type="checkbox" id="besing-btn-turn-off-site" ${{this.storage.isCurrentBlocked() ? 'checked' : ''}}>
+                    <span class="besing-slider"></span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
             <div class="besing-update-card" style="border-color:${{cloudLinked ? 'rgba(52,211,153,0.35)' : 'rgba(245,158,11,0.35)'}};">
               <div class="besing-update-header">
-                <span class="besing-section-title">Cloud Database (Shared Sync)</span>
+                <span class="besing-section-title">Cloud Database</span>
                 <span class="besing-status-pill ${{cloudLinked ? 'connected' : ''}}" id="besing-cloud-pill" style="${{cloudLinked ? '' : 'background:rgba(245,158,11,0.16);color:#fbbf24;border-color:rgba(245,158,11,0.35);'}}">
                   <span id="besing-cloud-pill-text">${{cloudLinked ? 'Linked' : 'Not Linked'}}</span>
                 </span>
               </div>
               <p style="font-size:10px;color:#94a3b8;margin:4px 0 6px;line-height:1.35;">
-                One Sync Link connects Browser Sync, Settings Sync, Quick Transfer, and future cloud scripts. Nothing is hardcoded.
+                Shared Sync Link for Sync History, Sync Setting, and Sync Transfer.
               </p>
               <div style="display:flex;flex-direction:column;gap:6px;">
                 <input type="password" class="besing-test-input" id="besing-cloud-link" placeholder="Paste besing-sync://... link" value="${{escCloud(cloudCfg.syncLink)}}" style="font-family:monospace;font-size:11px;">
@@ -3493,22 +3527,6 @@ def build():
               </div>
               <div id="besing-boot-log-msg" style="font-size:10px;color:#34d399;display:none;"></div>
               <div id="besing-boot-log-list" style="display:flex;flex-direction:column;gap:4px;max-height:150px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#cbd5e1;">Loading...</div>
-            </div>
-
-            <div class="besing-site-card">
-              <div class="besing-site-card-header">
-                <div>
-                  <div class="besing-section-title" style="color:#38bdf8;">Current Website</div>
-                  <div class="besing-current-domain">${{currentHost}}</div>
-                </div>
-                <div style="display:flex;align-items:center;gap:10px;">
-                  <span style="font-size:11px;color:${{this.storage.isCurrentBlocked() ? '#f87171' : '#94a3b8'}};">${{this.storage.isCurrentBlocked() ? 'Site Disabled' : 'Disable on this site'}}</span>
-                  <label class="besing-switch" title="Disable all scripts on ${{currentHost}}">
-                    <input type="checkbox" id="besing-btn-turn-off-site" ${{this.storage.isCurrentBlocked() ? 'checked' : ''}}>
-                    <span class="besing-slider"></span>
-                  </label>
-                </div>
-              </div>
             </div>
 
             <div class="besing-site-rules-wrap">
@@ -3957,17 +3975,55 @@ def build():
       }} else if (this.currentView === 'script-config') {{
         this.renderScriptConfig(body);
       }} else {{
-        // Extensions View: 3-stage toggles (OFF / SITE / ON)
+        // Extensions View: search & sort hidden until user pulls down (unless a query is active).
+        const showSearch = Boolean(this._searchRevealed || this.searchQuery);
         this.setSafeHTML(body, `
-          <div class="besing-search-wrap">
+          <div class="besing-search-wrap ${{showSearch ? '' : 'is-collapsed'}}" id="besing-search-wrap">
             <svg class="besing-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input type="text" class="besing-search-input" placeholder="Search installed scripts..." value="${{this.searchQuery}}">
+            <input type="text" class="besing-search-input" placeholder="Search scripts..." value="${{this.searchQuery}}">
           </div>
           <div class="besing-ext-list" id="besing-ext-container"></div>
         `);
 
+        const searchWrap = body.querySelector('#besing-search-wrap');
         const searchInput = body.querySelector('.besing-search-input');
         const extContainer = body.querySelector('#besing-ext-container');
+
+        const revealSearch = (focusInput = false) => {{
+          if (!searchWrap) return;
+          this._searchRevealed = true;
+          searchWrap.classList.remove('is-collapsed');
+          if (focusInput && searchInput) {{
+            setTimeout(() => {{ try {{ searchInput.focus(); }} catch (e) {{}} }}, 60);
+          }}
+        }};
+
+        // Reveal search/sort bar when user pulls down at top of list (touch drag down or wheel up).
+        let pullStartY = null;
+        body.ontouchstart = (ev) => {{
+          if (this.currentView !== 'extensions') return;
+          if (body.scrollTop <= 2 && ev.touches && ev.touches.length === 1) {{
+            pullStartY = ev.touches[0].clientY;
+          }} else {{
+            pullStartY = null;
+          }}
+        }};
+        body.ontouchmove = (ev) => {{
+          if (pullStartY === null || this._searchRevealed) return;
+          if (body.scrollTop > 2) {{ pullStartY = null; return; }}
+          const dy = (ev.touches && ev.touches[0]) ? ev.touches[0].clientY - pullStartY : 0;
+          if (dy > 26) {{
+            pullStartY = null;
+            revealSearch(false);
+          }}
+        }};
+        body.ontouchend = () => {{ pullStartY = null; }};
+        body.onwheel = (ev) => {{
+          if (this.currentView !== 'extensions' || this._searchRevealed) return;
+          if (body.scrollTop <= 0 && ev.deltaY < -8) {{
+            revealSearch(false);
+          }}
+        }};
 
         const renderCards = () => {{
           const prevScroll = body ? body.scrollTop : 0;
@@ -4008,15 +4064,33 @@ def build():
           header.className = 'besing-section-heading';
           this.setSafeHTML(header, `
             <div style="display:flex;align-items:center;gap:6px;">
-              <span>Installed Scripts</span>
+              <span>Scripts</span>
               <span class="besing-pill-count">${{sorted.length}}</span>
+              <button type="button" class="besing-sort-btn" id="besing-btn-toggle-search" title="Search" style="padding:2px 5px;display:inline-flex;align-items:center;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              </button>
             </div>
             <div class="besing-sort-group" title="Sort scripts">
-              <button type="button" class="besing-sort-btn ${{sortMode === 'smart' ? 'active' : ''}}" data-sort="smart" title="Global ON -> Site ON -> Tools -> Off (A-Z)">Smart</button>
-              <button type="button" class="besing-sort-btn ${{sortMode === 'recent' ? 'active' : ''}}" data-sort="recent" title="Most recently opened configuration first">Recent</button>
+              <button type="button" class="besing-sort-btn ${{sortMode === 'smart' ? 'active' : ''}}" data-sort="smart" title="Smart sort">Smart</button>
+              <button type="button" class="besing-sort-btn ${{sortMode === 'recent' ? 'active' : ''}}" data-sort="recent" title="Recent sort">Recent</button>
             </div>
           `);
-          header.querySelectorAll('.besing-sort-btn').forEach(btn => {{
+          const toggleSearchBtn = header.querySelector('#besing-btn-toggle-search');
+          if (toggleSearchBtn) {{
+            toggleSearchBtn.onclick = (e) => {{
+              e.stopPropagation();
+              if (searchWrap && searchWrap.classList.contains('is-collapsed')) {{
+                revealSearch(true);
+              }} else if (searchWrap) {{
+                this._searchRevealed = false;
+                this.searchQuery = '';
+                if (searchInput) searchInput.value = '';
+                searchWrap.classList.add('is-collapsed');
+                renderCards();
+              }}
+            }};
+          }}
+          header.querySelectorAll('.besing-sort-btn[data-sort]').forEach(btn => {{
             btn.onclick = async (e) => {{
               e.stopPropagation();
               const nextSort = btn.getAttribute('data-sort') || 'smart';
@@ -4202,48 +4276,18 @@ def build():
       const cfg = this.storage.getScriptConfig(m.id, currentHost);
 
       let scopeNotice = '';
-      if (actMode === 'none') {{
-        scopeNotice = '';
-      }} else if (actMode === 'global') {{
-        if (currentMode === 'on') {{
-          scopeNotice = `
-            <div class="besing-config-scope global">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/></svg>
-              <div><strong>Global ON:</strong> Runs across all sites. Turn OFF above to pause background activity.</div>
-            </div>
-          `;
-        }} else {{
-          scopeNotice = `
-            <div class="besing-config-scope off">
-              <div>⚪ <strong>Script is currently OFF.</strong> Choose <strong>ON</strong> above to enable it globally.</div>
-            </div>
-          `;
-        }}
-      }} else if (currentMode === 'site') {{
+      if (actMode === 'site' && currentMode === 'site') {{
         scopeNotice = `
           <div class="besing-config-scope site">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20"/></svg>
-            <div><strong>Site Only (${{currentHost}}):</strong> Runs on this site only and is off on other sites.</div>
+            <div><strong>Site Only:</strong> ${{currentHost}}</div>
           </div>
         `;
-      }} else if (currentMode === 'site-off') {{
+      }} else if (actMode === 'site' && currentMode === 'site-off') {{
         scopeNotice = `
           <div class="besing-config-scope site-off">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-            <div><strong style="color:#fbbf24;">Excluded on ${{currentHost}}:</strong> Disabled specifically on this website, while remaining globally active on other sites.</div>
-          </div>
-        `;
-      }} else if (currentMode === 'on') {{
-        scopeNotice = `
-          <div class="besing-config-scope global">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/></svg>
-            <div><strong>On Everywhere:</strong> Runs on every site except those where it is set to Site Off.</div>
-          </div>
-        `;
-      }} else {{
-        scopeNotice = `
-          <div class="besing-config-scope off">
-            <div>⚪ <strong>Script is currently OFF.</strong> Choose <strong>ON</strong> to run it everywhere or <strong>SITE ONLY</strong> to run it here.</div>
+            <div><strong style="color:#fbbf24;">Excluded:</strong> ${{currentHost}}</div>
           </div>
         `;
       }}
@@ -4296,6 +4340,9 @@ def build():
         const customColor = cfg.customColor || '#cce8cf';
         const curTextColor = cfg.textColor || 'default';
         const customTextColor = cfg.customTextColor || '#ffffff';
+        const nightDimmer = Boolean(cfg.nightDimmer);
+        const nightOpacity = Math.max(10, Math.min(75, Number(cfg.nightDimmerOpacity) || 32));
+        const nightTint = cfg.nightDimmerTint || 'slate';
 
         const presets = [
           {{ key: 'none', name: 'Original', color: 'transparent', border: '#475569' }},
@@ -4391,12 +4438,47 @@ def build():
               <label class="besing-custom-color-label">Custom Text:</label>
               <input type="color" id="custom-text-color-picker" value="${{customTextColor}}">
               <input type="text" id="custom-text-color-hex" class="besing-input-sm" value="${{customTextColor}}">
-              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-text">Apply Text Color</button>
+              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-text">Apply</button>
             </div>
+          </div>
 
-            <div style="margin-top:10px;display:flex;justify-content:flex-end;">
-              <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset All Colors & Brightness</button>
+          <div class="besing-config-section" style="margin-top:10px;">
+            <div class="besing-toggle-row">
+              <div>
+                <div class="besing-toggle-title">Night Dimmer</div>
+                <div class="besing-toggle-desc">Soft tinted screen filter</div>
+              </div>
+              <label class="besing-switch besing-switch-sm">
+                <input type="checkbox" id="chk-night-dimmer" ${{nightDimmer ? 'checked' : ''}}>
+                <span class="besing-slider"></span>
+              </label>
             </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;">
+              <span style="font-size:10px;color:#94a3b8;">Dim Strength</span>
+              <span class="besing-brightness-badge" id="night-dimmer-badge">${{nightOpacity}}%</span>
+            </div>
+            <input type="range" class="besing-slider-range" id="night-dimmer-range" min="10" max="75" step="2" value="${{nightOpacity}}">
+            <div class="besing-segmented-group" id="group-night-tint" style="margin-top:4px;">
+              <button type="button" class="besing-segmented-btn ${{nightTint === 'slate' ? 'active' : ''}}" data-tint="slate">Slate</button>
+              <button type="button" class="besing-segmented-btn ${{nightTint === 'warm' ? 'active' : ''}}" data-tint="warm">Warm</button>
+              <button type="button" class="besing-segmented-btn ${{nightTint === 'pitch' ? 'active' : ''}}" data-tint="pitch">Neutral</button>
+            </div>
+          </div>
+
+          <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+            <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset All</button>
+          </div>
+        `;
+      }} else if (m.id === 'quick-copy') {{
+        hasSettings = false;
+        specificControls = `
+          <div class="besing-config-section" style="display:flex;flex-direction:column;gap:8px;">
+            <div style="font-size:10px;color:#94a3b8;">2-4 open a save prompt. Cancel save to keep clipboard only.</div>
+            <button type="button" class="besing-btn-sub-action" id="btn-pcopy-link" style="padding:10px 12px;font-size:12px;font-weight:700;text-align:left;background:rgba(56,189,248,0.16);border:1px solid rgba(56,189,248,0.4);color:#38bdf8;">1. Copy Link ([Title](URL))</button>
+            <button type="button" class="besing-btn-sub-action" id="btn-pcopy-md" style="padding:10px 12px;font-size:12px;font-weight:700;text-align:left;background:rgba(16,185,129,0.16);border:1px solid rgba(16,185,129,0.4);color:#34d399;">2. Copy Markdown (Text + .md)</button>
+            <button type="button" class="besing-btn-sub-action" id="btn-pcopy-html" style="padding:10px 12px;font-size:12px;font-weight:700;text-align:left;background:rgba(99,102,241,0.18);border:1px solid rgba(99,102,241,0.45);color:#a5b4fc;">3. Copy HTML (Clipboard + .html)</button>
+            <button type="button" class="besing-btn-sub-action" id="btn-pcopy-warc" style="padding:10px 12px;font-size:12px;font-weight:700;text-align:left;background:rgba(245,158,11,0.16);border:1px solid rgba(245,158,11,0.4);color:#fbbf24;">4. Save WARC (With Media)</button>
+            <div id="pcopy-status" style="font-size:10.5px;color:#94a3b8;min-height:14px;line-height:1.35;"></div>
           </div>
         `;
       }} else if (m.id === 'force-copy') {{
@@ -5001,27 +5083,33 @@ def build():
           <div class="besing-config-section" style="padding:10px;border:1px solid rgba(56,189,248,0.22);border-radius:10px;background:rgba(15,23,42,0.55);">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
               <div>
-                <div style="font-size:12px;font-weight:700;color:#e2e8f0;">Quick Transfer (Open & Use)</div>
-                <div id="qtx-status-line" style="font-size:10px;color:#94a3b8;margin-top:2px;">${{linked ? 'Works even when OFF · Items expire automatically after 2 days (max 5 MB)' : 'Link your shared Cloud Database in Settings first.'}}</div>
+                <div style="font-size:12px;font-weight:700;color:#e2e8f0;">Sync Transfer</div>
+                <div id="qtx-status-line" style="font-size:10px;color:#94a3b8;margin-top:2px;">${{linked ? 'Max 5 MB · Expires in 48h' : 'Link Cloud DB in Settings first.'}}</div>
               </div>
               <button type="button" class="besing-btn-sub-action" id="btn-qtx-refresh" style="padding:5px 10px;font-size:11px;color:#38bdf8;border-color:rgba(56,189,248,0.4);">Refresh</button>
             </div>
-            ${{!linked ? `<button type="button" class="besing-btn-sub-action" id="btn-qtx-open-cloud" style="margin-top:8px;width:100%;color:#fbbf24;border-color:rgba(245,158,11,0.4);">Configure Shared Sync Link in Settings</button>` : ''}}
+            ${{!linked ? `<button type="button" class="besing-btn-sub-action" id="btn-qtx-open-cloud" style="margin-top:8px;width:100%;color:#fbbf24;border-color:rgba(245,158,11,0.4);">Open Settings</button>` : ''}}
           </div>
 
           <div class="besing-config-section">
             <div class="besing-section-header-row">
-              <span class="besing-section-title">Send to Other Devices</span>
-              <span style="font-size:10px;color:#64748b;">Max 5 MB · 48h TTL</span>
+              <span class="besing-section-title">Send</span>
+              <span style="font-size:10px;color:#64748b;">5 MB · 48h</span>
             </div>
             <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-              <input type="text" class="besing-test-input" id="qtx-input-title" placeholder="Name / Label (optional, e.g. Wi-Fi Note or Screenshot)">
-              <textarea class="besing-test-input" id="qtx-input-text" rows="3" placeholder="Type/paste text here — or press Ctrl+V with a copied image to upload it directly!" style="resize:vertical;font-size:11px;"></textarea>
-              <input type="file" id="qtx-input-file" style="display:none;">
+              <input type="text" class="besing-test-input" id="qtx-input-title" placeholder="Name (optional)">
+              <textarea class="besing-test-input" id="qtx-input-text" rows="3" placeholder="Text or Ctrl+V image..." style="resize:vertical;font-size:11px;"></textarea>
               <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                <button type="button" class="besing-btn-sub-action" id="btn-qtx-send-text" style="flex:1;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;font-weight:700;">Send Text</button>
-                <button type="button" class="besing-btn-sub-action" id="btn-qtx-paste-img" style="flex:1;background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#c084fc;">Paste Image</button>
-                <button type="button" class="besing-btn-sub-action" id="btn-qtx-pick-file" style="flex:1;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;">Upload File</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-qtx-send-text" style="flex:1;min-width:74px;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;font-weight:700;">Send</button>
+                <button type="button" class="besing-btn-sub-action" id="btn-qtx-paste-img" style="flex:1;min-width:74px;background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#c084fc;">Paste Img</button>
+                <label class="besing-btn-sub-action besing-upload-label" id="lbl-qtx-photo" style="flex:1;min-width:68px;background:rgba(236,72,153,0.18);border:1px solid rgba(236,72,153,0.4);color:#f472b6;">
+                  <span>Photo</span>
+                  <input type="file" id="qtx-input-photo" accept="image/*">
+                </label>
+                <label class="besing-btn-sub-action besing-upload-label" id="lbl-qtx-file" style="flex:1;min-width:64px;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;">
+                  <span>File</span>
+                  <input type="file" id="qtx-input-file">
+                </label>
               </div>
               <div id="qtx-send-msg" style="font-size:10px;color:#94a3b8;line-height:1.35;"></div>
             </div>
@@ -5029,12 +5117,12 @@ def build():
 
           <div class="besing-config-section">
             <div class="besing-section-header-row">
-              <span class="besing-section-title">Active Drops</span>
+              <span class="besing-section-title">Drops</span>
               <span id="qtx-count-badge" style="font-size:10px;color:#94a3b8;">--</span>
             </div>
             <div id="qtx-preview-box" style="display:none;margin-top:6px;padding:8px;border-radius:8px;background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.35);"></div>
             <div id="qtx-items-list" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading transfers...</p>
+              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading...</p>
             </div>
           </div>
         `;
@@ -5106,7 +5194,7 @@ def build():
       // Activation controls reflect the script's activation policy ('site' | 'global' | 'none').
       let headerToggleHtml = '';
       if (actMode === 'none') {{
-        headerToggleHtml = `<span class="besing-tool-badge" title="On-demand tool with no background activation">Tool · Open &amp; Use</span>`;
+        headerToggleHtml = `<span class="besing-tool-badge">Tool</span>`;
       }} else if (actMode === 'global') {{
         headerToggleHtml = `
           <div class="besing-tri-toggle" title="Global status">
@@ -5333,6 +5421,36 @@ def build():
           }}
         }}
 
+        const chkDim = body.querySelector('#chk-night-dimmer');
+        const dimRange = body.querySelector('#night-dimmer-range');
+        const dimBadge = body.querySelector('#night-dimmer-badge');
+        const dimTintGroup = body.querySelector('#group-night-tint');
+
+        if (chkDim) {{
+          chkDim.onchange = async () => {{
+            await this.applyScriptConfig(m.id, {{ nightDimmer: Boolean(chkDim.checked) }});
+          }};
+        }}
+        if (dimRange) {{
+          dimRange.oninput = async (e) => {{
+            const pct = Number(e.target.value) || 32;
+            if (dimBadge) dimBadge.textContent = `${{pct}}%`;
+            if (chkDim && !chkDim.checked) chkDim.checked = true;
+            await this.applyScriptConfig(m.id, {{ nightDimmer: true, nightDimmerOpacity: pct }});
+          }};
+        }}
+        if (dimTintGroup) {{
+          dimTintGroup.querySelectorAll('.besing-segmented-btn').forEach(btn => {{
+            btn.onclick = async () => {{
+              const tint = btn.getAttribute('data-tint') || 'slate';
+              dimTintGroup.querySelectorAll('.besing-segmented-btn').forEach(b => b.classList.remove('active'));
+              btn.classList.add('active');
+              if (chkDim && !chkDim.checked) chkDim.checked = true;
+              await this.applyScriptConfig(m.id, {{ nightDimmer: true, nightDimmerTint: tint }});
+            }};
+          }});
+        }}
+
         if (btnResetBg) {{
           btnResetBg.onclick = async () => {{
             if (bRange) bRange.value = 0;
@@ -5344,9 +5462,39 @@ def build():
               c.classList.toggle('active', c.getAttribute('data-text-color') === 'default');
             }});
             if (tBadge) tBadge.textContent = 'Original';
-            await this.applyScriptConfig(m.id, {{ brightness: 0, preset: 'none', textColor: 'default' }});
+            if (chkDim) chkDim.checked = false;
+            if (dimRange) dimRange.value = 32;
+            if (dimBadge) dimBadge.textContent = '32%';
+            await this.applyScriptConfig(m.id, {{ brightness: 0, preset: 'none', textColor: 'default', nightDimmer: false, nightDimmerOpacity: 32, nightDimmerTint: 'slate' }});
           }};
         }}
+      }} else if (m.id === 'quick-copy') {{
+        const statusEl = body.querySelector('#pcopy-status');
+        const setStatus = (txt, color = '#94a3b8') => {{
+          if (!statusEl) return;
+          statusEl.textContent = txt;
+          statusEl.style.color = color;
+        }};
+        const runCopy = async (btn, fn) => {{
+          if (!btn || typeof fn !== 'function') return;
+          btn.disabled = true;
+          try {{
+            const res = await fn();
+            setStatus((res && res.msg) || 'Done.', res && res.ok ? '#34d399' : '#fbbf24');
+          }} catch (e) {{
+            setStatus(e.message || String(e), '#fca5a5');
+          }} finally {{
+            btn.disabled = false;
+          }}
+        }};
+        const bLink = body.querySelector('#btn-pcopy-link');
+        const bMd = body.querySelector('#btn-pcopy-md');
+        const bHtml = body.querySelector('#btn-pcopy-html');
+        const bWarc = body.querySelector('#btn-pcopy-warc');
+        if (bLink) bLink.onclick = () => runCopy(bLink, () => m.copyLink());
+        if (bMd) bMd.onclick = () => runCopy(bMd, () => m.copyMarkdown());
+        if (bHtml) bHtml.onclick = () => runCopy(bHtml, () => m.copyHtml());
+        if (bWarc) bWarc.onclick = () => runCopy(bWarc, () => m.saveWarc((msg) => setStatus(msg, '#fbbf24')));
       }} else if (m.id === 'force-copy') {{
         const chkSelect = body.querySelector('#chk-allow-select');
         const chkCopy = body.querySelector('#chk-allow-copy');
@@ -5860,56 +6008,67 @@ def build():
             }}
             card.appendChild(hdr);
 
-            // Render Tab Groups first
+            // Sort open tabs by most recently active/visited first (never alphabetical).
+            const tabTime = (t) => Date.parse((t && (t.lastActiveAt || t.updatedAt)) || '') || 0;
+            const sortedTabs = tabsArr.slice().sort((a, b) => tabTime(b) - tabTime(a));
+
+            // Render Tab Groups first with clear colored group chrome and click-to-open-all
             const groupedTabIds = new Set();
             groupsArr.forEach(g => {{
-              const gTabs = tabsArr.filter(t => t.groupId && String(t.groupId) === String(g.id));
+              const gTabs = sortedTabs.filter(t => t.groupId && String(t.groupId) === String(g.id));
               if (gTabs.length === 0) return;
               gTabs.forEach(t => groupedTabIds.add(t.id || t.url));
+              const gColor = GROUP_COLORS[g.color] || '#94a3b8';
 
               const gBox = document.createElement('div');
-              gBox.style.cssText = 'padding:6px;border-radius:7px;background:rgba(30,41,59,0.45);border:1px solid rgba(148,163,184,0.16);display:flex;flex-direction:column;gap:4px;';
+              gBox.style.cssText = `padding:6px 6px 6px 8px;border-radius:8px;background:rgba(30,41,59,0.55);border:1px solid rgba(148,163,184,0.18);border-left:3px solid ${{gColor}};display:flex;flex-direction:column;gap:4px;`;
               const gHdr = document.createElement('div');
-              gHdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;';
+              gHdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;padding-bottom:3px;border-bottom:1px solid rgba(148,163,184,0.12);';
               const gTitle = document.createElement('div');
-              gTitle.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#e2e8f0;min-width:0;';
+              gTitle.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#e2e8f0;min-width:0;cursor:pointer;flex:1;';
+              gTitle.title = 'Click to open all tabs in this group';
               const dot = document.createElement('span');
-              dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${{GROUP_COLORS[g.color] || '#94a3b8'}};flex-shrink:0;`;
+              dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${{gColor}};flex-shrink:0;`;
               const txt = document.createElement('span');
               txt.textContent = `${{g.title || 'Tab Group'}} (${{gTabs.length}})`;
               txt.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
               gTitle.appendChild(dot);
               gTitle.appendChild(txt);
+
+              const openAllInGroup = async () => {{
+                await m.openGroup(g.title, g.color, gTabs.map(t => t.url));
+              }};
+              gTitle.onclick = openAllInGroup;
               gHdr.appendChild(gTitle);
 
               const openGrpBtn = document.createElement('button');
               openGrpBtn.type = 'button';
-              openGrpBtn.textContent = (typeof m.isExtensionMode === 'function' && m.isExtensionMode()) ? 'Open Group' : 'Open 1st';
-              openGrpBtn.style.cssText = 'font-size:9.5px;padding:2px 7px;border-radius:6px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.4);color:#38bdf8;cursor:pointer;white-space:nowrap;';
-              openGrpBtn.onclick = async () => {{
-                await m.openGroup(g.title, g.color, gTabs.map(t => t.url));
-              }};
+              openGrpBtn.textContent = `Open (${{gTabs.length}})`;
+              openGrpBtn.style.cssText = 'font-size:9.5px;padding:2px 7px;border-radius:6px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.4);color:#38bdf8;cursor:pointer;white-space:nowrap;font-weight:600;';
+              openGrpBtn.onclick = openAllInGroup;
               gHdr.appendChild(openGrpBtn);
               gBox.appendChild(gHdr);
 
               gTabs.slice(0, 25).forEach(t => {{
                 let host = '';
                 try {{ host = new URL(t.url).hostname; }} catch (e) {{}}
-                gBox.appendChild(makeLinkRow(t.url, t.title || host, host));
+                const ago = t.lastActiveAt ? ` · ${{fmtAgo(t.lastActiveAt)}}` : '';
+                gBox.appendChild(makeLinkRow(t.url, t.title || host, `${{host}}${{ago}}`));
               }});
               card.appendChild(gBox);
             }});
 
-            // Ungrouped Open Tabs
-            const ungrouped = tabsArr.filter(t => !groupedTabIds.has(t.id || t.url));
+            // Ungrouped Open Tabs (sorted by last visit/activity descending)
+            const ungrouped = sortedTabs.filter(t => !groupedTabIds.has(t.id || t.url));
             if (ungrouped.length > 0) {{
               const uWrap = document.createElement('div');
               uWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
               ungrouped.slice(0, 25).forEach(t => {{
                 let host = '';
                 try {{ host = new URL(t.url).hostname; }} catch (e) {{}}
-                const badge = t.active ? '● Active · ' : '';
-                uWrap.appendChild(makeLinkRow(t.url, t.title || host, `${{badge}}${{host}}`));
+                const badge = t.active ? '● ' : '';
+                const ago = t.lastActiveAt ? ` · ${{fmtAgo(t.lastActiveAt)}}` : '';
+                uWrap.appendChild(makeLinkRow(t.url, t.title || host, `${{badge}}${{host}}${{ago}}`));
               }});
               if (ungrouped.length > 25) {{
                 const more = document.createElement('div');
@@ -6216,6 +6375,9 @@ def build():
             }});
             if (this.cloud.isConfigured()) {{
               await m.setRetentionDays(fields.retentionDays);
+              if (fields.importToNativeHistory && typeof m.isExtensionMode === 'function' && m.isExtensionMode()) {{
+                await m.syncNow(true);
+              }}
             }}
             if (setupMsg) setupMsg.textContent = `Saved settings (${{fields.deviceName}}, pull every ${{fields.pullIntervalMinutes}}m, ${{fields.retentionDays}}d retention).`;
             await refreshView();
@@ -6395,6 +6557,27 @@ def build():
             img.alt = item.title || 'Synced image';
             img.style.cssText = 'max-width:100%;max-height:240px;border-radius:6px;display:block;margin:0 auto;';
             previewBox.appendChild(img);
+            const tip = document.createElement('div');
+            tip.textContent = 'Tip: On iOS, tap Album or long-press image to save to Photos.';
+            tip.style.cssText = 'font-size:9.5px;color:#94a3b8;text-align:center;margin-top:5px;';
+            previewBox.appendChild(tip);
+          }} else if (item.kind === 'file') {{
+            const isTextLike = /^text\\/|json|xml|javascript|csv|markdown/i.test(item.mime_type || '') || /\\.(txt|md|json|csv|js|ts|py|html|css|xml|log|yaml|yml)$/i.test(item.file_name || '');
+            if (isTextLike && item.content) {{
+              let decoded = '';
+              try {{ decoded = atob(item.content).slice(0, 8000); }} catch (e) {{ decoded = '[Binary file]'; }}
+              const ta = document.createElement('textarea');
+              ta.readOnly = true;
+              ta.rows = 6;
+              ta.value = decoded;
+              ta.style.cssText = 'width:100%;box-sizing:border-box;background:#0f172a;color:#e2e8f0;border:1px solid rgba(148,163,184,0.25);border-radius:6px;padding:6px;font-family:monospace;font-size:10.5px;';
+              previewBox.appendChild(ta);
+            }} else {{
+              const info = document.createElement('div');
+              info.style.cssText = 'font-size:11px;color:#cbd5e1;line-height:1.45;';
+              info.textContent = `${{item.file_name || item.title || 'File'}} · ${{item.mime_type || 'application/octet-stream'}} · ${{fmtSize(item.size_bytes)}}`;
+              previewBox.appendChild(info);
+            }}
           }} else {{
             const ta = document.createElement('textarea');
             ta.readOnly = true;
@@ -6407,7 +6590,7 @@ def build():
             copyFull.textContent = 'Copy Text';
             copyFull.style.cssText = 'margin-top:6px;font-size:10px;padding:4px 10px;border-radius:6px;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;cursor:pointer;';
             copyFull.onclick = () => {{
-              copyTextToClipboard(item.content || '').then(ok => setMsg(ok ? 'Copied text to clipboard!' : 'Select and copy from the box above.', ok ? '#34d399' : '#fbbf24'));
+              copyTextToClipboard(item.content || '').then(ok => setMsg(ok ? 'Copied!' : 'Select and copy above.', ok ? '#34d399' : '#fbbf24'));
             }};
             previewBox.appendChild(copyFull);
           }}
@@ -6480,42 +6663,77 @@ def build():
               return b;
             }};
 
+            // Consistent button order: Preview first, then Copy / Download (+ Album for images), Delete last.
             if (item.kind === 'text') {{
-              if (item.inline_text !== null && item.inline_text !== undefined) {{
-                // Synchronous tap -> clipboard copy works cleanly on iOS Safari!
-                actions.appendChild(mkBtn('Copy', 'background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;font-weight:600;', () => {{
-                  copyTextToClipboard(item.inline_text).then(ok => setMsg(ok ? `Copied "${{item.title}}"` : 'Copy blocked — click View to copy manually.', ok ? '#34d399' : '#fbbf24'));
-                }}));
-              }}
-              actions.appendChild(mkBtn('View', 'background:rgba(99,102,241,0.18);border:1px solid rgba(99,102,241,0.4);color:#a5b4fc;', async () => {{
+              actions.appendChild(mkBtn('Preview', 'background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#c084fc;font-weight:600;', async () => {{
                 if (item.inline_text !== null && item.inline_text !== undefined) {{
                   showPreview(Object.assign({{}}, item, {{ content: item.inline_text }}));
                 }} else {{
-                  setMsg('Downloading text...');
+                  setMsg('Loading...');
                   const full = await m.fetchTransfer(item.id);
                   if (full && full.ok) {{ setMsg(''); showPreview(full.item); }}
-                  else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+                  else setMsg((full && full.error) || 'Failed', '#fca5a5');
+                }}
+              }}));
+              actions.appendChild(mkBtn('Copy', 'background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;font-weight:600;', async () => {{
+                if (item.inline_text !== null && item.inline_text !== undefined) {{
+                  copyTextToClipboard(item.inline_text).then(ok => setMsg(ok ? 'Copied!' : 'Tap Preview to copy.', ok ? '#34d399' : '#fbbf24'));
+                }} else {{
+                  setMsg('Loading...');
+                  const full = await m.fetchTransfer(item.id);
+                  if (full && full.ok) {{
+                    copyTextToClipboard(full.item.content || '').then(ok => setMsg(ok ? 'Copied!' : 'Tap Preview to copy.', ok ? '#34d399' : '#fbbf24'));
+                  }} else setMsg((full && full.error) || 'Failed', '#fca5a5');
+                }}
+              }}));
+              actions.appendChild(mkBtn('Download', 'background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;', async () => {{
+                if (item.inline_text !== null && item.inline_text !== undefined) {{
+                  m.triggerDownload(Object.assign({{}}, item, {{ content: item.inline_text }}));
+                  setMsg('Downloaded!', '#34d399');
+                }} else {{
+                  setMsg('Downloading...');
+                  const full = await m.fetchTransfer(item.id);
+                  if (full && full.ok) {{ m.triggerDownload(full.item); setMsg('Downloaded!', '#34d399'); }}
+                  else setMsg((full && full.error) || 'Failed', '#fca5a5');
                 }}
               }}));
             }} else if (item.kind === 'image') {{
               actions.appendChild(mkBtn('Preview', 'background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#c084fc;font-weight:600;', async () => {{
-                setMsg('Downloading image...');
+                setMsg('Loading image...');
                 const full = await m.fetchTransfer(item.id);
                 if (full && full.ok) {{ setMsg(''); showPreview(full.item); }}
-                else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+                else setMsg((full && full.error) || 'Failed', '#fca5a5');
               }}));
               actions.appendChild(mkBtn('Download', 'background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;', async () => {{
-                setMsg('Downloading image...');
+                setMsg('Downloading...');
                 const full = await m.fetchTransfer(item.id);
                 if (full && full.ok) {{ m.triggerDownload(full.item); setMsg('Downloaded!', '#34d399'); }}
-                else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+                else setMsg((full && full.error) || 'Failed', '#fca5a5');
+              }}));
+              actions.appendChild(mkBtn('Album', 'background:rgba(236,72,153,0.18);border:1px solid rgba(236,72,153,0.42);color:#f472b6;', async () => {{
+                setMsg('Preparing photo...');
+                const full = await m.fetchTransfer(item.id);
+                if (!full || !full.ok) {{ setMsg((full && full.error) || 'Failed', '#fca5a5'); return; }}
+                const s = await m.saveToAlbum(full.item);
+                if (s && s.ok) {{
+                  setMsg(s.cancelled ? '' : 'Choose Save Image to add to Photos.', '#34d399');
+                }} else {{
+                  showPreview(full.item);
+                  setMsg((s && s.error) || 'Long-press preview image to save to Photos.', '#fbbf24');
+                }}
               }}));
             }} else {{
+              actions.appendChild(mkBtn('Preview', 'background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#c084fc;font-weight:600;', async () => {{
+                setMsg('Loading file...');
+                const full = await m.fetchTransfer(item.id);
+                if (full && full.ok) {{ setMsg(''); showPreview(full.item); }}
+                else setMsg((full && full.error) || 'Failed', '#fca5a5');
+              }}));
               actions.appendChild(mkBtn('Download', 'background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;font-weight:600;', async () => {{
-                setMsg('Downloading file...');
+                setMsg('Downloading...');
                 const full = await m.fetchTransfer(item.id);
                 if (full && full.ok) {{ m.triggerDownload(full.item); setMsg('Downloaded!', '#34d399'); }}
-                else setMsg((full && full.error) || 'Download failed', '#fca5a5');
+                else setMsg((full && full.error) || 'Failed', '#fca5a5');
               }}));
             }}
 
@@ -6598,11 +6816,16 @@ def build():
           }};
         }}
 
-        if (el('#btn-qtx-pick-file') && fileInput) {{
-          el('#btn-qtx-pick-file').onclick = () => fileInput.click();
-          fileInput.onchange = async () => {{
-            const file = fileInput.files && fileInput.files[0];
-            fileInput.value = '';
+        const photoInput = el('#qtx-input-photo');
+        const bindFileUpload = (inp) => {{
+          if (!inp) return;
+          inp.addEventListener('click', (ev) => {{
+            ev.stopPropagation();
+            this._suppressOutsideCloseUntil = Date.now() + 1200;
+          }});
+          inp.onchange = async () => {{
+            const file = inp.files && inp.files[0];
+            inp.value = '';
             if (!file) return;
             setMsg(`Uploading ${{file.name}}...`, '#38bdf8');
             const res = await m.sendBlob(file, {{ title: (titleInput?.value || '').trim(), fileName: file.name }});
@@ -6611,10 +6834,12 @@ def build():
               setMsg(`Uploaded "${{res.item.title}}" (${{fmtSize(res.item.size_bytes)}}).`, '#34d399');
               renderList();
             }} else {{
-              setMsg((res && res.error) || 'File upload failed', '#fca5a5');
+              setMsg((res && res.error) || 'Upload failed', '#fca5a5');
             }}
           }};
-        }}
+        }};
+        bindFileUpload(photoInput);
+        bindFileUpload(fileInput);
       }} else if (m.id === 'prevent-redirect') {{
         const bindChoice = (groupSelector, attr, key) => {{
           const group = body.querySelector(groupSelector);
@@ -6648,6 +6873,7 @@ def build():
     }}
 
     closeModal() {{
+      this._searchRevealed = false;
       if (this.outsideClickHandler) {{
         document.removeEventListener('click', this.outsideClickHandler, true);
         document.removeEventListener('click', this.outsideClickHandler, false);
@@ -6663,8 +6889,7 @@ def build():
     }}
 
     injectStyles(shadow) {{
-      const style = document.createElement('style');
-      style.textContent = `
+      const cssText = `
         :host {{ all: initial; position: fixed !important; top: 0 !important; left: 0 !important; width: var(--besing-host-w, 0px) !important; height: var(--besing-host-h, 0px) !important; transform: var(--besing-host-transform, none) !important; transform-origin: 0 0 !important; z-index: 2147483647 !important; pointer-events: none !important; overflow: visible !important; display: block !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }}
         *, *::before, *::after {{ box-sizing: border-box !important; margin: 0; padding: 0; }}
         svg {{ display: block !important; overflow: visible !important; flex-shrink: 0 !important; }}
@@ -6711,7 +6936,10 @@ def build():
         .besing-btn-icon:hover {{ background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.2); color: #ffffff; transform: translateY(-1px); }}
         .besing-btn-icon.active {{ background: rgba(99, 102, 241, 0.35); border-color: rgba(129, 140, 248, 0.5); color: #c7d2fe; }}
         .besing-body {{ padding: 14px 18px !important; overflow-y: auto !important; flex: 1 1 auto !important; min-height: 280px !important; display: flex !important; flex-direction: column !important; gap: 12px !important; }}
-        .besing-search-wrap {{ position: relative; display: flex; align-items: center; }}
+        .besing-search-wrap {{ position: relative; display: flex; align-items: center; max-height: 44px; opacity: 1; overflow: hidden; transition: max-height 0.18s ease, opacity 0.18s ease, margin 0.18s ease; }}
+        .besing-search-wrap.is-collapsed {{ max-height: 0 !important; opacity: 0 !important; margin: -6px 0 !important; pointer-events: none; }}
+        .besing-upload-label {{ position: relative; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }}
+        .besing-upload-label input[type="file"] {{ position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; font-size: 16px; cursor: pointer; }}
         .besing-search-icon {{ position: absolute; left: 12px; color: #64748b; pointer-events: none; }}
         .besing-search-input {{ width: 100%; background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 8px 12px 8px 34px; color: #f1f5f9; font-size: 13px; outline: none; transition: border-color 0.2s, background 0.2s; }}
         .besing-search-input:focus {{ border-color: #6366f1; background: rgba(15, 23, 42, 0.9); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25); }}
@@ -6917,7 +7145,23 @@ def build():
         .besing-rest-btn-off:hover {{ background: rgba(239, 68, 68, 0.22); border-color: rgba(239, 68, 68, 0.55); transform: translateY(-1px); }}
         .besing-rest-btn-off:active {{ transform: scale(0.97); }}
       `;
-      shadow.appendChild(style);
+      // Constructed adoptedStyleSheets bypass strict style-src CSP on Safari (LinkedIn, Reddit, etc.).
+      let appliedAdopted = false;
+      try {{
+        if (typeof CSSStyleSheet === 'function' && 'adoptedStyleSheets' in shadow) {{
+          const sheet = new CSSStyleSheet();
+          sheet.replaceSync(cssText);
+          shadow.adoptedStyleSheets = [...shadow.adoptedStyleSheets, sheet];
+          appliedAdopted = true;
+        }}
+      }} catch (e) {{
+        appliedAdopted = false;
+      }}
+      if (!appliedAdopted) {{
+        const style = document.createElement('style');
+        style.textContent = cssText;
+        shadow.appendChild(style);
+      }}
     }}
   }}
 

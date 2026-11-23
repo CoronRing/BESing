@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Grok Exporter
+// @name         Exporter Grok
 // @namespace    https://github.com/CoronRing/BESing
 // @version      1.1.0
-// @description  Copy or download the full Grok conversation on the current page as plain text or Markdown, including messages Grok has not rendered yet.
+// @description  Export full Grok chats as plain text or Markdown.
 // @author       BESing Team
 // @license      MIT
 // @match        https://grok.com/*
@@ -15,9 +15,9 @@
 
   const GrokExporter = {
     id: 'grok-exporter',
-    name: 'Grok Exporter',
+    name: 'Exporter Grok',
     version: '1.1.0',
-    description: 'Copy or download the full Grok conversation on the current page as plain text or Markdown, including messages Grok has not rendered yet.',
+    description: 'Export full Grok chats as plain text or Markdown.',
     category: 'Tools',
     _config: null,
     _toolbarEl: null,

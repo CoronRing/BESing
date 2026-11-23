@@ -17,7 +17,7 @@
     id: 'pagestream',
     name: 'PageStream',
     version: '1.4.0',
-    description: 'Auto-stream infinite pages by automated click or URL fetch splicing. Supports intelligent pagination detection, history sync, and customizable preload.',
+    description: 'Auto-loads next pages for continuous scrolling.',
     category: 'Productivity',
 
     // Runtime state

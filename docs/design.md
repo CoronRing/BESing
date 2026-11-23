@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.12.0  
+**Version:** 1.13.0  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -597,3 +597,28 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
 - **Per-Card Compact Statistics Line (`.besing-card-stat`)**:
   - Displays a lightweight single-line stat under each card's action button, computed lazily once when the script list opens (zero background timers): `N blocked` for `prevent-redirect`, `N hidden` for `ad-cleaner`, `Xm left` for `rest-reminder`, `ready` / `not linked` for `quick-transfer`, and a single async check for `browser-sync` / `settings-sync` (`sync Xm ago`, `not linked`, or `sync err`).
 - **Verification**: Verified end-to-end in real Microsoft Edge in both Userscript (simulated Tampermonkey/Stay) and unpacked MV3 Extension modes: confirmed manual `Sync Now` OFF and unlinked error banners, confirmed turning sync OFF stops timers and rejects sync in both `background.js` and userscript modules, verified all three activation policies and Settings dropdown filtering, confirmed `Smart` and `Recent` sorting, verified `prevent-redirect` caps at 5 flashes and folds alongside live `ad-cleaner` (`2 hidden`) into the green working badge (`1 -> 2 -> 3`), and confirmed per-card stat strings (`8 blocked`, `2 hidden`, `not linked`) with 0 uncaught errors.
+
+### 7.43 Safari CSP Widget Visibility, Page Copy (WARC/MD/HTML), Sync UX Fixes & Script Consolidation (v1.13.0)
+- **Safari Strict-CSP & SPA Hydration Widget Fix (`build.py`)**:
+  - `BESManagerApp.injectStyles(shadow)` now constructs and attaches a `CSSStyleSheet` via `shadow.adoptedStyleSheets` (falling back to `<style>` only when unsupported), bypassing strict `style-src` CSP headers on sites such as LinkedIn and Reddit on iOS/iPadOS Safari.
+  - `mount()` and `ensureMounted()` now mount `besing-host` onto `document.documentElement` (`<html>`) instead of `document.body`, preventing React/Ember body hydration from detaching the widget.
+- **Parser & UI Fixes (`build.py`)**:
+  - Fixed `safeParseHTML` tokenizer so `>` inside quoted attribute strings (such as tooltips) no longer splits tags prematurely, and added HTML entity decoding (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;`, `&nbsp;`) for text nodes and attributes.
+  - Reset `.besing-body` scroll position (`scrollTop = 0`) whenever navigating to a script detail page or switching top-level views, while preserving scroll position on same-view updates.
+  - Moved the **Current Website / Disable on this site** card to the first position in Settings.
+  - Collapsed the script search bar by default when opening the Extensions list, revealing it via pull-down gesture at the top of the list (touch drag down or mouse wheel up at `scrollTop === 0`) or the compact header search icon.
+  - Shortened mobile UI labels (`Tool` badge, `Smart` / `Recent` sort labels, concise script descriptions, and removal of redundant global ON/OFF banners).
+- **Script Consolidation & Renaming (`scripts/SCRIPT_LIST.json`, `scripts/*`)**:
+  - Merged `Night Comfort Dimmer` (`dark-dimmer`) into **Page Color** (`color-change` `v1.3.0`, adding a Night Dimmer toggle, strength slider `10%-75%`, and Slate/Warm/Neutral tint presets, plus CSP-safe `adoptedStyleSheets` text coloring) and removed `dark-dimmer` from the packed bundle (13 modules total).
+  - Renamed bundled modules for cleaner grouping and shorter mobile labels: `AD Block` (`ad-cleaner`), `AD Prevent Redirect` (`prevent-redirect`), `Exporter Grok` (`grok-exporter`), `Force Copy` (`force-copy`), `Page Color` (`color-change`), `Page Copy` (`quick-copy`), `Page Text Zoom` (`text-size-control`), `Sync History` (`browser-sync`), `Sync Setting` (`settings-sync`), and `Sync Transfer` (`quick-transfer`).
+- **Page Copy 2.0 (`scripts/quick-copy/quick-copy.user.js`, `activationMode: 'none'`)**:
+  - Upgraded to an on-demand 4-button mobile-friendly tool: (1) **Copy Link** (`[Title](URL)`), (2) **Copy Markdown** (text-only DOM conversion to clipboard + `.md` save prompt), (3) **Copy HTML** (clean HTML without BESing nodes to clipboard up to 1.5 MB + `.html` save prompt), and (4) **Save WARC** (ISO 28500 `WARC/1.0` archive bundling the HTML response plus page images, stylesheets, icons, and audio/video assets via `fetch` / `GM_xmlhttpRequest`, capped at 60 assets / 25 MB).
+- **Sync History & Native Edge Import Fixes (`scripts/browser-sync/browser-sync.user.js`, `extension/background.js`, `build.py`)**:
+  - Fixed userscript tab closure tracking on `pagehide`: synchronously removes the closing tab from `shared_browser_sync_tabs`, appends it to `shared_browser_sync_closed`, and sends a `fetch(..., { keepalive: true })` push (and stopped skipping pushes when `tabs` becomes empty).
+  - Sorted all synced open tabs by `lastActiveAt` descending (most recently active first) and enhanced Tab Groups with colored left accent borders and clickable `Open (N)` headers.
+  - Updated `extension/background.js` `importToNativeHistory` to persist imported URLs in `chrome.storage.local` and import across full cached remote history immediately when enabled.
+- **Sync Transfer Fixes (`scripts/quick-transfer/quick-transfer.user.js`, `build.py`)**:
+  - Prevented downloads and file pickers from closing the BESing menu by ignoring non-trusted programmatic clicks in `outsideClickHandler`, appending download anchors inside Shadow DOM with `stopPropagation()`, and applying a short close-suppression window.
+  - Replaced `display:none` file inputs + `.click()` with native `<label>` controls wrapping transparent full-area `<input type="file">` controls (**Photo** with `accept="image/*"` and **File**) to resolve Mobile Edge WebView upload blocking.
+  - Standardized item button order across all item types: **Preview** first, then **Copy** / **Download**, plus **Album** on images (invoking `navigator.share({ files })` for native iOS Save Image with Preview long-press fallback), and **Delete** last.
+- **Verification**: Verified in WebKit (iOS mobile viewport with strict `style-src 'self'` CSP and full `document.body` replacement confirming `besing-host` stays mounted on `<html>` with `adoptedStyleSheets` and exact `48x48` trigger layout) and Microsoft Edge (all 13 renamed scripts, pull-down search reveal, scroll-to-top, `Page Copy` Link/Markdown/HTML/WARC with real embedded PNG asset, `Page Color` Night Dimmer, Settings ordering, `Sync Transfer` non-closing download + native Photo/File labels + consistent button rows, and `Sync History` newest-first tab ordering + Tab Group rendering + synchronous `pagehide` tab removal), with 0 uncaught errors.
