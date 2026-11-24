@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BESing Packed
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.13.0
+// @version      1.14.0
 // @description  Universal Browser Extension & Greasy Fork Script Manager (Packed Standalone) with 4-way edge folding, desktop pet themes, non-blocking anchored bubble menu, and bundled productivity tools.
 // @author       BESing Team
 // @license      MIT
@@ -1404,7 +1404,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.13.0',
+          v: '1.14.0',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -1485,6 +1485,10 @@
         if (running.includes('ad-cleaner')) {
           const ac = (app.modules || []).find(m => m.id === 'ad-cleaner');
           if (ac && typeof ac.debugStatus === 'function') parts.push(ac.debugStatus());
+        }
+        if (running.includes('pagestream')) {
+          const ps = (app.modules || []).find(m => m.id === 'pagestream');
+          if (ps && typeof ps.debugStatus === 'function') parts.push(ps.debugStatus());
         }
         if (running.includes('prevent-redirect')) {
           const pr = (app.modules || []).find(m => m.id === 'prevent-redirect');
@@ -1591,7 +1595,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.13.0), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.14.0), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -2317,60 +2321,89 @@
       const mod = {
     id: 'color-change',
     name: 'Page Color',
-    version: '1.3.0',
-    description: 'Background presets, brightness, text color, and night dimmer.',
+    version: '1.4.0',
+    description: 'Color profiles, brightness, warmth, and text color presets.',
     category: 'Visual',
     _prevBodyBg: null,
     _prevHtmlBg: null,
     _presetOverlay: null,
     _brightnessOverlay: null,
-    _dimmerOverlay: null,
+    _warmthOverlay: null,
     _textColorSheet: null,
     _textColorStyle: null,
     _config: {
+      brightnessEnabled: false,
       brightness: 0, // -100 (lighten) to +100 (darken)
+      warmthEnabled: false,
+      warmth: 35, // 0..100 warm amber blue-light filter
       preset: 'eye-protect',
       customColor: '#cce8cf',
       textColor: 'default',
       customTextColor: '#ffffff',
-      nightDimmer: false,
-      nightDimmerOpacity: 32, // 10..75 (%)
-      nightDimmerTint: 'slate' // 'slate' | 'warm' | 'pitch'
+      activeProfile: '',
+      profiles: []
     },
+
+    DEFAULT_PROFILES: [
+      {
+        id: 'eye',
+        name: 'EYE',
+        builtin: true,
+        preset: 'eye-protect',
+        customColor: '#cce8cf',
+        textColor: 'black',
+        customTextColor: '#0f172a',
+        brightnessEnabled: false,
+        brightness: 0,
+        warmthEnabled: false,
+        warmth: 0
+      },
+      {
+        id: 'night',
+        name: 'NIGHT',
+        builtin: true,
+        preset: 'custom',
+        customColor: '#222428',
+        textColor: 'custom',
+        customTextColor: '#e5e7eb',
+        brightnessEnabled: false,
+        brightness: 0,
+        warmthEnabled: false,
+        warmth: 0
+      }
+    ],
 
     PRESETS: {
       'none': { name: 'Original', color: 'transparent', overlay: 'transparent' },
-      'eye-protect': { name: 'Eye Protect', color: '#cce8cf', overlay: 'rgba(204, 232, 207, 0.45)' },
+      'eye-protect': { name: 'Eye Green', color: '#cce8cf', overlay: 'rgba(204, 232, 207, 0.45)' },
       'old-paper': { name: 'Old Paper', color: '#f4ecd8', overlay: 'rgba(244, 236, 216, 0.48)' },
-      'dark': { name: 'Dark Mode', color: '#18181b', overlay: 'rgba(24, 24, 27, 0.65)' },
-      'soft-sepia': { name: 'Soft Sepia', color: '#eee4cd', overlay: 'rgba(238, 228, 205, 0.42)' },
+      'dark': { name: 'Dark', color: '#18181b', overlay: 'rgba(24, 24, 27, 0.65)' },
+      'soft-sepia': { name: 'Sepia', color: '#eee4cd', overlay: 'rgba(238, 228, 205, 0.42)' },
       'cool-mint': { name: 'Cool Mint', color: '#e0f2fe', overlay: 'rgba(224, 242, 254, 0.42)' }
     },
 
     TEXT_COLORS: {
       'default': { name: 'Original', color: 'transparent', text: null, border: '#475569' },
-      'white': { name: 'Pure White', color: '#ffffff', text: '#ffffff', border: '#f8fafc' },
-      'black': { name: 'Deep Black', color: '#0f172a', text: '#0f172a', border: '#0f172a' },
+      'white': { name: 'White', color: '#ffffff', text: '#ffffff', border: '#f8fafc' },
+      'black': { name: 'Black', color: '#0f172a', text: '#0f172a', border: '#0f172a' },
       'charcoal': { name: 'Charcoal', color: '#334155', text: '#334155', border: '#64748b' },
-      'gray': { name: 'Soft Gray', color: '#94a3b8', text: '#94a3b8', border: '#94a3b8' },
-      'amber': { name: 'Warm Cream', color: '#fef3c7', text: '#fef3c7', border: '#fde68a' }
+      'gray': { name: 'Gray', color: '#94a3b8', text: '#94a3b8', border: '#94a3b8' },
+      'amber': { name: 'Cream', color: '#fef3c7', text: '#fef3c7', border: '#fde68a' }
     },
 
-    DIMMER_TINTS: {
-      slate: '15, 23, 42',
-      warm: '45, 26, 10',
-      pitch: '0, 0, 0'
+    _normalizeConfig(cfg) {
+      const merged = { ...this._config, ...(cfg && typeof cfg === 'object' ? cfg : {}) };
+      if (cfg && cfg.brightnessEnabled === undefined && Number(cfg.brightness) !== 0 && !isNaN(Number(cfg.brightness))) {
+        merged.brightnessEnabled = true;
+      }
+      return merged;
     },
 
     init(cfg) {
       this.destroy();
-      if (cfg && typeof cfg === 'object') {
-        this._config = { ...this._config, ...cfg };
-      }
-
+      this._config = this._normalizeConfig(cfg);
       this._prevBodyBg = document.body ? document.body.style.backgroundColor : null;
       this._prevHtmlBg = document.documentElement ? document.documentElement.style.backgroundColor : null;
-
       this._createOverlays();
       this.applyConfig();
     },
@@ -2395,19 +2428,17 @@
         this._brightnessOverlay = bLayer;
       }
 
-      if (!this._dimmerOverlay) {
-        const dLayer = document.createElement('div');
-        dLayer.id = 'besing-night-dimmer-overlay';
-        dLayer.style.cssText = 'position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483635!important;display:none;transition:opacity 0.25s ease,background-color 0.25s ease!important;';
-        mountRoot.appendChild(dLayer);
-        this._dimmerOverlay = dLayer;
+      if (!this._warmthOverlay) {
+        const wLayer = document.createElement('div');
+        wLayer.id = 'besing-warmth-overlay';
+        wLayer.style.cssText = 'position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483635!important;mix-blend-mode:multiply!important;display:none;transition:background-color 0.2s ease!important;';
+        mountRoot.appendChild(wLayer);
+        this._warmthOverlay = wLayer;
       }
     },
 
     onConfigChange(cfg) {
-      if (cfg && typeof cfg === 'object') {
-        this._config = { ...this._config, ...cfg };
-      }
+      this._config = this._normalizeConfig(cfg);
       this.applyConfig();
     },
 
@@ -2478,14 +2509,15 @@
         }
       }
 
-      // Brightness dragger
+      // Brightness dragger (with independent on/off switch)
+      const bEnabled = Boolean(this._config.brightnessEnabled);
       const bVal = Math.max(-100, Math.min(100, Number(this._config.brightness) || 0));
       if (this._brightnessOverlay) {
-        if (bVal < 0) {
+        if (bEnabled && bVal < 0) {
           const factor = Math.min(0.88, (Math.abs(bVal) / 100) * 0.95).toFixed(3);
           this._brightnessOverlay.style.backgroundColor = `rgba(255, 255, 255, ${factor})`;
           this._brightnessOverlay.style.mixBlendMode = 'screen';
-        } else if (bVal > 0) {
+        } else if (bEnabled && bVal > 0) {
           const factor = Math.min(0.92, (bVal / 100) * 0.96).toFixed(3);
           this._brightnessOverlay.style.backgroundColor = `rgba(0, 0, 0, ${factor})`;
           this._brightnessOverlay.style.mixBlendMode = 'multiply';
@@ -2494,21 +2526,17 @@
         }
       }
 
-      // Integrated Night Comfort Dimmer
-      if (this._dimmerOverlay) {
-        if (this._config.nightDimmer) {
-          const pct = Math.max(10, Math.min(75, Number(this._config.nightDimmerOpacity) || 32));
-          const alpha = (pct / 100).toFixed(2);
-          const rgb = this.DIMMER_TINTS[this._config.nightDimmerTint] || this.DIMMER_TINTS.slate;
-          this._dimmerOverlay.style.display = 'block';
-          this._dimmerOverlay.style.backgroundColor = `rgba(${rgb}, ${alpha})`;
-          this._dimmerOverlay.style.backdropFilter = 'contrast(0.95) brightness(0.92)';
-          this._dimmerOverlay.style.webkitBackdropFilter = 'contrast(0.95) brightness(0.92)';
+      // Warmth dragger (warm amber blue-light filter with independent on/off switch)
+      const wEnabled = Boolean(this._config.warmthEnabled);
+      const wVal = Math.max(0, Math.min(100, Number(this._config.warmth) || 0));
+      if (this._warmthOverlay) {
+        if (wEnabled && wVal > 0) {
+          const alpha = (0.04 + (wVal / 100) * 0.38).toFixed(3);
+          this._warmthOverlay.style.display = 'block';
+          this._warmthOverlay.style.backgroundColor = `rgba(255, 148, 36, ${alpha})`;
         } else {
-          this._dimmerOverlay.style.display = 'none';
-          this._dimmerOverlay.style.backgroundColor = 'transparent';
-          this._dimmerOverlay.style.backdropFilter = 'none';
-          this._dimmerOverlay.style.webkitBackdropFilter = 'none';
+          this._warmthOverlay.style.display = 'none';
+          this._warmthOverlay.style.backgroundColor = 'transparent';
         }
       }
 
@@ -2550,14 +2578,14 @@
       if (document.body) {
         document.body.style.backgroundColor = this._prevBodyBg || '';
       }
-      [this._presetOverlay, this._brightnessOverlay, this._dimmerOverlay].forEach(el => {
+      [this._presetOverlay, this._brightnessOverlay, this._warmthOverlay].forEach(el => {
         if (el) el.remove();
       });
       this._presetOverlay = null;
       this._brightnessOverlay = null;
-      this._dimmerOverlay = null;
+      this._warmthOverlay = null;
       this._clearTextColorCss();
-      ['besing-bg-preset-overlay', 'besing-bg-brightness-overlay', 'besing-night-dimmer-overlay'].forEach(id => {
+      ['besing-bg-preset-overlay', 'besing-bg-brightness-overlay', 'besing-warmth-overlay', 'besing-night-dimmer-overlay'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.remove();
       });
@@ -5850,7 +5878,7 @@
       const mod = {
     id: 'pagestream',
     name: 'PageStream',
-    version: '1.4.0',
+    version: '1.5.0',
     description: 'Auto-loads next pages for continuous scrolling.',
     category: 'Productivity',
 
@@ -5984,29 +6012,82 @@
       this._lastFetchTime = 0;
       this._hasEnded = false;
       this._consecutiveErrors = 0;
+      this._domReadyHandler = null;
+      this._loadRetryHandler = null;
 
-      this._injectStyles();
       this._matchRule();
-      this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
-      this._setupNextLink();
-      this._resumeStreamedPages();
       this._setupScrollListener();
       this._setupHistoryObserver();
 
-      // Trigger initial preload if configured (polite 2500ms delay to allow initial page to settle)
-      if (this._config.preloadPages > 0) {
-        this._schedulePreload(2500);
+      const startDomSetup = () => {
+        if (!this._active) return;
+        this._initialTitle = document.title || this._initialTitle;
+        this._injectStyles();
+        if (!this._liveMainSignature) {
+          this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
+        }
+        this._setupNextLink();
+        this._resumeStreamedPages();
+
+        if (this._config.preloadPages > 0 && this._currentNextUrl) {
+          this._schedulePreload(2500);
+        }
+        this._scheduleRecheck(1000);
+      };
+
+      // In Stay / Safari / userscript document-start, init() runs before DOMContentLoaded while
+      // document.body is still empty. Defer DOM detection until the page has parsed so next links
+      // and main content containers actually exist.
+      if (document.readyState === 'loading') {
+        this._domReadyHandler = () => {
+          this._domReadyHandler = null;
+          startDomSetup();
+        };
+        document.addEventListener('DOMContentLoaded', this._domReadyHandler, { once: true });
+      } else {
+        startDomSetup();
       }
-      // A reader already at the bottom (e.g. turning PageStream back on there) cannot scroll further,
-      // so no scroll event would ever arrive.
-      this._scheduleRecheck(1000);
+
+      // Secondary retry after window load in case dynamic pagination links render late.
+      if (document.readyState !== 'complete') {
+        this._loadRetryHandler = () => {
+          this._loadRetryHandler = null;
+          if (!this._active || this._curPageNum > 1) return;
+          if (!this._liveMainSignature) {
+            this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
+          }
+          if (!this._currentNextUrl && !this._currentNextElement) {
+            this._hasEnded = false;
+            this._setupNextLink();
+            if (this._config.preloadPages > 0 && this._currentNextUrl) {
+              this._schedulePreload(1500);
+            }
+          }
+        };
+        window.addEventListener('load', this._loadRetryHandler, { once: true });
+      }
 
       console.log(`[PageStream] Initialized (When: ${this._config.whenToLoad}, Preload: ${this._config.preloadPages}, History: ${this._config.enableHistory})`);
+    },
+
+    debugStatus() {
+      const ruleName = this._rule ? this._rule.name : 'auto';
+      const hasNext = Boolean(this._currentNextUrl || this._currentNextElement);
+      return `ps=${ruleName}(next=${hasNext ? 'yes' : 'no'},p=${this._curPageNum}${this._hasEnded ? ',end' : ''})`;
     },
 
     destroy() {
       if (!this._active) return;
       this._active = false;
+
+      if (this._domReadyHandler) {
+        document.removeEventListener('DOMContentLoaded', this._domReadyHandler);
+        this._domReadyHandler = null;
+      }
+      if (this._loadRetryHandler) {
+        window.removeEventListener('load', this._loadRetryHandler);
+        this._loadRetryHandler = null;
+      }
 
       if (this._preloadTimer) {
         clearTimeout(this._preloadTimer);
@@ -6597,6 +6678,13 @@
         }
 
         // 2. Check mode: Click vs URL Fetch
+        if (this._curPageNum === 1 && !this._currentNextUrl && !this._currentNextElement) {
+          if (document.readyState === 'loading') return;
+          if (!this._liveMainSignature) {
+            this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
+          }
+          this._setupNextLink();
+        }
         const isClickMode = this._config.mode === 'click' ||
           (this._config.mode === 'auto' && this._isClickOnlyElement(this._currentNextElement));
 
@@ -6604,7 +6692,7 @@
           await this._executeAutoClick(this._currentNextElement);
         } else if (this._currentNextUrl) {
           await this._fetchAndSplice(this._currentNextUrl);
-        } else {
+        } else if (document.readyState === 'complete') {
           console.log('[PageStream] No more pages detected.');
           this._hasEnded = true;
         }
@@ -10049,7 +10137,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.13.0';
+    static CURRENT_VERSION = '1.14.0';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {
@@ -11834,8 +11922,18 @@
         const currentHost = window.location.hostname || 'localhost';
         const curTheme = this.storage.getTheme();
         const cloudCfg = this.cloud.getConfig();
-        const cloudLinked = this.cloud.isConfigured();
+        const cloudCreds = this.cloud.parseSyncLink(cloudCfg.syncLink);
+        const cloudLinked = Boolean(cloudCreds);
         const escCloud = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const cloudLabelFrom = (creds, acct, dev) => {
+          if (!creds) return 'Not Linked';
+          let proj = '';
+          try { proj = new URL(creds.url).hostname.split('.')[0]; } catch (e) {}
+          if (acct) return proj ? `${acct} · ${proj}` : acct;
+          if (proj) return proj;
+          return dev || 'Linked';
+        };
+        const initialCloudPill = cloudLabelFrom(cloudCreds, cloudCfg.accountLabel, cloudCfg.deviceName);
 
         this.setSafeHTML(body, `
           <div class="besing-settings-section">
@@ -11855,36 +11953,36 @@
               </div>
             </div>
 
-            <div class="besing-update-card" style="border-color:${cloudLinked ? 'rgba(52,211,153,0.35)' : 'rgba(245,158,11,0.35)'};">
+            <div class="besing-update-card" id="besing-cloud-card" style="border-color:${cloudLinked ? 'rgba(16,185,129,0.5)' : 'rgba(245,158,11,0.35)'};">
               <div class="besing-update-header">
-                <span class="besing-section-title">Cloud Database</span>
-                <span class="besing-status-pill ${cloudLinked ? 'connected' : ''}" id="besing-cloud-pill" style="${cloudLinked ? '' : 'background:rgba(245,158,11,0.16);color:#fbbf24;border-color:rgba(245,158,11,0.35);'}">
-                  <span id="besing-cloud-pill-text">${cloudLinked ? 'Linked' : 'Not Linked'}</span>
+                <span class="besing-section-title">Global Sync Link</span>
+                <span class="besing-status-pill ${cloudLinked ? 'connected' : ''}" id="besing-cloud-pill" style="${cloudLinked ? 'background:rgba(16,185,129,0.22);color:#34d399;border-color:rgba(16,185,129,0.55);font-weight:700;' : 'background:rgba(245,158,11,0.16);color:#fbbf24;border-color:rgba(245,158,11,0.35);'}">
+                  <span id="besing-cloud-pill-text">${escCloud(initialCloudPill)}</span>
                 </span>
               </div>
-              <p style="font-size:10px;color:#94a3b8;margin:4px 0 6px;line-height:1.35;">
-                Shared Sync Link for Sync History, Sync Setting, and Sync Transfer.
-              </p>
               <div style="display:flex;flex-direction:column;gap:6px;">
-                <input type="password" class="besing-test-input" id="besing-cloud-link" placeholder="Paste besing-sync://... link" value="${escCloud(cloudCfg.syncLink)}" style="font-family:monospace;font-size:11px;">
+                <div style="display:flex;align-items:center;gap:4px;">
+                  <input type="password" class="besing-test-input" id="besing-cloud-link" placeholder="Paste besing-sync://... link" value="${escCloud(cloudCfg.syncLink)}" style="flex:1;min-width:0;font-family:monospace;font-size:11px;">
+                  <button type="button" class="besing-btn-icon" id="btn-cloud-vis" title="Show / Hide link" style="width:32px;height:32px;flex-shrink:0;">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                  </button>
+                  <button type="button" class="besing-btn-icon" id="btn-cloud-copy" title="Copy link" style="width:32px;height:32px;flex-shrink:0;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                </div>
                 <div style="display:flex;gap:6px;">
-                  <input type="text" class="besing-test-input" id="besing-cloud-device" placeholder="Device Name (e.g. Main-PC, iPhone)" value="${escCloud(cloudCfg.deviceName)}" style="flex:1;min-width:0;">
+                  <input type="text" class="besing-test-input" id="besing-cloud-device" placeholder="Device Name" value="${escCloud(cloudCfg.deviceName)}" style="flex:1;min-width:0;">
                   <input type="text" class="besing-test-input" id="besing-cloud-account" placeholder="Profile / User" value="${escCloud(cloudCfg.accountLabel)}" style="flex:1;min-width:0;">
                 </div>
-                <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-save-test" style="flex:1;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;">Save & Test</button>
-                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-copy">Copy Link</button>
-                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-vis">Show</button>
-                  <button type="button" class="besing-btn-sub-action" id="btn-cloud-unlink" style="color:#fca5a5;">Unlink</button>
-                </div>
+                <button type="button" class="besing-btn-sub-action" id="btn-cloud-primary" style="width:100%;min-height:34px;font-size:11.5px;font-weight:700;${cloudLinked ? 'background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.4);color:#fca5a5;' : 'background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;'}">${cloudLinked ? 'Unlink' : 'Save & Test'}</button>
                 <div id="besing-cloud-msg" style="font-size:10px;color:#94a3b8;line-height:1.35;"></div>
                 <div id="besing-cloud-traffic" style="font-size:10px;color:#64748b;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"></div>
                 <details style="margin-top:2px;">
-                  <summary style="font-size:10px;color:#a5b4fc;cursor:pointer;user-select:none;">First-Time Supabase Link Generator</summary>
+                  <summary style="font-size:10px;color:#a5b4fc;cursor:pointer;user-select:none;">Link Generator</summary>
                   <div style="display:flex;flex-direction:column;gap:5px;margin-top:6px;">
                     <input type="text" class="besing-test-input" id="besing-cloud-gen-url" placeholder="https://your-project.supabase.co">
                     <input type="password" class="besing-test-input" id="besing-cloud-gen-key" placeholder="Supabase publishable / anon key">
-                    <button type="button" class="besing-btn-sub-action" id="btn-cloud-generate" style="background:rgba(99,102,241,0.22);border:1px solid rgba(99,102,241,0.45);color:#a5b4fc;">Generate Secret & Sync Link</button>
+                    <button type="button" class="besing-btn-sub-action" id="btn-cloud-generate" style="background:rgba(99,102,241,0.22);border:1px solid rgba(99,102,241,0.45);color:#a5b4fc;">Generate Sync Link</button>
                     <textarea class="besing-test-input" id="besing-cloud-gen-sql" readonly rows="3" style="display:none;font-family:monospace;font-size:10px;"></textarea>
                   </div>
                 </details>
@@ -11952,12 +12050,7 @@
                 <button type="button" class="besing-segmented-btn ${this.storage.getLogSyncMode() === 'device' ? 'active' : ''}" data-log-mode="device">This Device</button>
                 <button type="button" class="besing-segmented-btn ${this.storage.getLogSyncMode() === 'all' ? 'active' : ''}" data-log-mode="all">All Devices</button>
               </div>
-              <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                <button type="button" class="besing-btn-sub-action" id="besing-btn-copy-boot-log" style="flex:1;min-height:32px;font-size:11px;color:#38bdf8;border-color:rgba(56,189,248,0.3);">Copy Local</button>
-                <button type="button" class="besing-btn-sub-action" id="besing-btn-cloud-logs" style="flex:1;min-height:32px;font-size:11px;color:#34d399;border-color:rgba(16,185,129,0.35);">Cloud Logs</button>
-                ${navigator.share ? '<button type="button" class="besing-btn-sub-action" id="besing-btn-share-boot-log" style="flex:1;min-height:32px;font-size:11px;">Share</button>' : ''}
-                <button type="button" class="besing-btn-sub-action" id="besing-btn-view-boot-log" style="flex:1;min-height:32px;font-size:11px;">View</button>
-              </div>
+              <button type="button" class="besing-btn-sub-action" id="besing-btn-show-logs" style="width:100%;min-height:34px;font-size:11.5px;font-weight:700;color:#38bdf8;border-color:rgba(56,189,248,0.35);">Show Logs</button>
               <div id="besing-boot-log-msg" style="font-size:10px;color:#34d399;display:none;"></div>
               <div id="besing-boot-log-list" style="display:flex;flex-direction:column;gap:4px;max-height:150px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:#cbd5e1;">Loading...</div>
             </div>
@@ -11993,14 +12086,23 @@
           };
         });
 
-        // Manager-level Cloud Database settings handlers
+        // Manager-level Global Sync Link settings handlers
         (() => {
+          const cCard = body.querySelector('#besing-cloud-card');
           const cLink = body.querySelector('#besing-cloud-link');
           const cDev = body.querySelector('#besing-cloud-device');
           const cAcct = body.querySelector('#besing-cloud-account');
           const cMsg = body.querySelector('#besing-cloud-msg');
           const cTraffic = body.querySelector('#besing-cloud-traffic');
+          const cPillWrap = body.querySelector('#besing-cloud-pill');
           const cPill = body.querySelector('#besing-cloud-pill-text');
+          const btnPrimary = body.querySelector('#btn-cloud-primary');
+
+          let savedLink = (cloudCfg.syncLink || '').trim();
+          let savedDev = (cloudCfg.deviceName || '').trim();
+          let savedAcct = (cloudCfg.accountLabel || '').trim();
+          let isCurrentlyLinked = cloudLinked;
+
           const fmtB = (n) => {
             const v = Number(n) || 0;
             if (v < 1024) return `${v} B`;
@@ -12008,22 +12110,64 @@
             return `${(v / (1024 * 1024)).toFixed(2)} MB`;
           };
 
+          const updatePillVisual = (linked, creds, acct, dev) => {
+            if (cPill) cPill.textContent = cloudLabelFrom(creds, acct, dev);
+            if (cPillWrap) {
+              cPillWrap.style.cssText = linked
+                ? 'background:rgba(16,185,129,0.22);color:#34d399;border-color:rgba(16,185,129,0.55);font-weight:700;'
+                : 'background:rgba(245,158,11,0.16);color:#fbbf24;border-color:rgba(245,158,11,0.35);';
+            }
+            if (cCard) {
+              cCard.style.borderColor = linked ? 'rgba(16,185,129,0.5)' : 'rgba(245,158,11,0.35)';
+            }
+          };
+
+          const syncPrimaryButton = () => {
+            if (!btnPrimary || !cLink) return;
+            const curLink = cLink.value.trim();
+            const curDev = (cDev && cDev.value ? cDev.value.trim() : '');
+            const curAcct = (cAcct && cAcct.value ? cAcct.value.trim() : '');
+            const linkDirty = curLink !== savedLink;
+            const metaDirty = curDev !== savedDev || curAcct !== savedAcct;
+
+            if (isCurrentlyLinked && !linkDirty && !metaDirty) {
+              btnPrimary.dataset.action = 'unlink';
+              btnPrimary.textContent = 'Unlink';
+              btnPrimary.style.cssText = 'width:100%;min-height:34px;font-size:11.5px;font-weight:700;background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.4);color:#fca5a5;';
+            } else if (isCurrentlyLinked && !linkDirty && metaDirty) {
+              btnPrimary.dataset.action = 'save-meta';
+              btnPrimary.textContent = 'Save Identity';
+              btnPrimary.style.cssText = 'width:100%;min-height:34px;font-size:11.5px;font-weight:700;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;';
+            } else {
+              btnPrimary.dataset.action = 'save';
+              btnPrimary.textContent = 'Save & Test';
+              btnPrimary.style.cssText = 'width:100%;min-height:34px;font-size:11.5px;font-weight:700;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;';
+            }
+          };
+          syncPrimaryButton();
+
+          if (cLink) cLink.oninput = syncPrimaryButton;
+          if (cDev) cDev.oninput = syncPrimaryButton;
+          if (cAcct) cAcct.oninput = syncPrimaryButton;
+
           this.cloud.getInfo().then(info => {
             if (!info || !info.ok) return;
             if (cAcct && info.detectedEmail && !cAcct.value) {
               cAcct.placeholder = `Auto: ${info.detectedEmail}`;
             }
             if (cTraffic && info.stats) {
-              cTraffic.textContent = `Traffic today: ↑ ${fmtB(info.stats.bytesSentToday)} (${info.stats.pushesToday || 0}p) · ↓ ${fmtB(info.stats.bytesReceivedToday)} (${info.stats.pullsToday || 0}g)`;
+              cTraffic.textContent = `Today: ↑ ${fmtB(info.stats.bytesSentToday)} (${info.stats.pushesToday || 0}p) · ↓ ${fmtB(info.stats.bytesReceivedToday)} (${info.stats.pullsToday || 0}g)`;
             }
           }).catch(() => {});
 
           const btnVis = body.querySelector('#btn-cloud-vis');
           if (btnVis && cLink) {
+            const eyeOpen = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
+            const eyeOff = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>';
             btnVis.onclick = () => {
               const show = cLink.type === 'password';
               cLink.type = show ? 'text' : 'password';
-              btnVis.textContent = show ? 'Hide' : 'Show';
+              this.setSafeHTML(btnVis, show ? eyeOff : eyeOpen);
             };
           }
 
@@ -12031,51 +12175,75 @@
           if (btnCopy && cLink) {
             btnCopy.onclick = () => {
               const v = cLink.value.trim();
-              if (!v) { if (cMsg) cMsg.textContent = 'No Sync Link configured yet.'; return; }
+              if (!v) { if (cMsg) cMsg.textContent = 'No Sync Link configured.'; return; }
               copyTextToClipboard(v).then(ok => {
-                if (cMsg) cMsg.textContent = ok ? 'Sync Link copied! Paste it on your other devices.' : 'Could not copy automatically; click Show and copy manually.';
+                if (cMsg) {
+                  cMsg.textContent = ok ? 'Sync Link copied!' : 'Tap the eye icon to copy manually.';
+                  cMsg.style.color = ok ? '#34d399' : '#fbbf24';
+                }
               });
             };
           }
 
-          const btnSave = body.querySelector('#btn-cloud-save-test');
-          if (btnSave && cLink) {
-            btnSave.onclick = async () => {
+          if (btnPrimary && cLink) {
+            btnPrimary.onclick = async () => {
+              const action = btnPrimary.dataset.action || 'save';
+              if (action === 'unlink') {
+                cLink.value = '';
+                savedLink = '';
+                isCurrentlyLinked = false;
+                await this.cloud.setConfig({ syncLink: '' });
+                await this.applyScriptConfig('browser-sync', { syncLink: '' });
+                updatePillVisual(false, null, '', '');
+                syncPrimaryButton();
+                if (cMsg) { cMsg.textContent = 'Unlinked.'; cMsg.style.color = '#94a3b8'; }
+                return;
+              }
+
               const raw = cLink.value.trim();
               const dev = (cDev && cDev.value ? cDev.value.trim() : '') || this.cloud.defaultDeviceName();
               const acct = (cAcct && cAcct.value ? cAcct.value.trim() : '');
+
+              if (action === 'save-meta') {
+                await this.cloud.setConfig({ deviceName: dev, accountLabel: acct });
+                savedDev = dev;
+                savedAcct = acct;
+                updatePillVisual(true, this.cloud.parseSyncLink(savedLink), acct, dev);
+                syncPrimaryButton();
+                if (cMsg) { cMsg.textContent = 'Saved identity.'; cMsg.style.color = '#34d399'; }
+                return;
+              }
+
               if (!raw) {
                 await this.cloud.setConfig({ deviceName: dev, accountLabel: acct });
-                if (cMsg) cMsg.textContent = 'Saved device identity.';
+                savedDev = dev;
+                savedAcct = acct;
+                syncPrimaryButton();
+                if (cMsg) { cMsg.textContent = 'Saved identity.'; cMsg.style.color = '#94a3b8'; }
                 return;
               }
-              if (!this.cloud.parseSyncLink(raw)) {
-                if (cMsg) cMsg.textContent = 'Invalid Sync Link (must be besing-sync://... with HTTPS URL, publishable key, and secret).';
+              const parsed = this.cloud.parseSyncLink(raw);
+              if (!parsed) {
+                if (cMsg) { cMsg.textContent = 'Invalid Sync Link format.'; cMsg.style.color = '#fca5a5'; }
                 return;
               }
-              btnSave.disabled = true;
-              btnSave.textContent = 'Testing...';
+              btnPrimary.disabled = true;
+              btnPrimary.textContent = 'Testing...';
               const res = await this.cloud.testConnection(raw);
-              btnSave.disabled = false;
-              btnSave.textContent = 'Save & Test';
+              btnPrimary.disabled = false;
               if (!res || !res.ok) {
-                if (cMsg) cMsg.textContent = `Connection failed: ${(res && res.error) || 'unknown error'}`;
+                syncPrimaryButton();
+                if (cMsg) { cMsg.textContent = `Connection failed: ${(res && res.error) || 'unknown error'}`; cMsg.style.color = '#fca5a5'; }
                 return;
               }
               await this.cloud.setConfig({ syncLink: raw, deviceName: dev, accountLabel: acct });
-              if (cPill) cPill.textContent = 'Linked';
-              if (cMsg) cMsg.textContent = `Linked in ${res.latencyMs}ms (${res.deviceCount} device(s), ${res.retentionDays}d retention). Shared by all sync scripts.`;
-            };
-          }
-
-          const btnUnlink = body.querySelector('#btn-cloud-unlink');
-          if (btnUnlink && cLink) {
-            btnUnlink.onclick = async () => {
-              cLink.value = '';
-              await this.cloud.setConfig({ syncLink: '' });
-              await this.applyScriptConfig('browser-sync', { syncLink: '' });
-              if (cPill) cPill.textContent = 'Not Linked';
-              if (cMsg) cMsg.textContent = 'Unlinked from cloud database.';
+              savedLink = raw;
+              savedDev = dev;
+              savedAcct = acct;
+              isCurrentlyLinked = true;
+              updatePillVisual(true, parsed, acct, dev);
+              syncPrimaryButton();
+              if (cMsg) { cMsg.textContent = `Connected in ${res.latencyMs}ms (${res.deviceCount} device(s)).`; cMsg.style.color = '#34d399'; }
             };
           }
 
@@ -12086,13 +12254,13 @@
               const k = (body.querySelector('#besing-cloud-gen-key')?.value || '').trim();
               const b = await this.cloud.generateSetupBundle(u, k, 7);
               if (!b || !b.ok) {
-                if (cMsg) cMsg.textContent = (b && b.error) || 'Failed to generate Sync Link.';
+                if (cMsg) { cMsg.textContent = (b && b.error) || 'Failed to generate Sync Link.'; cMsg.style.color = '#fca5a5'; }
                 return;
               }
-              if (cLink) cLink.value = b.syncLink;
+              if (cLink) { cLink.value = b.syncLink; syncPrimaryButton(); }
               const sqlEl = body.querySelector('#besing-cloud-gen-sql');
               if (sqlEl) { sqlEl.value = b.sql; sqlEl.style.display = 'block'; }
-              if (cMsg) cMsg.textContent = 'Generated! Run the SQL below once in Supabase SQL Editor, then click Save & Test.';
+              if (cMsg) { cMsg.textContent = 'Generated! Run SQL in Supabase, then tap Save & Test.'; cMsg.style.color = '#34d399'; }
             };
           }
         })();
@@ -12137,43 +12305,9 @@
           bootLogMsg.style.color = color;
           bootLogMsg.style.display = 'block';
         };
-        const copyBootLogBtn = body.querySelector('#besing-btn-copy-boot-log');
-        if (copyBootLogBtn) {
-          copyBootLogBtn.onclick = async () => {
-            if (!bootLogReport) {
-              // Report not ready yet, so this tap cannot copy; the viewer's own Copy button can.
-              openBootLogViewer(await BESBootLog.buildReport());
-              return;
-            }
-            const report = bootLogReport;
-            const method = await copyTextToClipboard(report);
-            BESBootLog.event(`log copy from settings: ${method || 'failed'}`);
-            if (method) {
-              showBootLogMsg('Debug log copied. Paste it into your message.', '#34d399');
-            } else {
-              showBootLogMsg('This browser blocked copying, so the log opened full screen. Try Share there.', '#fbbf24');
-              openBootLogViewer(report);
-            }
-            renderBootLog();
-          };
-        }
-        const shareBootLogBtn = body.querySelector('#besing-btn-share-boot-log');
-        if (shareBootLogBtn) {
-          shareBootLogBtn.onclick = async () => {
-            if (!bootLogReport) {
-              openBootLogViewer(await BESBootLog.buildReport());
-              return;
-            }
-            const result = await shareText('BESing debug log', bootLogReport);
-            if (result === 'unavailable') {
-              showBootLogMsg('Sharing is not available here, so the log opened full screen.', '#fbbf24');
-              openBootLogViewer(bootLogReport);
-            }
-          };
-        }
-        const viewBootLogBtn = body.querySelector('#besing-btn-view-boot-log');
-        if (viewBootLogBtn) {
-          viewBootLogBtn.onclick = async () => {
+        const showLogsBtn = body.querySelector('#besing-btn-show-logs');
+        if (showLogsBtn) {
+          showLogsBtn.onclick = async () => {
             openBootLogViewer(bootLogReport || await BESBootLog.buildReport());
           };
         }
@@ -12186,7 +12320,7 @@
           };
         }
 
-        // 3-stage Cloud Debug Log selector (Off | This Device | All Devices) + All-Device Log Viewer
+        // 3-stage Cloud Debug Log selector (Off | This Device | All Devices)
         const logSyncGroup = body.querySelector('#group-log-sync-mode');
         const logSyncStatus = body.querySelector('#besing-logsync-status');
         const updateLogSyncUI = (activeMode, remoteBy = '') => {
@@ -12210,36 +12344,20 @@
           logSyncGroup.querySelectorAll('.besing-segmented-btn').forEach(btn => {
             btn.onclick = async () => {
               const mode = btn.getAttribute('data-log-mode') || 'off';
-              showBootLogMsg('Updating cloud log mode...', '#94a3b8');
+              showBootLogMsg('Updating...', '#94a3b8');
               const r = await this.logSync.setMode(mode);
               if (r && r.ok) {
                 updateLogSyncUI(r.mode);
                 showBootLogMsg(
-                  r.mode === 'all' ? 'Cloud log ON for all devices (auto-expires in 24h).'
-                  : (r.mode === 'device' ? 'Cloud log ON for this device (24h TTL).' : 'Cloud log OFF for all devices.'),
+                  r.mode === 'all' ? 'Saving logs for all devices (24h).'
+                  : (r.mode === 'device' ? 'Saving logs for this device (24h).' : 'Cloud log off for all devices.'),
                   '#34d399'
                 );
               } else {
-                showBootLogMsg((r && r.error) || 'Failed to update log mode.', '#fca5a5');
+                showBootLogMsg((r && r.error) || 'Failed to update.', '#fca5a5');
               }
             };
           });
-        }
-        const cloudLogsBtn = body.querySelector('#besing-btn-cloud-logs');
-        if (cloudLogsBtn) {
-          cloudLogsBtn.onclick = async () => {
-            cloudLogsBtn.disabled = true;
-            cloudLogsBtn.textContent = 'Loading...';
-            const r = await this.logSync.fetchAllCloudLogsReport();
-            cloudLogsBtn.disabled = false;
-            cloudLogsBtn.textContent = 'Cloud Logs';
-            if (r && r.ok) {
-              showBootLogMsg(`Loaded logs from ${r.deviceCount} device(s).`, '#34d399');
-              openBootLogViewer(r.report);
-            } else {
-              showBootLogMsg((r && r.error) || 'Failed to load cloud logs.', '#fca5a5');
-            }
-          };
         }
 
         const checkBtn = body.querySelector('#besing-btn-check-update');
@@ -12825,31 +12943,51 @@
         `;
       } else if (m.id === 'color-change') {
         const curBrightness = Math.max(-100, Math.min(100, Number(cfg.brightness) || 0));
+        const bEnabled = cfg.brightnessEnabled !== undefined ? Boolean(cfg.brightnessEnabled) : (curBrightness !== 0);
+        const curWarmth = Math.max(0, Math.min(100, Number(cfg.warmth) || 35));
+        const wEnabled = Boolean(cfg.warmthEnabled);
         const curPreset = cfg.preset || 'eye-protect';
         const customColor = cfg.customColor || '#cce8cf';
         const curTextColor = cfg.textColor || 'default';
         const customTextColor = cfg.customTextColor || '#ffffff';
-        const nightDimmer = Boolean(cfg.nightDimmer);
-        const nightOpacity = Math.max(10, Math.min(75, Number(cfg.nightDimmerOpacity) || 32));
-        const nightTint = cfg.nightDimmerTint || 'slate';
+        const activeProfile = String(cfg.activeProfile || '');
+        const customProfiles = Array.isArray(cfg.profiles) ? cfg.profiles : [];
+        const defaultProfiles = Array.isArray(m.DEFAULT_PROFILES) ? m.DEFAULT_PROFILES : [
+          { id: 'eye', name: 'EYE', builtin: true, preset: 'eye-protect', customColor: '#cce8cf', textColor: 'black', customTextColor: '#0f172a', brightnessEnabled: false, brightness: 0, warmthEnabled: false, warmth: 0 },
+          { id: 'night', name: 'NIGHT', builtin: true, preset: 'custom', customColor: '#222428', textColor: 'custom', customTextColor: '#e5e7eb', brightnessEnabled: false, brightness: 0, warmthEnabled: false, warmth: 0 }
+        ];
+        const allProfiles = [...defaultProfiles, ...customProfiles];
 
         const presets = [
           { key: 'none', name: 'Original', color: 'transparent', border: '#475569' },
-          { key: 'eye-protect', name: 'Eye Protect', color: '#cce8cf', border: '#86efac' },
+          { key: 'eye-protect', name: 'Eye Green', color: '#cce8cf', border: '#86efac' },
           { key: 'old-paper', name: 'Old Paper', color: '#f4ecd8', border: '#fcd34d' },
-          { key: 'dark', name: 'Dark Mode', color: '#18181b', border: '#38bdf8' },
-          { key: 'soft-sepia', name: 'Soft Sepia', color: '#eee4cd', border: '#d97706' },
+          { key: 'dark', name: 'Dark', color: '#18181b', border: '#38bdf8' },
+          { key: 'soft-sepia', name: 'Sepia', color: '#eee4cd', border: '#d97706' },
           { key: 'cool-mint', name: 'Cool Mint', color: '#e0f2fe', border: '#7dd3fc' }
         ];
 
         const textPresets = [
           { key: 'default', name: 'Original', color: 'transparent', border: '#475569' },
-          { key: 'white', name: 'Pure White', color: '#ffffff', border: '#f8fafc' },
-          { key: 'black', name: 'Deep Black', color: '#0f172a', border: '#0f172a' },
+          { key: 'white', name: 'White', color: '#ffffff', border: '#f8fafc' },
+          { key: 'black', name: 'Black', color: '#0f172a', border: '#0f172a' },
           { key: 'charcoal', name: 'Charcoal', color: '#334155', border: '#64748b' },
-          { key: 'gray', name: 'Soft Gray', color: '#94a3b8', border: '#94a3b8' },
-          { key: 'amber', name: 'Warm Cream', color: '#fef3c7', border: '#fde68a' }
+          { key: 'gray', name: 'Gray', color: '#94a3b8', border: '#94a3b8' },
+          { key: 'amber', name: 'Cream', color: '#fef3c7', border: '#fde68a' }
         ];
+
+        const escColor = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const profileSwatchesHtml = allProfiles.map(p => {
+          const bgC = p.preset === 'custom' ? (p.customColor || '#cce8cf') : ((presets.find(x => x.key === p.preset) || {}).color || 'transparent');
+          const txtC = p.textColor === 'custom' ? (p.customTextColor || '#fff') : ((textPresets.find(x => x.key === p.textColor) || {}).color || '#94a3b8');
+          const delBtn = p.builtin ? '' : `<span class="besing-prof-del" data-del-profile="${escColor(p.id)}" title="Delete" style="margin-left:4px;color:#fca5a5;font-weight:700;">×</span>`;
+          return `
+            <button type="button" class="besing-zoom-pill besing-color-profile-btn ${activeProfile === p.id ? 'active' : ''}" data-profile-id="${escColor(p.id)}" style="display:inline-flex;align-items:center;gap:5px;padding:4px 9px;">
+              <span style="width:10px;height:10px;border-radius:50%;background:${bgC};border:1.5px solid ${txtC === 'transparent' ? '#64748b' : txtC};display:inline-block;"></span>
+              <span>${escColor(p.name)}</span>${delBtn}
+            </button>
+          `;
+        }).join('');
 
         const presetsHtml = presets.map(p => `
           <button type="button" class="besing-preset-card besing-bg-preset-card ${curPreset === p.key ? 'active' : ''}" data-preset="${p.key}">
@@ -12865,97 +13003,86 @@
           </button>
         `).join('');
 
-        let bLabel = '🎯 Normal (Original Site BG)';
-        if (curBrightness < 0) bLabel = `☀️ Lighter (+${Math.abs(curBrightness)}%)`;
-        else if (curBrightness > 0) bLabel = `🌙 Deep Dark (+${curBrightness}%)`;
-
-        let curTextColorName = 'Original';
-        if (curTextColor === 'custom') curTextColorName = `Custom (${customTextColor})`;
-        else {
-          const found = textPresets.find(p => p.key === curTextColor);
-          if (found) curTextColorName = found.name;
-        }
+        const bLabel = !bEnabled ? 'Off' : (curBrightness < 0 ? `Light +${Math.abs(curBrightness)}%` : (curBrightness > 0 ? `Dark +${curBrightness}%` : '0%'));
+        const wLabel = !wEnabled ? 'Off' : `${curWarmth}%`;
 
         specificControls = `
           <div class="besing-config-section">
             <div class="besing-section-header-row">
-              <span class="besing-section-title">Site BG Brightness Dragger</span>
-              <span class="besing-brightness-badge" id="brightness-badge">${bLabel}</span>
+              <span class="besing-section-title">Profiles</span>
             </div>
-            <p style="font-size:10px;color:#94a3b8;line-height:1.35;margin-bottom:6px;">
-              Adjusts brightness directly on top of the current website-set background (e.g. blue becomes light blue dragging left, deep navy and dark dragging right).
-            </p>
-            <div class="besing-brightness-labels">
-              <span>☀️ Lighter (Drag Left)</span>
-              <span>🌙 Deep / Dark (Drag Right)</span>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;" id="color-profile-list">
+              ${profileSwatchesHtml}
+            </div>
+            <div style="display:flex;gap:6px;margin-top:6px;">
+              <input type="text" class="besing-test-input" id="input-color-profile-name" placeholder="New profile name" style="flex:1;min-width:0;padding:4px 8px;font-size:11px;">
+              <button type="button" class="besing-btn-sub-action" id="btn-save-color-profile" style="color:#38bdf8;border-color:rgba(56,189,248,0.4);font-weight:700;">+ Save</button>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span class="besing-section-title">Brightness</span>
+                <span class="besing-brightness-badge" id="brightness-badge">${bLabel}</span>
+              </div>
+              <label class="besing-switch besing-switch-sm">
+                <input type="checkbox" id="chk-brightness-on" ${bEnabled ? 'checked' : ''}>
+                <span class="besing-slider"></span>
+              </label>
             </div>
             <input type="range" class="besing-slider-range brightness-range" id="brightness-range" min="-100" max="100" step="2" value="${curBrightness}">
             <div class="besing-range-ticks">
-              <span>−100% (Light)</span>
-              <span class="tick-center">0% (Normal)</span>
-              <span>+100% (Dark)</span>
+              <span>Light</span>
+              <span class="tick-center">0%</span>
+              <span>Dark</span>
             </div>
           </div>
 
-          <div class="besing-config-section" style="margin-top:10px;">
-            <div class="besing-section-title">Background Tone Presets</div>
+          <div class="besing-config-section">
+            <div class="besing-section-header-row">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span class="besing-section-title">Warmth</span>
+                <span class="besing-brightness-badge" id="warmth-badge">${wLabel}</span>
+              </div>
+              <label class="besing-switch besing-switch-sm">
+                <input type="checkbox" id="chk-warmth-on" ${wEnabled ? 'checked' : ''}>
+                <span class="besing-slider"></span>
+              </label>
+            </div>
+            <input type="range" class="besing-slider-range" id="warmth-range" min="0" max="100" step="2" value="${curWarmth}">
+            <div class="besing-range-ticks">
+              <span>Cool</span>
+              <span>Warm</span>
+            </div>
+          </div>
+
+          <div class="besing-config-section">
+            <div class="besing-section-title">Background</div>
             <div class="besing-preset-grid">
               ${presetsHtml}
             </div>
-
             <div class="besing-custom-color-row">
-              <label class="besing-custom-color-label">Custom Tone:</label>
               <input type="color" id="custom-color-picker" value="${customColor}">
               <input type="text" id="custom-color-hex" class="besing-input-sm" value="${customColor}">
-              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-color">Apply Custom Tone</button>
+              <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-color">Apply</button>
             </div>
           </div>
 
-          <div class="besing-config-section" style="margin-top:10px;">
-            <div class="besing-section-header-row">
-              <span class="besing-section-title">Text Color Presets</span>
-              <span class="besing-brightness-badge" id="text-color-badge">${curTextColorName}</span>
-            </div>
-            <p style="font-size:10px;color:#94a3b8;line-height:1.35;margin-bottom:6px;">
-              Forces high-contrast text color across reading content, novel chapters, paragraphs, and headings to maintain clarity against custom background tones.
-            </p>
+          <div class="besing-config-section">
+            <div class="besing-section-title">Text Color</div>
             <div class="besing-preset-grid">
               ${textPresetsHtml}
             </div>
-
             <div class="besing-custom-color-row">
-              <label class="besing-custom-color-label">Custom Text:</label>
               <input type="color" id="custom-text-color-picker" value="${customTextColor}">
               <input type="text" id="custom-text-color-hex" class="besing-input-sm" value="${customTextColor}">
               <button type="button" class="besing-btn-sub-action" id="btn-apply-custom-text">Apply</button>
             </div>
           </div>
 
-          <div class="besing-config-section" style="margin-top:10px;">
-            <div class="besing-toggle-row">
-              <div>
-                <div class="besing-toggle-title">Night Dimmer</div>
-                <div class="besing-toggle-desc">Soft tinted screen filter</div>
-              </div>
-              <label class="besing-switch besing-switch-sm">
-                <input type="checkbox" id="chk-night-dimmer" ${nightDimmer ? 'checked' : ''}>
-                <span class="besing-slider"></span>
-              </label>
-            </div>
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;">
-              <span style="font-size:10px;color:#94a3b8;">Dim Strength</span>
-              <span class="besing-brightness-badge" id="night-dimmer-badge">${nightOpacity}%</span>
-            </div>
-            <input type="range" class="besing-slider-range" id="night-dimmer-range" min="10" max="75" step="2" value="${nightOpacity}">
-            <div class="besing-segmented-group" id="group-night-tint" style="margin-top:4px;">
-              <button type="button" class="besing-segmented-btn ${nightTint === 'slate' ? 'active' : ''}" data-tint="slate">Slate</button>
-              <button type="button" class="besing-segmented-btn ${nightTint === 'warm' ? 'active' : ''}" data-tint="warm">Warm</button>
-              <button type="button" class="besing-segmented-btn ${nightTint === 'pitch' ? 'active' : ''}" data-tint="pitch">Neutral</button>
-            </div>
-          </div>
-
-          <div style="margin-top:10px;display:flex;justify-content:flex-end;">
-            <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset All</button>
+          <div style="display:flex;justify-content:flex-end;">
+            <button type="button" class="besing-btn-sub-action" id="btn-reset-bg">Reset</button>
           </div>
         `;
       } else if (m.id === 'quick-copy') {
@@ -13328,18 +13455,14 @@
         `;
       } else if (m.id === 'browser-sync') {
         const escAttr = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        const sharedCloud = this.cloud.getConfig();
         const hasLink = this.cloud.isConfigured();
-        const activeSubTab = this._bsyncTab || (hasLink ? 'devices' : 'setup');
+        const activeSubTab = this._bsyncTab === 'history' ? 'history' : 'devices';
         const isExt = typeof m.isExtensionMode === 'function' && m.isExtensionMode();
-        const deviceNameVal = escAttr(sharedCloud.deviceName || this.cloud.defaultDeviceName());
-        const accountVal = escAttr(sharedCloud.accountLabel || '');
         const pullMinVal = Math.max(2, Math.min(120, Number(cfg.pullIntervalMinutes) || 10));
         const retentionVal = Math.max(1, Math.min(90, Number(cfg.retentionDays) || 7));
         const excludeVal = escAttr(cfg.excludeHosts || '');
         const pushEveryVisit = cfg.pushEveryVisit !== false;
         const importNative = cfg.importToNativeHistory === true;
-        const syncLinkVal = escAttr(sharedCloud.syncLink || '');
 
         specificControls = `
           <div class="besing-config-section" style="padding:10px;border:1px solid rgba(56,189,248,0.22);border-radius:10px;background:rgba(15,23,42,0.55);">
@@ -13350,127 +13473,68 @@
                   <span id="bsync-status-label" style="font-size:12px;font-weight:700;color:#e2e8f0;">${hasLink ? 'Linked' : 'Not Linked'}</span>
                   <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(99,102,241,0.2);color:#a5b4fc;border:1px solid rgba(99,102,241,0.35);">${isExt ? 'Edge Extension' : 'Userscript'}</span>
                 </div>
-                <div id="bsync-meta-line" style="font-size:10px;color:#94a3b8;margin-top:3px;">Loading sync state...</div>
+                <div id="bsync-meta-line" style="font-size:10px;color:#94a3b8;margin-top:3px;">Loading...</div>
               </div>
               <button type="button" class="besing-btn-sub-action" id="btn-bsync-now" style="padding:6px 10px;font-size:11px;font-weight:700;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;white-space:nowrap;">Sync Now</button>
             </div>
-            <div id="bsync-traffic-line" style="font-size:10px;color:#64748b;margin-top:5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;">Traffic today: --</div>
+            ${!hasLink ? `<button type="button" class="besing-btn-sub-action" id="btn-bsync-open-cloud" style="margin-top:8px;width:100%;color:#fbbf24;border-color:rgba(245,158,11,0.4);">Open Settings to Link DB</button>` : ''}
           </div>
 
-          <div class="besing-segmented-group" id="group-bsync-tabs" style="margin-top:8px;">
+          <div class="besing-segmented-group" id="group-bsync-tabs" style="margin-top:6px;">
             <button type="button" class="besing-segmented-btn ${activeSubTab === 'devices' ? 'active' : ''}" data-tab="devices">Devices</button>
             <button type="button" class="besing-segmented-btn ${activeSubTab === 'history' ? 'active' : ''}" data-tab="history">History</button>
-            <button type="button" class="besing-segmented-btn ${activeSubTab === 'usage' ? 'active' : ''}" data-tab="usage">Usage</button>
-            <button type="button" class="besing-segmented-btn ${activeSubTab === 'setup' ? 'active' : ''}" data-tab="setup">Setup</button>
           </div>
 
-          <div id="bsync-pane-devices" style="display:${activeSubTab === 'devices' ? 'block' : 'none'};margin-top:8px;">
-            <div id="bsync-devices-list" style="display:flex;flex-direction:column;gap:8px;">
-              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading synced devices...</p>
+          <div id="bsync-pane-devices" style="display:${activeSubTab === 'devices' ? 'block' : 'none'};margin-top:6px;">
+            <div id="bsync-devices-list" style="display:flex;flex-direction:column;gap:6px;">
+              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading devices...</p>
             </div>
           </div>
 
-          <div id="bsync-pane-history" style="display:${activeSubTab === 'history' ? 'block' : 'none'};margin-top:8px;">
+          <div id="bsync-pane-history" style="display:${activeSubTab === 'history' ? 'block' : 'none'};margin-top:6px;">
             <div style="display:flex;gap:6px;margin-bottom:8px;">
-              <input type="text" class="besing-test-input" id="bsync-hist-search" placeholder="Search master history..." style="flex:1;min-width:0;">
-              <select class="besing-test-input" id="bsync-hist-filter" style="width:120px;padding:4px 6px;">
+              <input type="text" class="besing-test-input" id="bsync-hist-search" placeholder="Search history..." style="flex:1;min-width:0;">
+              <select class="besing-test-input" id="bsync-hist-filter" style="width:115px;padding:4px 6px;">
                 <option value="all">All Devices</option>
               </select>
             </div>
             <div id="bsync-history-list" style="display:flex;flex-direction:column;gap:5px;">
-              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading master history...</p>
+              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading history...</p>
             </div>
           </div>
 
-          <div id="bsync-pane-usage" style="display:${activeSubTab === 'usage' ? 'block' : 'none'};margin-top:8px;">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:8px;">
-              <select class="besing-test-input" id="bsync-usage-filter" style="flex:1;padding:4px 6px;">
-                <option value="all">All Devices</option>
-              </select>
-              <select class="besing-test-input" id="bsync-usage-range" style="width:100px;padding:4px 6px;">
-                <option value="today">Today</option>
-                <option value="all" selected>All (7d)</option>
-              </select>
-            </div>
-            <div id="bsync-usage-list" style="display:flex;flex-direction:column;gap:6px;">
-              <p style="font-size:11px;color:#94a3b8;margin:4px 0;">Loading usage stats...</p>
-            </div>
-          </div>
-
-          <div id="bsync-pane-setup" style="display:${activeSubTab === 'setup' ? 'block' : 'none'};margin-top:8px;">
-            <div class="besing-config-section">
-              <div class="besing-section-header-row">
-                <span class="besing-section-title">Sync Link (1-Paste Setup)</span>
-                <button type="button" class="besing-btn-sub-action" id="btn-bsync-copy-link" style="padding:2px 8px;font-size:10px;">Copy Link</button>
+          <details class="besing-config-section" style="margin-top:4px;">
+            <summary style="font-size:11px;font-weight:700;color:#94a3b8;cursor:pointer;user-select:none;">Options</summary>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">
+              <input type="text" class="besing-test-input" id="bsync-input-exclude" placeholder="Exclude domains (e.g. bank.com)" value="${excludeVal}">
+              <div style="display:flex;gap:8px;align-items:center;">
+                <label style="font-size:11px;color:#cbd5e1;flex:1;">Pull (min):
+                  <input type="number" class="besing-test-input" id="bsync-input-pullmin" min="2" max="120" value="${pullMinVal}" style="width:52px;margin-left:4px;padding:3px 6px;">
+                </label>
+                <label style="font-size:11px;color:#cbd5e1;flex:1;">Keep (days):
+                  <input type="number" class="besing-test-input" id="bsync-input-retention" min="1" max="90" value="${retentionVal}" style="width:52px;margin-left:4px;padding:3px 6px;">
+                </label>
               </div>
-              <input type="password" class="besing-test-input" id="bsync-input-link" placeholder="Paste besing-sync://... link" value="${syncLinkVal}" style="width:100%;margin-top:6px;font-family:monospace;font-size:11px;">
-              <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
-                <button type="button" class="besing-btn-sub-action" id="btn-bsync-save-test" style="flex:1;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.45);color:#34d399;">Save & Test</button>
-                <button type="button" class="besing-btn-sub-action" id="btn-bsync-toggle-vis" style="padding:4px 8px;">Show</button>
-                <button type="button" class="besing-btn-sub-action" id="btn-bsync-clear-link" style="padding:4px 8px;color:#fca5a5;">Unlink</button>
+              <div class="besing-toggle-row">
+                <div class="besing-toggle-title">Push Every Visit</div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-bsync-visit" ${pushEveryVisit ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
               </div>
-              <p id="bsync-setup-msg" style="font-size:10px;color:#94a3b8;margin:6px 0 0;line-height:1.35;">Nothing is hardcoded. Paste your private Sync Link on each device. Cookies and page contents are never synced.</p>
-            </div>
-
-            <div class="besing-config-section">
-              <div class="besing-section-header-row">
-                <span class="besing-section-title">This Device Identity</span>
+              <div class="besing-toggle-row" style="display:${isExt ? 'flex' : 'none'};">
+                <div class="besing-toggle-title">Import to Edge History</div>
+                <label class="besing-switch besing-switch-sm">
+                  <input type="checkbox" id="chk-bsync-import" ${importNative ? 'checked' : ''}>
+                  <span class="besing-slider"></span>
+                </label>
               </div>
-              <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;">
-                <input type="text" class="besing-test-input" id="bsync-input-device" placeholder="Device Name (e.g. Main-PC, iPhone, iPad)" value="${deviceNameVal}">
-                <input type="text" class="besing-test-input" id="bsync-input-account" placeholder="Profile / User Name (auto-fills Edge email if signed in)" value="${accountVal}">
-                <input type="text" class="besing-test-input" id="bsync-input-exclude" placeholder="Excluded domains (e.g. bank.com, intranet.local)" value="${excludeVal}">
-                <div style="display:flex;gap:8px;align-items:center;">
-                  <label style="font-size:11px;color:#cbd5e1;flex:1;">Auto-pull (min):
-                    <input type="number" class="besing-test-input" id="bsync-input-pullmin" min="2" max="120" value="${pullMinVal}" style="width:58px;margin-left:4px;padding:3px 6px;">
-                  </label>
-                  <label style="font-size:11px;color:#cbd5e1;flex:1;">History (days):
-                    <input type="number" class="besing-test-input" id="bsync-input-retention" min="1" max="90" value="${retentionVal}" style="width:54px;margin-left:4px;padding:3px 6px;">
-                  </label>
-                </div>
-                <div class="besing-toggle-row">
-                  <div>
-                    <div class="besing-toggle-title">Push Every Visit</div>
-                    <div class="besing-toggle-desc">Uploads sanitized page visits immediately (deduplicated per 5m bucket)</div>
-                  </div>
-                  <label class="besing-switch besing-switch-sm">
-                    <input type="checkbox" id="chk-bsync-visit" ${pushEveryVisit ? 'checked' : ''}>
-                    <span class="besing-slider"></span>
-                  </label>
-                </div>
-                <div class="besing-toggle-row" style="display:${isExt ? 'flex' : 'none'};">
-                  <div>
-                    <div class="besing-toggle-title">Import Remote Visits to Edge History</div>
-                    <div class="besing-toggle-desc">Adds Safari/other devices' visits into Edge native address bar history</div>
-                  </div>
-                  <label class="besing-switch besing-switch-sm">
-                    <input type="checkbox" id="chk-bsync-import" ${importNative ? 'checked' : ''}>
-                    <span class="besing-slider"></span>
-                  </label>
-                </div>
-                <button type="button" class="besing-btn-sub-action" id="btn-bsync-save-prefs" style="align-self:flex-end;">Save Settings</button>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                <span id="bsync-setup-msg" style="font-size:10px;color:#94a3b8;"></span>
+                <button type="button" class="besing-btn-sub-action" id="btn-bsync-save-prefs">Save</button>
               </div>
             </div>
-
-            <div class="besing-config-section" style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
-              <div class="besing-section-header-row">
-                <span class="besing-section-title">First-Time Supabase Link Generator</span>
-              </div>
-              <p style="font-size:10px;color:#94a3b8;margin:4px 0 6px;line-height:1.35;">
-                Enter your Supabase project URL and <strong>publishable / anon key</strong> (never the service_role key) to mint a random secret, Sync Link, and 1-line SQL allowlist insert.
-              </p>
-              <div style="display:flex;flex-direction:column;gap:6px;">
-                <input type="text" class="besing-test-input" id="bsync-gen-url" placeholder="https://your-project.supabase.co">
-                <input type="password" class="besing-test-input" id="bsync-gen-key" placeholder="Supabase publishable / anon key">
-                <button type="button" class="besing-btn-sub-action" id="btn-bsync-generate" style="background:rgba(99,102,241,0.22);border:1px solid rgba(99,102,241,0.45);color:#a5b4fc;">Generate Secret & Sync Link</button>
-                <div id="bsync-gen-output" style="display:none;flex-direction:column;gap:5px;margin-top:4px;">
-                  <div style="font-size:10px;color:#34d399;font-weight:600;">1. Run this SQL once in Supabase SQL Editor:</div>
-                  <textarea class="besing-test-input" id="bsync-gen-sql" readonly rows="3" style="font-family:monospace;font-size:10px;resize:vertical;"></textarea>
-                  <button type="button" class="besing-btn-sub-action" id="btn-bsync-copy-sql" style="align-self:flex-end;">Copy SQL</button>
-                </div>
-              </div>
-            </div>
-          </div>
+          </details>
         `;
       } else if (m.id === 'settings-sync') {
         const linked = this.cloud.isConfigured();
@@ -13836,29 +13900,61 @@
           });
         }
       } else if (m.id === 'color-change') {
+        const chkB = body.querySelector('#chk-brightness-on');
         const bRange = body.querySelector('#brightness-range');
         const bBadge = body.querySelector('#brightness-badge');
+        const chkW = body.querySelector('#chk-warmth-on');
+        const wRange = body.querySelector('#warmth-range');
+        const wBadge = body.querySelector('#warmth-badge');
         const customPicker = body.querySelector('#custom-color-picker');
         const customHex = body.querySelector('#custom-color-hex');
         const btnApplyCustom = body.querySelector('#btn-apply-custom-color');
-        const tBadge = body.querySelector('#text-color-badge');
         const customTextPicker = body.querySelector('#custom-text-color-picker');
         const customTextHex = body.querySelector('#custom-text-color-hex');
         const btnApplyCustomText = body.querySelector('#btn-apply-custom-text');
         const btnResetBg = body.querySelector('#btn-reset-bg');
+        const btnSaveProf = body.querySelector('#btn-save-color-profile');
+        const inProfName = body.querySelector('#input-color-profile-name');
 
-        const updateBrightness = async (val) => {
-          const b = Number(val);
-          if (bBadge) {
-            if (b < 0) bBadge.textContent = `☀️ Lighter (+${Math.abs(b)}%)`;
-            else if (b > 0) bBadge.textContent = `🌙 Deep Dark (+${b}%)`;
-            else bBadge.textContent = '🎯 Normal (Original BG)';
-          }
-          await this.applyScriptConfig(m.id, { brightness: b });
+        const refreshBLabel = (on, val) => {
+          if (!bBadge) return;
+          const b = Number(val) || 0;
+          bBadge.textContent = !on ? 'Off' : (b < 0 ? `Light +${Math.abs(b)}%` : (b > 0 ? `Dark +${b}%` : '0%'));
+        };
+        const refreshWLabel = (on, val) => {
+          if (!wBadge) return;
+          wBadge.textContent = !on ? 'Off' : `${Number(val) || 0}%`;
         };
 
+        if (chkB) {
+          chkB.onchange = async () => {
+            const on = Boolean(chkB.checked);
+            refreshBLabel(on, bRange ? bRange.value : 0);
+            await this.applyScriptConfig(m.id, { brightnessEnabled: on, activeProfile: '' });
+          };
+        }
         if (bRange) {
-          bRange.oninput = (e) => updateBrightness(e.target.value);
+          bRange.oninput = async (e) => {
+            const b = Number(e.target.value) || 0;
+            if (chkB && !chkB.checked) chkB.checked = true;
+            refreshBLabel(true, b);
+            await this.applyScriptConfig(m.id, { brightnessEnabled: true, brightness: b, activeProfile: '' });
+          };
+        }
+        if (chkW) {
+          chkW.onchange = async () => {
+            const on = Boolean(chkW.checked);
+            refreshWLabel(on, wRange ? wRange.value : 35);
+            await this.applyScriptConfig(m.id, { warmthEnabled: on, activeProfile: '' });
+          };
+        }
+        if (wRange) {
+          wRange.oninput = async (e) => {
+            const w = Number(e.target.value) || 0;
+            if (chkW && !chkW.checked) chkW.checked = true;
+            refreshWLabel(true, w);
+            await this.applyScriptConfig(m.id, { warmthEnabled: true, warmth: w, activeProfile: '' });
+          };
         }
 
         body.querySelectorAll('.besing-bg-preset-card').forEach(card => {
@@ -13866,19 +13962,17 @@
             const pKey = card.getAttribute('data-preset');
             body.querySelectorAll('.besing-bg-preset-card').forEach(c => c.classList.remove('active'));
             card.classList.add('active');
-            await this.applyScriptConfig(m.id, { preset: pKey });
+            await this.applyScriptConfig(m.id, { preset: pKey, activeProfile: '' });
           };
         });
 
         if (customPicker && customHex) {
-          customPicker.oninput = (e) => {
-            customHex.value = e.target.value;
-          };
+          customPicker.oninput = (e) => { customHex.value = e.target.value; };
           if (btnApplyCustom) {
             btnApplyCustom.onclick = async () => {
               const col = customHex.value.trim() || '#cce8cf';
               body.querySelectorAll('.besing-bg-preset-card').forEach(c => c.classList.remove('active'));
-              await this.applyScriptConfig(m.id, { preset: 'custom', customColor: col });
+              await this.applyScriptConfig(m.id, { preset: 'custom', customColor: col, activeProfile: '' });
             };
           }
         }
@@ -13888,73 +13982,92 @@
             const tKey = card.getAttribute('data-text-color');
             body.querySelectorAll('.besing-text-preset-card').forEach(c => c.classList.remove('active'));
             card.classList.add('active');
-            if (tBadge) {
-              const names = { default: 'Original', white: 'Pure White', black: 'Deep Black', charcoal: 'Charcoal', gray: 'Soft Gray', amber: 'Warm Cream' };
-              tBadge.textContent = names[tKey] || tKey;
-            }
-            await this.applyScriptConfig(m.id, { textColor: tKey });
+            await this.applyScriptConfig(m.id, { textColor: tKey, activeProfile: '' });
           };
         });
 
         if (customTextPicker && customTextHex) {
-          customTextPicker.oninput = (e) => {
-            customTextHex.value = e.target.value;
-          };
+          customTextPicker.oninput = (e) => { customTextHex.value = e.target.value; };
           if (btnApplyCustomText) {
             btnApplyCustomText.onclick = async () => {
               const col = customTextHex.value.trim() || '#ffffff';
               body.querySelectorAll('.besing-text-preset-card').forEach(c => c.classList.remove('active'));
-              if (tBadge) tBadge.textContent = `Custom (${col})`;
-              await this.applyScriptConfig(m.id, { textColor: 'custom', customTextColor: col });
+              await this.applyScriptConfig(m.id, { textColor: 'custom', customTextColor: col, activeProfile: '' });
             };
           }
         }
 
-        const chkDim = body.querySelector('#chk-night-dimmer');
-        const dimRange = body.querySelector('#night-dimmer-range');
-        const dimBadge = body.querySelector('#night-dimmer-badge');
-        const dimTintGroup = body.querySelector('#group-night-tint');
+        // Profile apply & delete
+        const getCurColorCfg = () => this.storage.getScriptConfig(m.id, currentHost) || {};
+        const defaultProfs = Array.isArray(m.DEFAULT_PROFILES) ? m.DEFAULT_PROFILES : [];
+        body.querySelectorAll('.besing-color-profile-btn').forEach(btn => {
+          btn.onclick = async (ev) => {
+            const delEl = ev.target && ev.target.closest ? ev.target.closest('.besing-prof-del') : null;
+            if (delEl) {
+              ev.stopPropagation();
+              const delId = delEl.getAttribute('data-del-profile');
+              const cur = getCurColorCfg();
+              const nextProfs = (Array.isArray(cur.profiles) ? cur.profiles : []).filter(p => p && p.id !== delId);
+              await this.applyScriptConfig(m.id, { profiles: nextProfs, activeProfile: cur.activeProfile === delId ? '' : (cur.activeProfile || '') });
+              this.renderBody();
+              return;
+            }
+            const pid = btn.getAttribute('data-profile-id');
+            const cur = getCurColorCfg();
+            const list = [...defaultProfs, ...(Array.isArray(cur.profiles) ? cur.profiles : [])];
+            const found = list.find(p => p && p.id === pid);
+            if (!found) return;
+            await this.applyScriptConfig(m.id, {
+              preset: found.preset || 'none',
+              customColor: found.customColor || '#cce8cf',
+              textColor: found.textColor || 'default',
+              customTextColor: found.customTextColor || '#ffffff',
+              brightnessEnabled: Boolean(found.brightnessEnabled),
+              brightness: Number(found.brightness) || 0,
+              warmthEnabled: Boolean(found.warmthEnabled),
+              warmth: Number(found.warmth) || 0,
+              activeProfile: found.id
+            });
+            this.renderBody();
+          };
+        });
 
-        if (chkDim) {
-          chkDim.onchange = async () => {
-            await this.applyScriptConfig(m.id, { nightDimmer: Boolean(chkDim.checked) });
+        if (btnSaveProf && inProfName) {
+          btnSaveProf.onclick = async () => {
+            const name = inProfName.value.trim().slice(0, 24);
+            if (!name) return;
+            const cur = getCurColorCfg();
+            const existing = Array.isArray(cur.profiles) ? cur.profiles.slice() : [];
+            const id = 'p_' + Date.now().toString(36);
+            existing.push({
+              id,
+              name,
+              preset: cur.preset || 'none',
+              customColor: cur.customColor || '#cce8cf',
+              textColor: cur.textColor || 'default',
+              customTextColor: cur.customTextColor || '#ffffff',
+              brightnessEnabled: Boolean(cur.brightnessEnabled),
+              brightness: Number(cur.brightness) || 0,
+              warmthEnabled: Boolean(cur.warmthEnabled),
+              warmth: Number(cur.warmth) || 0
+            });
+            await this.applyScriptConfig(m.id, { profiles: existing.slice(-12), activeProfile: id });
+            this.renderBody();
           };
-        }
-        if (dimRange) {
-          dimRange.oninput = async (e) => {
-            const pct = Number(e.target.value) || 32;
-            if (dimBadge) dimBadge.textContent = `${pct}%`;
-            if (chkDim && !chkDim.checked) chkDim.checked = true;
-            await this.applyScriptConfig(m.id, { nightDimmer: true, nightDimmerOpacity: pct });
-          };
-        }
-        if (dimTintGroup) {
-          dimTintGroup.querySelectorAll('.besing-segmented-btn').forEach(btn => {
-            btn.onclick = async () => {
-              const tint = btn.getAttribute('data-tint') || 'slate';
-              dimTintGroup.querySelectorAll('.besing-segmented-btn').forEach(b => b.classList.remove('active'));
-              btn.classList.add('active');
-              if (chkDim && !chkDim.checked) chkDim.checked = true;
-              await this.applyScriptConfig(m.id, { nightDimmer: true, nightDimmerTint: tint });
-            };
-          });
         }
 
         if (btnResetBg) {
           btnResetBg.onclick = async () => {
-            if (bRange) bRange.value = 0;
-            updateBrightness(0);
-            body.querySelectorAll('.besing-bg-preset-card').forEach(c => {
-              c.classList.toggle('active', c.getAttribute('data-preset') === 'none');
+            await this.applyScriptConfig(m.id, {
+              brightnessEnabled: false,
+              brightness: 0,
+              warmthEnabled: false,
+              warmth: 35,
+              preset: 'none',
+              textColor: 'default',
+              activeProfile: ''
             });
-            body.querySelectorAll('.besing-text-preset-card').forEach(c => {
-              c.classList.toggle('active', c.getAttribute('data-text-color') === 'default');
-            });
-            if (tBadge) tBadge.textContent = 'Original';
-            if (chkDim) chkDim.checked = false;
-            if (dimRange) dimRange.value = 32;
-            if (dimBadge) dimBadge.textContent = '32%';
-            await this.applyScriptConfig(m.id, { brightness: 0, preset: 'none', textColor: 'default', nightDimmer: false, nightDimmerOpacity: 32, nightDimmerTint: 'slate' });
+            this.renderBody();
           };
         }
       } else if (m.id === 'quick-copy') {
@@ -14332,19 +14445,18 @@
         const tabGroup = el('#group-bsync-tabs');
         const panes = {
           devices: el('#bsync-pane-devices'),
-          history: el('#bsync-pane-history'),
-          usage: el('#bsync-pane-usage'),
-          setup: el('#bsync-pane-setup')
+          history: el('#bsync-pane-history')
         };
         const switchTab = (tabName) => {
-          this._bsyncTab = tabName;
+          const cleanTab = tabName === 'history' ? 'history' : 'devices';
+          this._bsyncTab = cleanTab;
           if (tabGroup) {
             tabGroup.querySelectorAll('.besing-segmented-btn').forEach(b => {
-              b.classList.toggle('active', b.getAttribute('data-tab') === tabName);
+              b.classList.toggle('active', b.getAttribute('data-tab') === cleanTab);
             });
           }
           Object.keys(panes).forEach(k => {
-            if (panes[k]) panes[k].style.display = (k === tabName) ? 'block' : 'none';
+            if (panes[k]) panes[k].style.display = (k === cleanTab) ? 'block' : 'none';
           });
         };
         if (tabGroup) {
@@ -14352,17 +14464,16 @@
             btn.onclick = () => switchTab(btn.getAttribute('data-tab') || 'devices');
           });
         }
+        if (el('#btn-bsync-open-cloud')) {
+          el('#btn-bsync-open-cloud').onclick = () => {
+            this.currentView = 'settings';
+            this.renderBody();
+          };
+        }
 
         const GROUP_COLORS = {
           blue: '#3b82f6', red: '#ef4444', yellow: '#eab308', green: '#22c55e',
           pink: '#ec4899', purple: '#a855f7', cyan: '#06b6d4', orange: '#f97316', grey: '#94a3b8'
-        };
-
-        const fmtBytes = (n) => {
-          const v = Number(n) || 0;
-          if (v < 1024) return `${v} B`;
-          if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
-          return `${(v / (1024 * 1024)).toFixed(2)} MB`;
         };
 
         const fmtAgo = (isoOrMs) => {
@@ -14373,16 +14484,6 @@
           if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
           if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
           return `${Math.floor(sec / 86400)}d ago`;
-        };
-
-        const fmtDur = (sec) => {
-          const s = Math.max(0, Math.round(Number(sec) || 0));
-          if (s < 60) return `${s}s`;
-          const mins = Math.floor(s / 60);
-          if (mins < 60) return `${mins}m`;
-          const hrs = Math.floor(mins / 60);
-          const rem = mins % 60;
-          return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
         };
 
         const safeHref = (u) => {
@@ -14420,23 +14521,20 @@
 
         const populateFilters = (devices) => {
           const histSel = el('#bsync-hist-filter');
-          const usageSel = el('#bsync-usage-filter');
-          [histSel, usageSel].forEach(sel => {
-            if (!sel) return;
-            const prev = sel.value || 'all';
-            while (sel.firstChild) sel.removeChild(sel.firstChild);
-            const allOpt = document.createElement('option');
-            allOpt.value = 'all';
-            allOpt.textContent = 'All Devices';
-            sel.appendChild(allOpt);
-            (devices || []).forEach(d => {
-              const opt = document.createElement('option');
-              opt.value = d.instance_id;
-              opt.textContent = `${d.device_name || 'Device'} (${d.browser || '?'})`;
-              sel.appendChild(opt);
-            });
-            sel.value = Array.from(sel.options).some(o => o.value === prev) ? prev : 'all';
+          if (!histSel) return;
+          const prev = histSel.value || 'all';
+          while (histSel.firstChild) histSel.removeChild(histSel.firstChild);
+          const allOpt = document.createElement('option');
+          allOpt.value = 'all';
+          allOpt.textContent = 'All Devices';
+          histSel.appendChild(allOpt);
+          (devices || []).forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.instance_id;
+            opt.textContent = `${d.device_name || 'Device'} (${d.browser || '?'})`;
+            histSel.appendChild(opt);
           });
+          histSel.value = Array.from(histSel.options).some(o => o.value === prev) ? prev : 'all';
         };
 
         const renderDevices = (state) => {
@@ -14447,61 +14545,71 @@
           if (!state || !state.configured) {
             const p = document.createElement('p');
             p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
-            p.textContent = 'Open the Setup tab to paste your Sync Link or generate a new one.';
+            p.textContent = 'Link Global Sync Link in Settings first.';
             list.appendChild(p);
             return;
           }
           if (devices.length === 0) {
             const p = document.createElement('p');
             p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
-            p.textContent = 'No synced devices yet. Turn Browser Sync ON and click Sync Now.';
+            p.textContent = 'No synced devices yet.';
             list.appendChild(p);
             return;
           }
 
           devices.forEach(d => {
             const isSelf = state.instanceId && d.instance_id === state.instanceId;
-            const card = document.createElement('div');
-            card.style.cssText = 'padding:8px;border-radius:9px;background:rgba(15,23,42,0.7);border:1px solid rgba(148,163,184,0.18);display:flex;flex-direction:column;gap:6px;';
+            const tabsArr = Array.isArray(d.tabs) ? d.tabs : [];
+            const groupsArr = Array.isArray(d.groups) ? d.groups : [];
+            const closedArr = Array.isArray(d.closed) ? d.closed : [];
 
-            const hdr = document.createElement('div');
-            hdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;';
+            // Devices start collapsed by default so long tab lists stay compact on mobile.
+            const card = document.createElement('details');
+            card.className = 'besing-bsync-device';
+            card.style.cssText = 'padding:8px;border-radius:9px;background:rgba(15,23,42,0.7);border:1px solid rgba(148,163,184,0.18);';
+
+            const sum = document.createElement('summary');
+            sum.style.cssText = 'list-style:none;display:flex;align-items:center;justify-content:space-between;gap:6px;cursor:pointer;user-select:none;';
             const left = document.createElement('div');
             left.style.cssText = 'min-width:0;flex:1;';
             const nameRow = document.createElement('div');
             nameRow.style.cssText = 'font-size:12px;font-weight:700;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-            nameRow.textContent = `${d.device_name || 'Device'} (${d.browser || 'browser'})${isSelf ? ' · This Browser' : ''}`;
+            nameRow.textContent = `▸ ${d.device_name || 'Device'} (${d.browser || 'browser'})${isSelf ? ' · This' : ''}`;
             const subRow = document.createElement('div');
             subRow.style.cssText = 'font-size:9.5px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
             const acctPart = d.account_label ? `${d.account_label} · ` : '';
-            const tabsArr = Array.isArray(d.tabs) ? d.tabs : [];
-            const groupsArr = Array.isArray(d.groups) ? d.groups : [];
-            const closedArr = Array.isArray(d.closed) ? d.closed : [];
             subRow.textContent = `${acctPart}${tabsArr.length} tab(s)${groupsArr.length ? ` · ${groupsArr.length} group(s)` : ''} · ${fmtAgo(d.updated_at)}`;
             left.appendChild(nameRow);
             left.appendChild(subRow);
-            hdr.appendChild(left);
+            sum.appendChild(left);
+
+            card.addEventListener('toggle', () => {
+              nameRow.textContent = `${card.open ? '▾' : '▸'} ${d.device_name || 'Device'} (${d.browser || 'browser'})${isSelf ? ' · This' : ''}`;
+            });
 
             if (!isSelf) {
               const delBtn = document.createElement('button');
               delBtn.type = 'button';
               delBtn.textContent = 'Remove';
-              delBtn.style.cssText = 'font-size:9.5px;padding:2px 6px;border-radius:6px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);color:#fca5a5;cursor:pointer;';
-              delBtn.onclick = async () => {
+              delBtn.style.cssText = 'font-size:9.5px;padding:2px 6px;border-radius:6px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);color:#fca5a5;cursor:pointer;flex-shrink:0;';
+              delBtn.onclick = async (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
                 delBtn.disabled = true;
                 delBtn.textContent = '...';
                 const r = await m.deleteDevice(d.instance_id);
                 if (r && r.ok) refreshView();
               };
-              hdr.appendChild(delBtn);
+              sum.appendChild(delBtn);
             }
-            card.appendChild(hdr);
+            card.appendChild(sum);
 
-            // Sort open tabs by most recently active/visited first (never alphabetical).
+            const bodyWrap = document.createElement('div');
+            bodyWrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:8px;';
+
             const tabTime = (t) => Date.parse((t && (t.lastActiveAt || t.updatedAt)) || '') || 0;
             const sortedTabs = tabsArr.slice().sort((a, b) => tabTime(b) - tabTime(a));
 
-            // Render Tab Groups first with clear colored group chrome and click-to-open-all
             const groupedTabIds = new Set();
             groupsArr.forEach(g => {
               const gTabs = sortedTabs.filter(t => t.groupId && String(t.groupId) === String(g.id));
@@ -14515,7 +14623,6 @@
               gHdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;padding-bottom:3px;border-bottom:1px solid rgba(148,163,184,0.12);';
               const gTitle = document.createElement('div');
               gTitle.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#e2e8f0;min-width:0;cursor:pointer;flex:1;';
-              gTitle.title = 'Click to open all tabs in this group';
               const dot = document.createElement('span');
               dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${gColor};flex-shrink:0;`;
               const txt = document.createElement('span');
@@ -14544,10 +14651,9 @@
                 const ago = t.lastActiveAt ? ` · ${fmtAgo(t.lastActiveAt)}` : '';
                 gBox.appendChild(makeLinkRow(t.url, t.title || host, `${host}${ago}`));
               });
-              card.appendChild(gBox);
+              bodyWrap.appendChild(gBox);
             });
 
-            // Ungrouped Open Tabs (sorted by last visit/activity descending)
             const ungrouped = sortedTabs.filter(t => !groupedTabIds.has(t.id || t.url));
             if (ungrouped.length > 0) {
               const uWrap = document.createElement('div');
@@ -14562,29 +14668,29 @@
               if (ungrouped.length > 25) {
                 const more = document.createElement('div');
                 more.style.cssText = 'font-size:10px;color:#64748b;text-align:center;';
-                more.textContent = `+${ungrouped.length - 25} more open tabs`;
+                more.textContent = `+${ungrouped.length - 25} more tabs`;
                 uWrap.appendChild(more);
               }
-              card.appendChild(uWrap);
+              bodyWrap.appendChild(uWrap);
             }
 
-            // Recently Closed Tabs (collapsible)
             if (closedArr.length > 0) {
               const det = document.createElement('details');
               det.style.cssText = 'margin-top:2px;';
-              const sum = document.createElement('summary');
-              sum.style.cssText = 'font-size:10px;color:#94a3b8;cursor:pointer;user-select:none;';
-              sum.textContent = `Recently Closed (${closedArr.length})`;
-              det.appendChild(sum);
+              const cSum = document.createElement('summary');
+              cSum.style.cssText = 'font-size:10px;color:#94a3b8;cursor:pointer;user-select:none;';
+              cSum.textContent = `Recently Closed (${closedArr.length})`;
+              det.appendChild(cSum);
               const cWrap = document.createElement('div');
               cWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:4px;';
               closedArr.slice(0, 15).forEach(c => {
                 cWrap.appendChild(makeLinkRow(c.url, c.title || c.url, `Closed ${fmtAgo(c.closedAt)}`));
               });
               det.appendChild(cWrap);
-              card.appendChild(det);
+              bodyWrap.appendChild(det);
             }
 
+            card.appendChild(bodyWrap);
             list.appendChild(card);
           });
         };
@@ -14604,7 +14710,7 @@
           if (filtered.length === 0) {
             const p = document.createElement('p');
             p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
-            p.textContent = q ? 'No matching history entries.' : 'No synced history yet (default retention: 7 days).';
+            p.textContent = q ? 'No matches.' : 'No synced history yet.';
             list.appendChild(p);
             return;
           }
@@ -14615,81 +14721,15 @@
           });
         };
 
-        const renderUsage = (state) => {
-          const list = el('#bsync-usage-list');
-          if (!list) return;
-          while (list.firstChild) list.removeChild(list.firstChild);
-          const allUsage = (state && state.cache && state.cache.usage) || [];
-          const devFilter = el('#bsync-usage-filter')?.value || 'all';
-          const range = el('#bsync-usage-range')?.value || 'all';
-          const today = (typeof m._todayStr === 'function') ? m._todayStr() : new Date().toISOString().slice(0, 10);
-
-          const byHost = new Map();
-          let totalSec = 0;
-          let totalVisits = 0;
-          allUsage.forEach(u => {
-            if (devFilter !== 'all' && u.instance_id !== devFilter) return;
-            if (range === 'today' && u.day !== today) return;
-            const prev = byHost.get(u.host) || { host: u.host, seconds: 0, visits: 0 };
-            prev.seconds += Number(u.seconds) || 0;
-            prev.visits += Number(u.visits) || 0;
-            byHost.set(u.host, prev);
-            totalSec += Number(u.seconds) || 0;
-            totalVisits += Number(u.visits) || 0;
-          });
-
-          const summary = document.createElement('div');
-          summary.style.cssText = 'padding:7px 9px;border-radius:8px;background:rgba(30,41,59,0.65);border:1px solid rgba(56,189,248,0.25);font-size:11px;color:#e2e8f0;display:flex;justify-content:space-between;';
-          summary.textContent = `Total Active: ${fmtDur(totalSec)} · ${totalVisits} visits`;
-          list.appendChild(summary);
-
-          const ranked = Array.from(byHost.values()).sort((a, b) => b.seconds - a.seconds || b.visits - a.visits).slice(0, 30);
-          if (ranked.length === 0) {
-            const p = document.createElement('p');
-            p.style.cssText = 'font-size:11px;color:#94a3b8;margin:4px 0;';
-            p.textContent = 'No usage data recorded for this filter yet.';
-            list.appendChild(p);
-            return;
-          }
-          const maxSec = Math.max(1, ranked[0].seconds);
-          ranked.forEach(item => {
-            const row = document.createElement('div');
-            row.style.cssText = 'padding:5px 7px;border-radius:7px;background:rgba(15,23,42,0.6);border:1px solid rgba(148,163,184,0.12);';
-            const top = document.createElement('div');
-            top.style.cssText = 'display:flex;justify-content:space-between;font-size:11px;color:#f1f5f9;';
-            const hSpan = document.createElement('span');
-            hSpan.textContent = item.host;
-            hSpan.style.cssText = 'font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-            const tSpan = document.createElement('span');
-            tSpan.textContent = `${fmtDur(item.seconds)} (${item.visits}v)`;
-            tSpan.style.cssText = 'color:#38bdf8;font-family:monospace;flex-shrink:0;margin-left:8px;';
-            top.appendChild(hSpan);
-            top.appendChild(tSpan);
-            const barBg = document.createElement('div');
-            barBg.style.cssText = 'height:4px;border-radius:99px;background:rgba(148,163,184,0.18);margin-top:4px;overflow:hidden;';
-            const bar = document.createElement('div');
-            bar.style.cssText = `height:100%;width:${Math.max(4, Math.round((item.seconds / maxSec) * 100))}%;background:linear-gradient(90deg,#38bdf8,#818cf8);`;
-            barBg.appendChild(bar);
-            row.appendChild(top);
-            row.appendChild(barBg);
-            list.appendChild(row);
-          });
-        };
-
         const updateHeader = (state, overrideError = null) => {
           const dot = el('#bsync-status-dot');
           const lbl = el('#bsync-status-label');
           const metaLine = el('#bsync-meta-line');
-          const trafficLine = el('#bsync-traffic-line');
-          const acctInput = el('#bsync-input-account');
-          if (acctInput && state && state.detectedEmail && !acctInput.value) {
-            acctInput.placeholder = `Auto-detected Edge email: ${state.detectedEmail}`;
-          }
           if (!state || !state.ok) {
             if (dot) dot.style.background = '#ef4444';
             if (lbl) lbl.textContent = 'Unavailable';
             if (metaLine) {
-              metaLine.textContent = overrideError || ((state && state.error) ? state.error : 'Could not read sync state');
+              metaLine.textContent = overrideError || ((state && state.error) ? state.error : 'Could not read state');
               metaLine.style.color = '#fca5a5';
             }
             return;
@@ -14698,29 +14738,21 @@
           const isEnabled = this.storage.getScriptMode('browser-sync') === 'on';
           const errText = overrideError || c.lastError || null;
           if (dot) dot.style.background = errText ? '#ef4444' : (!isEnabled ? '#64748b' : (state.configured ? '#34d399' : '#f59e0b'));
-          if (lbl) lbl.textContent = errText ? 'Sync Error' : (!isEnabled ? 'Sync OFF' : (state.configured ? 'Linked' : 'Not Linked'));
+          if (lbl) lbl.textContent = errText ? 'Sync Error' : (!isEnabled ? 'OFF' : (state.configured ? 'Linked' : 'Not Linked'));
           if (metaLine) {
             if (errText) {
               metaLine.textContent = errText;
               metaLine.style.color = '#fca5a5';
             } else if (!isEnabled) {
-              metaLine.textContent = 'Browser Sync is OFF. Turn it ON above to resume syncing.';
+              metaLine.textContent = 'Sync History is OFF.';
               metaLine.style.color = '#94a3b8';
             } else if (state.configured) {
               const devCnt = (c.devices || []).length;
               metaLine.textContent = `${devCnt} device(s) · Pull ${fmtAgo(c.lastPullAt)} · Push ${fmtAgo(c.lastPushAt)}`;
               metaLine.style.color = '#94a3b8';
             } else {
-              metaLine.textContent = 'Cloud database not linked. Paste a Sync Link in Settings or Setup.';
+              metaLine.textContent = 'Link Global Sync Link in Settings.';
               metaLine.style.color = '#fbbf24';
-            }
-          }
-          if (trafficLine) {
-            const s = state.stats;
-            if (s) {
-              trafficLine.textContent = `Today: ↑ ${fmtBytes(s.bytesSentToday)} (${s.pushesToday || 0}p) · ↓ ${fmtBytes(s.bytesReceivedToday)} (${s.pullsToday || 0}g)`;
-            } else {
-              trafficLine.textContent = 'Today: ↑ 0 B · ↓ 0 B';
             }
           }
         };
@@ -14732,7 +14764,6 @@
           populateFilters(liveState && liveState.cache ? liveState.cache.devices : []);
           renderDevices(liveState);
           renderHistory(liveState);
-          renderUsage(liveState);
         };
 
         refreshView();
@@ -14747,157 +14778,34 @@
             btnNow.textContent = 'Sync Now';
             const manualErr = (r && !r.ok) ? (r.error || 'Sync failed.') : null;
             await refreshView(manualErr);
-            const setupMsg = el('#bsync-setup-msg');
-            if (setupMsg && manualErr) {
-              setupMsg.textContent = manualErr;
-              setupMsg.style.color = '#fca5a5';
-            }
           };
         }
 
         const histSearch = el('#bsync-hist-search');
         const histFilter = el('#bsync-hist-filter');
-        const usageFilter = el('#bsync-usage-filter');
-        const usageRange = el('#bsync-usage-range');
         if (histSearch) histSearch.oninput = () => renderHistory(liveState);
         if (histFilter) histFilter.onchange = () => renderHistory(liveState);
-        if (usageFilter) usageFilter.onchange = () => renderUsage(liveState);
-        if (usageRange) usageRange.onchange = () => renderUsage(liveState);
-
-        // Setup tab controls
-        const inputLink = el('#bsync-input-link');
-        const setupMsg = el('#bsync-setup-msg');
-        const btnToggleVis = el('#btn-bsync-toggle-vis');
-        if (btnToggleVis && inputLink) {
-          btnToggleVis.onclick = () => {
-            const show = inputLink.type === 'password';
-            inputLink.type = show ? 'text' : 'password';
-            btnToggleVis.textContent = show ? 'Hide' : 'Show';
-          };
-        }
-
-        const btnCopyLink = el('#btn-bsync-copy-link');
-        if (btnCopyLink && inputLink) {
-          btnCopyLink.onclick = () => {
-            if (!inputLink.value.trim()) {
-              if (setupMsg) setupMsg.textContent = 'No Sync Link to copy yet.';
-              return;
-            }
-            copyTextToClipboard(inputLink.value.trim()).then(ok => {
-              if (setupMsg) setupMsg.textContent = ok ? 'Sync Link copied! Paste it on your other devices.' : 'Could not copy automatically — click Show and copy manually.';
-            });
-          };
-        }
-
-        const readSetupFields = () => ({
-          deviceName: (el('#bsync-input-device')?.value || '').trim() || m.defaultDeviceName(),
-          accountLabel: (el('#bsync-input-account')?.value || '').trim(),
-          excludeHosts: (el('#bsync-input-exclude')?.value || '').trim(),
-          pullIntervalMinutes: Math.max(2, Math.min(120, parseInt(el('#bsync-input-pullmin')?.value, 10) || 10)),
-          retentionDays: Math.max(1, Math.min(90, parseInt(el('#bsync-input-retention')?.value, 10) || 7)),
-          pushEveryVisit: el('#chk-bsync-visit')?.checked !== false,
-          importToNativeHistory: el('#chk-bsync-import')?.checked === true
-        });
-
-        const btnSaveTest = el('#btn-bsync-save-test');
-        if (btnSaveTest && inputLink) {
-          btnSaveTest.onclick = async () => {
-            const raw = inputLink.value.trim();
-            if (!m.parseSyncLink(raw)) {
-              if (setupMsg) setupMsg.textContent = 'Invalid Sync Link. Must start with besing-sync:// and contain an HTTPS URL, publishable key, and secret.';
-              return;
-            }
-            btnSaveTest.disabled = true;
-            btnSaveTest.textContent = 'Testing...';
-            const test = await m.testConnection(raw);
-            btnSaveTest.disabled = false;
-            btnSaveTest.textContent = 'Save & Test';
-            if (!test || !test.ok) {
-              if (setupMsg) setupMsg.textContent = `Connection failed: ${(test && test.error) || 'unknown error'}`;
-              return;
-            }
-            const fields = readSetupFields();
-            await this.cloud.setConfig({ syncLink: raw, deviceName: fields.deviceName, accountLabel: fields.accountLabel });
-            await this.applyScriptConfig(m.id, {
-              excludeHosts: fields.excludeHosts,
-              pullIntervalMinutes: fields.pullIntervalMinutes,
-              retentionDays: fields.retentionDays,
-              pushEveryVisit: fields.pushEveryVisit,
-              importToNativeHistory: fields.importToNativeHistory
-            });
-            const curHost = this.storage.getCurrentHost();
-            if (this.storage.getScriptMode(m.id, curHost) === 'off') {
-              await this.storage.setScriptMode(m.id, 'on', curHost);
-              await this.refreshCurrentSiteModules();
-            }
-            if (setupMsg) setupMsg.textContent = `Connected in ${test.latencyMs}ms (${test.deviceCount} device(s), ${test.retentionDays}d retention). Shared with all sync tools.`;
-            await m.syncNow(true);
-            await refreshView();
-          };
-        }
-
-        const btnClearLink = el('#btn-bsync-clear-link');
-        if (btnClearLink && inputLink) {
-          btnClearLink.onclick = async () => {
-            inputLink.value = '';
-            await this.cloud.setConfig({ syncLink: '' });
-            await this.applyScriptConfig(m.id, { syncLink: '' });
-            if (setupMsg) setupMsg.textContent = 'Unlinked from shared cloud database.';
-            await refreshView();
-          };
-        }
 
         const btnSavePrefs = el('#btn-bsync-save-prefs');
+        const setupMsg = el('#bsync-setup-msg');
         if (btnSavePrefs) {
           btnSavePrefs.onclick = async () => {
-            const fields = readSetupFields();
-            const rawLink = (inputLink && inputLink.value ? inputLink.value.trim() : '');
-            const cloudPatch = { deviceName: fields.deviceName, accountLabel: fields.accountLabel };
-            if (rawLink && m.parseSyncLink(rawLink)) cloudPatch.syncLink = rawLink;
-            await this.cloud.setConfig(cloudPatch);
-            await this.applyScriptConfig(m.id, {
-              excludeHosts: fields.excludeHosts,
-              pullIntervalMinutes: fields.pullIntervalMinutes,
-              retentionDays: fields.retentionDays,
-              pushEveryVisit: fields.pushEveryVisit,
-              importToNativeHistory: fields.importToNativeHistory
-            });
+            const fields = {
+              excludeHosts: (el('#bsync-input-exclude')?.value || '').trim(),
+              pullIntervalMinutes: Math.max(2, Math.min(120, parseInt(el('#bsync-input-pullmin')?.value, 10) || 10)),
+              retentionDays: Math.max(1, Math.min(90, parseInt(el('#bsync-input-retention')?.value, 10) || 7)),
+              pushEveryVisit: el('#chk-bsync-visit')?.checked !== false,
+              importToNativeHistory: el('#chk-bsync-import')?.checked === true
+            };
+            await this.applyScriptConfig(m.id, fields);
             if (this.cloud.isConfigured()) {
               await m.setRetentionDays(fields.retentionDays);
               if (fields.importToNativeHistory && typeof m.isExtensionMode === 'function' && m.isExtensionMode()) {
                 await m.syncNow(true);
               }
             }
-            if (setupMsg) setupMsg.textContent = `Saved settings (${fields.deviceName}, pull every ${fields.pullIntervalMinutes}m, ${fields.retentionDays}d retention).`;
+            if (setupMsg) { setupMsg.textContent = 'Saved.'; setupMsg.style.color = '#34d399'; }
             await refreshView();
-          };
-        }
-
-        const btnGen = el('#btn-bsync-generate');
-        if (btnGen) {
-          btnGen.onclick = async () => {
-            const url = (el('#bsync-gen-url')?.value || '').trim();
-            const key = (el('#bsync-gen-key')?.value || '').trim();
-            const retention = Math.max(1, Math.min(90, parseInt(el('#bsync-input-retention')?.value, 10) || 7));
-            const bundle = await m.generateSetupBundle(url, key, retention);
-            if (!bundle || !bundle.ok) {
-              if (setupMsg) setupMsg.textContent = (bundle && bundle.error) || 'Failed to generate Sync Link.';
-              return;
-            }
-            if (inputLink) inputLink.value = bundle.syncLink;
-            const outBox = el('#bsync-gen-output');
-            const sqlArea = el('#bsync-gen-sql');
-            if (sqlArea) sqlArea.value = bundle.sql;
-            if (outBox) outBox.style.display = 'flex';
-            if (setupMsg) setupMsg.textContent = 'Generated Sync Link! Run the SQL below once in Supabase SQL Editor, then click Save & Test.';
-          };
-        }
-
-        const btnCopySql = el('#btn-bsync-copy-sql');
-        if (btnCopySql) {
-          btnCopySql.onclick = () => {
-            const sql = el('#bsync-gen-sql')?.value || '';
-            if (sql) copyTextToClipboard(sql);
           };
         }
       } else if (m.id === 'settings-sync') {

@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.13.0  
+**Version:** 1.14.0  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -626,3 +626,23 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
   - Adds a 3-stage selector (`Off` | `This Device` | `All Devices`) and a **Cloud Logs** viewer button inside Settings -> Debug Log.
   - Uploads sanitized, 18 KB-capped rolling boot/debug logs using a future `p_since` watermark so pushes are strictly write-only (~110 B response), throttled to once every 3 minutes per device. Selecting `All Devices` broadcasts `policy:all` (24h TTL) so all linked devices start uploading automatically on their 15-minute delta check; selecting `Off` broadcasts `policy:all = false` to stop all devices.
 - **Verification**: Verified in WebKit (iOS mobile viewport with strict `style-src 'self'` CSP and full `document.body` replacement confirming `besing-host` stays mounted on `<html>` with `adoptedStyleSheets` and exact `48x48` trigger layout) and Microsoft Edge (all 13 renamed scripts, pull-down search reveal, scroll-to-top, `Page Copy` Link/Markdown/HTML/WARC with real embedded PNG asset, `Page Color` Night Dimmer, Settings ordering, `Sync Transfer` non-closing download + native Photo/File labels + consistent button rows, `Sync History` newest-first tab ordering + Tab Group rendering + synchronous `pagehide` tab removal, and `BESLogSync` 3-stage selector + write-only push + 24h TTL + secret redaction + multi-device report), with 0 uncaught errors.
+
+#### 7.44 PageStream Safari Fix, Sync UI Streamlining, Global Sync Link UX, and Page Color Profiles (`v1.14.0`)
+
+- **PageStream Safari `document-start` Fix (`scripts/pagestream/pagestream.user.js` `v1.5.0`, `build.py`)**:
+  - Live iPhone Safari cloud debug logs showed `BESing` initializing `PageStream` at ~4 ms (`document.readyState === 'loading'`) while `DOMContentLoaded` fired 62-238 ms later. Because the DOM was still empty at 4 ms, `_setupNextLink()` returned `null`, `_liveMainSignature` became `null`, and the first scroll check permanently marked `_hasEnded = true`.
+  - Deferred initial DOM setup (`_injectStyles`, `_liveMainSignature`, `_setupNextLink`, `_resumeStreamedPages`, `_schedulePreload`, `_scheduleRecheck`) until `DOMContentLoaded` when `document.readyState === 'loading'`, added a secondary `window.load` retry if no next link was detected on page 1, added a lazy `_setupNextLink()` re-scan inside `_streamNextPage()` before allowing `_hasEnded = true` (only once `document.readyState === 'complete'`), and cleaned up both listeners in `destroy()`.
+  - Added `debugStatus()` (`ps=<rule|auto>(next=<yes|no>,p=<N>[,end])`) and wired it into `BESBootLog.check()` for cloud diagnostics.
+- **Sync History UI Streamlining (`build.py`)**:
+  - Removed the redundant `Setup` page and `Usage` tab from `Sync History` (`browser-sync`), keeping strictly `Devices` and `History` tabs plus a collapsed `Options` `<details>` drawer for Sync-History-specific settings (sync interval, auto-sync, native Edge history import, and per-device cleanup).
+  - Collapsed every device card (`<details class="besing-bsync-device">`) by default so long device lists remain compact on mobile screens.
+  - Added a direct `Open Settings to Link DB` CTA when no Global Sync Link is configured.
+- **Settings -> Global Sync Link & Debug Log UX (`build.py`)**:
+  - Reworded the cloud sync card to **Global Sync Link** and replaced the generic `Linked` pill with a green connected-identity pill showing the configured account and Supabase project ref (e.g., `alice · demo-proj` or `demo-proj`).
+  - Replaced separate small text buttons (`Save & Test`, `Copy Link`, `Show`, `Unlink`) with inline eye-icon visibility toggle and copy-icon buttons inside the password input wrapper, plus a single full-width primary button that switches between `Save & Test` and `Unlink` (or `Save Identity` when only Device/Profile changed). Unsaved edits to the link input revert cleanly on leaving Settings without overwriting the active connection.
+  - Replaced the redundant `Copy Local`, `Cloud Logs`, `Share`, and `View` buttons in Settings -> Debug Log with a single **Show Logs** button that opens the full-screen log viewer (which provides `Copy`, `Share`, and `Close`), while preserving the 3-stage `Save to DB (24h)` selector (`Off` | `This Device` | `All Devices`).
+- **Page Color Profiles, Warmth, and Brightness Toggles (`scripts/color-change/color-change.user.js` `v1.4.0`, `build.py`)**:
+  - Removed Night Dimmer and replaced it with a dedicated **Warmth** amber blue-light overlay (`#besing-warmth-overlay`, `0..100` slider with `mix-blend-mode: multiply`) with its own On/Off switch, alongside a new On/Off switch for **Brightness** (with automatic backward-compat enabling when a legacy non-zero brightness is stored).
+  - Added a **Profiles** bar preconfigured with two built-in presets: **EYE** (soft green `#cce8cf` background + dark slate `#0f172a` text) and **NIGHT** (deep gray `#222428` background + soft off-white `#e5e7eb` text), plus custom profile creation (`+ Save`) and deletion (`×`) saving all colors, Brightness toggle/value, and Warmth toggle/value.
+  - Trimmed verbose descriptions in the Page Color view for mobile screens.
+- **Verification**: Verified with Playwright across WebKit (iPhone Safari viewport running `document-start` PageStream on a multi-chapter page, confirming next-link detection after `DOMContentLoaded` and automatic Chapter 2 splicing on scroll) and Microsoft Edge (single `Show Logs` button + 3-stage selector, `Global Sync Link` green identity pill + eye toggle + `Save & Test` <-> `Unlink` + discard on exit, `Sync History` 2-tab layout + collapsed device cards, and `Page Color` `EYE`/`NIGHT`/custom profiles + Brightness/Warmth toggles and overlays), with 0 uncaught errors.

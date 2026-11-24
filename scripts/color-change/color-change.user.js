@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Page Color
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.3.0
-// @description  Background presets, brightness, text color, and night dimmer.
+// @version      1.4.0
+// @description  Color profiles, brightness, warmth, and text color presets.
 // @author       BESing Team
 // @license      MIT
 // @match        *://*/*
@@ -16,60 +16,89 @@
   const ColorChange = {
     id: 'color-change',
     name: 'Page Color',
-    version: '1.3.0',
-    description: 'Background presets, brightness, text color, and night dimmer.',
+    version: '1.4.0',
+    description: 'Color profiles, brightness, warmth, and text color presets.',
     category: 'Visual',
     _prevBodyBg: null,
     _prevHtmlBg: null,
     _presetOverlay: null,
     _brightnessOverlay: null,
-    _dimmerOverlay: null,
+    _warmthOverlay: null,
     _textColorSheet: null,
     _textColorStyle: null,
     _config: {
+      brightnessEnabled: false,
       brightness: 0, // -100 (lighten) to +100 (darken)
+      warmthEnabled: false,
+      warmth: 35, // 0..100 warm amber blue-light filter
       preset: 'eye-protect',
       customColor: '#cce8cf',
       textColor: 'default',
       customTextColor: '#ffffff',
-      nightDimmer: false,
-      nightDimmerOpacity: 32, // 10..75 (%)
-      nightDimmerTint: 'slate' // 'slate' | 'warm' | 'pitch'
+      activeProfile: '',
+      profiles: []
     },
+
+    DEFAULT_PROFILES: [
+      {
+        id: 'eye',
+        name: 'EYE',
+        builtin: true,
+        preset: 'eye-protect',
+        customColor: '#cce8cf',
+        textColor: 'black',
+        customTextColor: '#0f172a',
+        brightnessEnabled: false,
+        brightness: 0,
+        warmthEnabled: false,
+        warmth: 0
+      },
+      {
+        id: 'night',
+        name: 'NIGHT',
+        builtin: true,
+        preset: 'custom',
+        customColor: '#222428',
+        textColor: 'custom',
+        customTextColor: '#e5e7eb',
+        brightnessEnabled: false,
+        brightness: 0,
+        warmthEnabled: false,
+        warmth: 0
+      }
+    ],
 
     PRESETS: {
       'none': { name: 'Original', color: 'transparent', overlay: 'transparent' },
-      'eye-protect': { name: 'Eye Protect', color: '#cce8cf', overlay: 'rgba(204, 232, 207, 0.45)' },
+      'eye-protect': { name: 'Eye Green', color: '#cce8cf', overlay: 'rgba(204, 232, 207, 0.45)' },
       'old-paper': { name: 'Old Paper', color: '#f4ecd8', overlay: 'rgba(244, 236, 216, 0.48)' },
-      'dark': { name: 'Dark Mode', color: '#18181b', overlay: 'rgba(24, 24, 27, 0.65)' },
-      'soft-sepia': { name: 'Soft Sepia', color: '#eee4cd', overlay: 'rgba(238, 228, 205, 0.42)' },
+      'dark': { name: 'Dark', color: '#18181b', overlay: 'rgba(24, 24, 27, 0.65)' },
+      'soft-sepia': { name: 'Sepia', color: '#eee4cd', overlay: 'rgba(238, 228, 205, 0.42)' },
       'cool-mint': { name: 'Cool Mint', color: '#e0f2fe', overlay: 'rgba(224, 242, 254, 0.42)' }
     },
 
     TEXT_COLORS: {
       'default': { name: 'Original', color: 'transparent', text: null, border: '#475569' },
-      'white': { name: 'Pure White', color: '#ffffff', text: '#ffffff', border: '#f8fafc' },
-      'black': { name: 'Deep Black', color: '#0f172a', text: '#0f172a', border: '#0f172a' },
+      'white': { name: 'White', color: '#ffffff', text: '#ffffff', border: '#f8fafc' },
+      'black': { name: 'Black', color: '#0f172a', text: '#0f172a', border: '#0f172a' },
       'charcoal': { name: 'Charcoal', color: '#334155', text: '#334155', border: '#64748b' },
-      'gray': { name: 'Soft Gray', color: '#94a3b8', text: '#94a3b8', border: '#94a3b8' },
-      'amber': { name: 'Warm Cream', color: '#fef3c7', text: '#fef3c7', border: '#fde68a' }
+      'gray': { name: 'Gray', color: '#94a3b8', text: '#94a3b8', border: '#94a3b8' },
+      'amber': { name: 'Cream', color: '#fef3c7', text: '#fef3c7', border: '#fde68a' }
     },
 
-    DIMMER_TINTS: {
-      slate: '15, 23, 42',
-      warm: '45, 26, 10',
-      pitch: '0, 0, 0'
+    _normalizeConfig(cfg) {
+      const merged = { ...this._config, ...(cfg && typeof cfg === 'object' ? cfg : {}) };
+      if (cfg && cfg.brightnessEnabled === undefined && Number(cfg.brightness) !== 0 && !isNaN(Number(cfg.brightness))) {
+        merged.brightnessEnabled = true;
+      }
+      return merged;
     },
 
     init(cfg) {
       this.destroy();
-      if (cfg && typeof cfg === 'object') {
-        this._config = { ...this._config, ...cfg };
-      }
-
+      this._config = this._normalizeConfig(cfg);
       this._prevBodyBg = document.body ? document.body.style.backgroundColor : null;
       this._prevHtmlBg = document.documentElement ? document.documentElement.style.backgroundColor : null;
-
       this._createOverlays();
       this.applyConfig();
     },
@@ -94,19 +123,17 @@
         this._brightnessOverlay = bLayer;
       }
 
-      if (!this._dimmerOverlay) {
-        const dLayer = document.createElement('div');
-        dLayer.id = 'besing-night-dimmer-overlay';
-        dLayer.style.cssText = 'position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483635!important;display:none;transition:opacity 0.25s ease,background-color 0.25s ease!important;';
-        mountRoot.appendChild(dLayer);
-        this._dimmerOverlay = dLayer;
+      if (!this._warmthOverlay) {
+        const wLayer = document.createElement('div');
+        wLayer.id = 'besing-warmth-overlay';
+        wLayer.style.cssText = 'position:fixed!important;inset:0!important;pointer-events:none!important;z-index:2147483635!important;mix-blend-mode:multiply!important;display:none;transition:background-color 0.2s ease!important;';
+        mountRoot.appendChild(wLayer);
+        this._warmthOverlay = wLayer;
       }
     },
 
     onConfigChange(cfg) {
-      if (cfg && typeof cfg === 'object') {
-        this._config = { ...this._config, ...cfg };
-      }
+      this._config = this._normalizeConfig(cfg);
       this.applyConfig();
     },
 
@@ -177,14 +204,15 @@
         }
       }
 
-      // Brightness dragger
+      // Brightness dragger (with independent on/off switch)
+      const bEnabled = Boolean(this._config.brightnessEnabled);
       const bVal = Math.max(-100, Math.min(100, Number(this._config.brightness) || 0));
       if (this._brightnessOverlay) {
-        if (bVal < 0) {
+        if (bEnabled && bVal < 0) {
           const factor = Math.min(0.88, (Math.abs(bVal) / 100) * 0.95).toFixed(3);
           this._brightnessOverlay.style.backgroundColor = `rgba(255, 255, 255, ${factor})`;
           this._brightnessOverlay.style.mixBlendMode = 'screen';
-        } else if (bVal > 0) {
+        } else if (bEnabled && bVal > 0) {
           const factor = Math.min(0.92, (bVal / 100) * 0.96).toFixed(3);
           this._brightnessOverlay.style.backgroundColor = `rgba(0, 0, 0, ${factor})`;
           this._brightnessOverlay.style.mixBlendMode = 'multiply';
@@ -193,21 +221,17 @@
         }
       }
 
-      // Integrated Night Comfort Dimmer
-      if (this._dimmerOverlay) {
-        if (this._config.nightDimmer) {
-          const pct = Math.max(10, Math.min(75, Number(this._config.nightDimmerOpacity) || 32));
-          const alpha = (pct / 100).toFixed(2);
-          const rgb = this.DIMMER_TINTS[this._config.nightDimmerTint] || this.DIMMER_TINTS.slate;
-          this._dimmerOverlay.style.display = 'block';
-          this._dimmerOverlay.style.backgroundColor = `rgba(${rgb}, ${alpha})`;
-          this._dimmerOverlay.style.backdropFilter = 'contrast(0.95) brightness(0.92)';
-          this._dimmerOverlay.style.webkitBackdropFilter = 'contrast(0.95) brightness(0.92)';
+      // Warmth dragger (warm amber blue-light filter with independent on/off switch)
+      const wEnabled = Boolean(this._config.warmthEnabled);
+      const wVal = Math.max(0, Math.min(100, Number(this._config.warmth) || 0));
+      if (this._warmthOverlay) {
+        if (wEnabled && wVal > 0) {
+          const alpha = (0.04 + (wVal / 100) * 0.38).toFixed(3);
+          this._warmthOverlay.style.display = 'block';
+          this._warmthOverlay.style.backgroundColor = `rgba(255, 148, 36, ${alpha})`;
         } else {
-          this._dimmerOverlay.style.display = 'none';
-          this._dimmerOverlay.style.backgroundColor = 'transparent';
-          this._dimmerOverlay.style.backdropFilter = 'none';
-          this._dimmerOverlay.style.webkitBackdropFilter = 'none';
+          this._warmthOverlay.style.display = 'none';
+          this._warmthOverlay.style.backgroundColor = 'transparent';
         }
       }
 
@@ -249,14 +273,14 @@
       if (document.body) {
         document.body.style.backgroundColor = this._prevBodyBg || '';
       }
-      [this._presetOverlay, this._brightnessOverlay, this._dimmerOverlay].forEach(el => {
+      [this._presetOverlay, this._brightnessOverlay, this._warmthOverlay].forEach(el => {
         if (el) el.remove();
       });
       this._presetOverlay = null;
       this._brightnessOverlay = null;
-      this._dimmerOverlay = null;
+      this._warmthOverlay = null;
       this._clearTextColorCss();
-      ['besing-bg-preset-overlay', 'besing-bg-brightness-overlay', 'besing-night-dimmer-overlay'].forEach(id => {
+      ['besing-bg-preset-overlay', 'besing-bg-brightness-overlay', 'besing-warmth-overlay', 'besing-night-dimmer-overlay'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.remove();
       });

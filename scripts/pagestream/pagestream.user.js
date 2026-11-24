@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PageStream
 // @namespace    https://github.com/CoronRing/BESing
-// @version      1.4.0
+// @version      1.5.0
 // @description  Continuous page streaming via smart pagination detection and automated clicks for infinite scrolling with rate limiting and IP flood protection.
 // @author       BESing Team
 // @license      MIT
@@ -16,7 +16,7 @@
   const PageStream = {
     id: 'pagestream',
     name: 'PageStream',
-    version: '1.4.0',
+    version: '1.5.0',
     description: 'Auto-loads next pages for continuous scrolling.',
     category: 'Productivity',
 
@@ -150,29 +150,82 @@
       this._lastFetchTime = 0;
       this._hasEnded = false;
       this._consecutiveErrors = 0;
+      this._domReadyHandler = null;
+      this._loadRetryHandler = null;
 
-      this._injectStyles();
       this._matchRule();
-      this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
-      this._setupNextLink();
-      this._resumeStreamedPages();
       this._setupScrollListener();
       this._setupHistoryObserver();
 
-      // Trigger initial preload if configured (polite 2500ms delay to allow initial page to settle)
-      if (this._config.preloadPages > 0) {
-        this._schedulePreload(2500);
+      const startDomSetup = () => {
+        if (!this._active) return;
+        this._initialTitle = document.title || this._initialTitle;
+        this._injectStyles();
+        if (!this._liveMainSignature) {
+          this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
+        }
+        this._setupNextLink();
+        this._resumeStreamedPages();
+
+        if (this._config.preloadPages > 0 && this._currentNextUrl) {
+          this._schedulePreload(2500);
+        }
+        this._scheduleRecheck(1000);
+      };
+
+      // In Stay / Safari / userscript document-start, init() runs before DOMContentLoaded while
+      // document.body is still empty. Defer DOM detection until the page has parsed so next links
+      // and main content containers actually exist.
+      if (document.readyState === 'loading') {
+        this._domReadyHandler = () => {
+          this._domReadyHandler = null;
+          startDomSetup();
+        };
+        document.addEventListener('DOMContentLoaded', this._domReadyHandler, { once: true });
+      } else {
+        startDomSetup();
       }
-      // A reader already at the bottom (e.g. turning PageStream back on there) cannot scroll further,
-      // so no scroll event would ever arrive.
-      this._scheduleRecheck(1000);
+
+      // Secondary retry after window load in case dynamic pagination links render late.
+      if (document.readyState !== 'complete') {
+        this._loadRetryHandler = () => {
+          this._loadRetryHandler = null;
+          if (!this._active || this._curPageNum > 1) return;
+          if (!this._liveMainSignature) {
+            this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
+          }
+          if (!this._currentNextUrl && !this._currentNextElement) {
+            this._hasEnded = false;
+            this._setupNextLink();
+            if (this._config.preloadPages > 0 && this._currentNextUrl) {
+              this._schedulePreload(1500);
+            }
+          }
+        };
+        window.addEventListener('load', this._loadRetryHandler, { once: true });
+      }
 
       console.log(`[PageStream] Initialized (When: ${this._config.whenToLoad}, Preload: ${this._config.preloadPages}, History: ${this._config.enableHistory})`);
+    },
+
+    debugStatus() {
+      const ruleName = this._rule ? this._rule.name : 'auto';
+      const hasNext = Boolean(this._currentNextUrl || this._currentNextElement);
+      return `ps=${ruleName}(next=${hasNext ? 'yes' : 'no'},p=${this._curPageNum}${this._hasEnded ? ',end' : ''})`;
     },
 
     destroy() {
       if (!this._active) return;
       this._active = false;
+
+      if (this._domReadyHandler) {
+        document.removeEventListener('DOMContentLoaded', this._domReadyHandler);
+        this._domReadyHandler = null;
+      }
+      if (this._loadRetryHandler) {
+        window.removeEventListener('load', this._loadRetryHandler);
+        this._loadRetryHandler = null;
+      }
 
       if (this._preloadTimer) {
         clearTimeout(this._preloadTimer);
@@ -763,6 +816,13 @@
         }
 
         // 2. Check mode: Click vs URL Fetch
+        if (this._curPageNum === 1 && !this._currentNextUrl && !this._currentNextElement) {
+          if (document.readyState === 'loading') return;
+          if (!this._liveMainSignature) {
+            this._liveMainSignature = this._signatureOf(this._findMainContentElement(document));
+          }
+          this._setupNextLink();
+        }
         const isClickMode = this._config.mode === 'click' ||
           (this._config.mode === 'auto' && this._isClickOnlyElement(this._currentNextElement));
 
@@ -770,7 +830,7 @@
           await this._executeAutoClick(this._currentNextElement);
         } else if (this._currentNextUrl) {
           await this._fetchAndSplice(this._currentNextUrl);
-        } else {
+        } else if (document.readyState === 'complete') {
           console.log('[PageStream] No more pages detected.');
           this._hasEnded = true;
         }
