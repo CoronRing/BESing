@@ -1,6 +1,6 @@
 # BESing (Browser Extension Script) Specification & Design
 
-**Version:** 1.14.0  
+**Version:** 1.14.1  
 **Status:** Active  
 **Author:** BESing Architecture Team  
 
@@ -646,3 +646,15 @@ BESing v1.5.0 introduces a dedicated **Secondary Menu & Configuration Engine** f
   - Added a **Profiles** bar preconfigured with two built-in presets: **EYE** (soft green `#cce8cf` background + dark slate `#0f172a` text) and **NIGHT** (deep gray `#222428` background + soft off-white `#e5e7eb` text), plus custom profile creation (`+ Save`) and deletion (`×`) saving all colors, Brightness toggle/value, and Warmth toggle/value.
   - Trimmed verbose descriptions in the Page Color view for mobile screens.
 - **Verification**: Verified with Playwright across WebKit (iPhone Safari viewport running `document-start` PageStream on a multi-chapter page, confirming next-link detection after `DOMContentLoaded` and automatic Chapter 2 splicing on scroll) and Microsoft Edge (single `Show Logs` button + 3-stage selector, `Global Sync Link` green identity pill + eye toggle + `Save & Test` <-> `Unlink` + discard on exit, `Sync History` 2-tab layout + collapsed device cards, and `Page Color` `EYE`/`NIGHT`/custom profiles + Brightness/Warmth toggles and overlays), with 0 uncaught errors.
+
+#### 7.45 Sync History Tab Closing Tracker & Session Deduplication Fixes (`v1.14.1`)
+
+- **Fixed `pagehide` Auth Bug & CSP-Blocked Unload Pushes (`scripts/browser-sync/browser-sync.user.js` `v1.3.0`)**:
+  - Fixed a credential property typo in `_boundPageHide` that sent `creds.anonKey` (`undefined`) instead of `creds.key`, which previously caused every `pagehide` close push to fail with HTTP 401.
+  - Updated `_rpc` and `handlePageExit` (`pagehide` + `beforeunload` backup) to prefer `GM_xmlhttpRequest` whenever available (falling back to `fetch(..., { keepalive: true })` only on error or when `GM_xmlhttpRequest` is absent), because `GM_xmlhttpRequest` executes in the userscript extension background process, bypassing strict page `connect-src` CSP headers (e.g. Google, Rogers, LinkedIn, GitHub) and surviving tab termination.
+  - Guarded synchronous `GM_getValue` reads during `pagehide` against async Promise shims, added a `_pageHidingAt` race guard so `visibilitychange -> hidden` firing right after `pagehide` never overwrites a tab removal, and added a `pageshow` (`event.persisted`) listener so tabs restored from iOS Safari/Edge back-forward cache (bfcache) are re-added to open tabs and removed from recently closed.
+- **Eliminated Duplicate Sessions on Mobile Revisits (`scripts/browser-sync/browser-sync.user.js` `v1.3.0`)**:
+  - Added canonical URL normalization (`_normalizeTabUrl`, stripping trailing slashes on non-root paths and lowercasing protocol/host) and `_dedupTabs()` across `_updateActiveTabRecord`, `_userscriptPush`, and `handlePageExit`. Revisiting a page after iOS discards `sessionStorage` or reloads a backgrounded tab now updates the single canonical entry instead of creating duplicate sessions, and legacy duplicates already stored in `shared_browser_sync_tabs` are automatically cleaned up on the next sync.
+  - Fixed tab `active` state tracking (marking backgrounded/other tabs `active: false` on `visibilitychange -> hidden` and foreground switches) and added a 5-minute `lastActiveAt` refresh inside the 60s visible tick.
+  - Added `BrowserSync.debugStatus()` (`bs=tabs:<N>,closed:<M>`) to `BESBootLog.check()` in `build.py`.
+- **Verification**: Verified in Playwright WebKit (iPhone Safari viewport) on a strict `connect-src 'none'` CSP page with legacy duplicate tabs (`/en/` + `/en`), confirming automatic collapse to 1 unique entry, zero duplication after clearing `sessionStorage` and revisiting, synchronous removal + valid `apikey`/`Bearer` `GM_xmlhttpRequest` close push surviving a 5 ms `pagehide` + `visibilitychange` race, and full restoration on `pageshow` (`persisted: true`), with 0 uncaught errors.

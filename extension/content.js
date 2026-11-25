@@ -1,6 +1,6 @@
 /**
  * BESing - Chrome Extension Manifest V3 Content Script
- * Version 1.14.0
+ * Version 1.14.1
  */
 
 (function () {
@@ -1380,7 +1380,7 @@
           t: Date.now(),
           u: Date.now(),
           host: (window.location.hostname || '').toLowerCase(),
-          v: '1.14.0',
+          v: '1.14.1',
           nav: navType,
           injectMs: Math.round(this.startedAt),
           ready: document.readyState,
@@ -1465,6 +1465,10 @@
         if (running.includes('pagestream')) {
           const ps = (app.modules || []).find(m => m.id === 'pagestream');
           if (ps && typeof ps.debugStatus === 'function') parts.push(ps.debugStatus());
+        }
+        if (running.includes('browser-sync')) {
+          const bs = (app.modules || []).find(m => m.id === 'browser-sync');
+          if (bs && typeof bs.debugStatus === 'function') parts.push(bs.debugStatus());
         }
         if (running.includes('prevent-redirect')) {
           const pr = (app.modules || []).find(m => m.id === 'prevent-redirect');
@@ -1571,7 +1575,7 @@
       };
       const env = describeEnvironment();
       const lines = [
-        `BESing debug log (v1.14.0), copied ${fmt(Date.now())}`,
+        `BESing debug log (v1.14.1), copied ${fmt(Date.now())}`,
         `UA: ${navigator.userAgent}`,
         `This copy: ${Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ')}`,
         `Times: "inject" is ms from navigation start until BESing began; stage and event times are ms after that.`,
@@ -8320,7 +8324,7 @@
       const mod = {
     id: 'browser-sync',
     name: 'Sync History',
-    version: '1.2.0',
+    version: '1.3.0',
     activationMode: 'global',
     description: 'Sync tabs, groups, 7-day history, and usage across devices.',
     category: 'Sync',
@@ -8356,12 +8360,18 @@
     _visitDelayTimer: null,
     _boundVisibility: null,
     _boundPageHide: null,
+    _boundBeforeUnload: null,
+    _boundPageShow: null,
     _boundActivity: null,
     _boundRouteChange: null,
     _origPushState: null,
     _origReplaceState: null,
     _pushInFlight: false,
     _pullInFlight: false,
+    _pageHidingAt: 0,
+    _lastTabRefreshTs: 0,
+    _lastTabCount: 0,
+    _lastClosedCount: 0,
 
     // -----------------------------------------------------------------------
     // Runtime & Helpers
@@ -8793,8 +8803,9 @@
         return text ? JSON.parse(text) : {};
       };
 
-      // On pagehide/keepalive, native fetch({keepalive:true}) survives unload better than GM_xmlhttpRequest.
-      if (keepalive || typeof GM_xmlhttpRequest !== 'function') {
+      // Prefer GM_xmlhttpRequest whenever available: it runs in the extension background context
+      // (bypasses strict page connect-src CSP and completes even if the tab is hiding/closing).
+      if (typeof GM_xmlhttpRequest !== 'function') {
         return doFetch();
       }
 
@@ -8842,12 +8853,63 @@
       });
     },
 
-    async _updateActiveTabRecord(clean, title, remove = false) {
+    _normalizeTabUrl(rawUrl) {
+      if (!rawUrl || typeof rawUrl !== 'string') return '';
+      try {
+        const u = new URL(rawUrl.trim());
+        const path = u.pathname.length > 1 ? u.pathname.replace(/\/+$/, '') : '/';
+        return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${path}${u.search}`;
+      } catch (e) {
+        return String(rawUrl).trim().replace(/\/+$/, '');
+      }
+    },
+
+    _dedupTabs(list, now = Date.now()) {
+      const cutoff = now - 24 * 60 * 60 * 1000;
+      const valid = (Array.isArray(list) ? list : [])
+        .filter(t => t && t.url && Date.parse(t.lastActiveAt || 0) >= cutoff)
+        .sort((a, b) => Date.parse(b.lastActiveAt || 0) - Date.parse(a.lastActiveAt || 0));
+      const seenUrls = new Set();
+      const seenIds = new Set();
+      const out = [];
+      for (let i = 0; i < valid.length; i++) {
+        const t = valid[i];
+        const norm = this._normalizeTabUrl(t.url);
+        if (!norm || seenUrls.has(norm)) continue;
+        if (t.id && seenIds.has(t.id)) continue;
+        seenUrls.add(norm);
+        if (t.id) seenIds.add(t.id);
+        out.push(t);
+        if (out.length >= 50) break;
+      }
+      return out;
+    },
+
+    debugStatus() {
+      let tabsN = this._lastTabCount;
+      let closedN = this._lastClosedCount;
+      if (typeof GM_getValue === 'function') {
+        try {
+          const t = GM_getValue('shared_' + this.SHARED_TABS_KEY, null);
+          const c = GM_getValue('shared_' + this.SHARED_CLOSED_KEY, null);
+          if (Array.isArray(t)) tabsN = t.length;
+          if (Array.isArray(c)) closedN = c.length;
+        } catch (e) {}
+      }
+      return `bs=tabs:${tabsN},closed:${closedN}`;
+    },
+
+    async _updateActiveTabRecord(clean, title, remove = false, { activeOverride = null } = {}) {
       const tabId = this._getTabId();
       const now = Date.now();
-      const cutoff = now - 24 * 60 * 60 * 1000;
+      const normUrl = clean ? this._normalizeTabUrl(clean.url) : '';
       const list = (await this._readShared(this.SHARED_TABS_KEY, [])) || [];
-      const filtered = list.filter(t => t && t.id !== tabId && (Date.parse(t.lastActiveAt || 0) >= cutoff));
+      const isActive = activeOverride !== null ? Boolean(activeOverride) : (document.visibilityState === 'visible');
+
+      const filtered = this._dedupTabs(list, now)
+        .filter(t => t.id !== tabId && (!normUrl || this._normalizeTabUrl(t.url) !== normUrl))
+        .map(t => (isActive && !remove && t.active) ? { ...t, active: false } : t);
+
       if (!remove && clean) {
         filtered.unshift({
           id: tabId,
@@ -8855,12 +8917,14 @@
           title: this._cleanTitle(title || clean.host),
           groupId: '',
           windowId: '',
-          active: document.visibilityState === 'visible',
+          active: isActive,
           pinned: false,
           lastActiveAt: new Date(now).toISOString()
         });
+        this._lastTabRefreshTs = now;
       }
       const next = filtered.slice(0, 50);
+      this._lastTabCount = next.length;
       await this._writeShared(this.SHARED_TABS_KEY, next);
       return next;
     },
@@ -8962,8 +9026,16 @@
         const usageBatch = pending.usage
           ? Object.values(pending.usage).filter(u => u && (u.seconds > 0 || u.visits > 0)).slice(0, 100)
           : [];
-        const tabs = includeTabs ? ((await this._readShared(this.SHARED_TABS_KEY, [])) || []) : null;
+        const rawTabs = includeTabs ? ((await this._readShared(this.SHARED_TABS_KEY, [])) || []) : null;
+        const tabs = includeTabs ? this._dedupTabs(rawTabs) : null;
+        if (includeTabs && Array.isArray(rawTabs) && tabs.length !== rawTabs.length) {
+          await this._writeShared(this.SHARED_TABS_KEY, tabs);
+        }
         const closed = includeTabs ? ((await this._readShared(this.SHARED_CLOSED_KEY, [])) || []) : null;
+        if (includeTabs) {
+          this._lastTabCount = tabs.length;
+          this._lastClosedCount = Array.isArray(closed) ? closed.length : 0;
+        }
 
         if (!force && !includeTabs && histBatch.length === 0 && usageBatch.length === 0) {
           return { ok: true, skipped: true };
@@ -9324,30 +9396,93 @@
         window.addEventListener(ev, this._boundActivity, { passive: true });
       });
 
-      // Visibility change: flush usage when hiding; resume + check 10-min pull when returning.
+      // Visibility change: flush usage + mark inactive when hiding; refresh active tab + check pull when returning.
       this._boundVisibility = async () => {
         if (!this._active) return;
+        const cfg = this._config || {};
+        const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(cfg));
         if (document.visibilityState === 'hidden') {
+          // Do not race with or overwrite a pagehide/close removal that just ran.
+          if (Date.now() - this._pageHidingAt < 2000) return;
+          if (clean) {
+            await this._updateActiveTabRecord(clean, document.title || clean.host, false, { activeOverride: false });
+          }
           await this._userscriptPush({ includeTabs: true, keepalive: true });
         } else {
+          this._pageHidingAt = 0;
           this._lastActivityTs = Date.now();
           this._activeSegmentStart = Date.now();
+          if (clean) {
+            await this._updateActiveTabRecord(clean, document.title || clean.host, false, { activeOverride: true });
+          }
           await this._userscriptPull({ full: false, force: false });
         }
       };
       document.addEventListener('visibilitychange', this._boundVisibility);
 
-      // Best-effort flush on tab close / page exit: synchronously remove this tab from open list,
-      // append to recently closed, and dispatch a keepalive push before the browser terminates the tab.
-      this._boundPageHide = () => {
+      // Best-effort flush on tab close / page exit: synchronously remove this tab from open list
+      // (matching by tabId OR canonical URL), append to recently closed, and dispatch a push via
+      // GM_xmlhttpRequest (bypasses strict page CSP & survives tab unload) with keepalive fetch fallback.
+      const handlePageExit = () => {
         if (!this._active) return;
+        const now = Date.now();
+        if (now - this._pageHidingAt < 1500) return;
+        this._pageHidingAt = now;
+        if (this._visitDelayTimer) {
+          clearTimeout(this._visitDelayTimer);
+          this._visitDelayTimer = null;
+        }
+
         const tabId = this._getTabId();
         const cfg = this._config || {};
         const cloud = this._getCloudConfig();
         const creds = this.parseSyncLink(cloud.syncLink);
         const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(cfg));
-        const now = Date.now();
-        const cutoff = now - 24 * 60 * 60 * 1000;
+        const normUrl = clean ? this._normalizeTabUrl(clean.url) : '';
+
+        const dispatchClosePush = (meta, nextTabs, nextClosed) => {
+          if (!creds || !meta || !meta.instanceId) return;
+          const endpoint = `${creds.url}/rest/v1/rpc/besing_sync_push`;
+          const headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'apikey': creds.key,
+            'Authorization': `Bearer ${creds.key}`
+          };
+          const payload = {
+            instance_id: meta.instanceId,
+            device_name: cloud.deviceName,
+            browser: this.detectBrowser(),
+            platform: this.detectPlatform(),
+            mode: 'userscript',
+            account_label: cloud.accountLabel,
+            tabs: nextTabs,
+            closed: nextClosed
+          };
+          const bodyStr = JSON.stringify({ p_secret: creds.secret, p_payload: payload });
+          const sendKeepaliveFetch = () => {
+            if (typeof fetch !== 'function') return;
+            try {
+              const opts = { method: 'POST', headers, body: bodyStr };
+              if (bodyStr.length < 60000) opts.keepalive = true;
+              fetch(endpoint, opts).catch(() => {});
+            } catch (e) {}
+          };
+          if (typeof GM_xmlhttpRequest === 'function') {
+            try {
+              GM_xmlhttpRequest({
+                method: 'POST',
+                url: endpoint,
+                headers,
+                data: bodyStr,
+                timeout: 8000,
+                onerror: sendKeepaliveFetch
+              });
+              return;
+            } catch (e) {}
+          }
+          sendKeepaliveFetch();
+        };
 
         const hasSyncGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
         if (hasSyncGM) {
@@ -9355,66 +9490,79 @@
             const tabsKey = 'shared_' + this.SHARED_TABS_KEY;
             const closedKey = 'shared_' + this.SHARED_CLOSED_KEY;
             const metaKey = 'shared_' + this.SHARED_META_KEY;
-            const curTabs = GM_getValue(tabsKey, []) || [];
-            const nextTabs = (Array.isArray(curTabs) ? curTabs : [])
-              .filter(t => t && t.id !== tabId && Date.parse(t.lastActiveAt || 0) >= cutoff)
-              .slice(0, 50);
-            GM_setValue(tabsKey, nextTabs);
-
-            const curClosed = GM_getValue(closedKey, []) || [];
-            let nextClosed = (Array.isArray(curClosed) ? curClosed : []).filter(c => c && (!clean || c.url !== clean.url));
-            if (clean) {
-              nextClosed.unshift({
-                url: clean.url,
-                title: this._cleanTitle(document.title || clean.host),
-                closedAt: new Date(now).toISOString()
-              });
-            }
-            nextClosed = nextClosed.slice(0, 25);
-            GM_setValue(closedKey, nextClosed);
-
+            const curTabs = GM_getValue(tabsKey, []);
+            const curClosed = GM_getValue(closedKey, []);
             const meta = GM_getValue(metaKey, null);
-            if (creds && meta && meta.instanceId && typeof fetch === 'function') {
-              const payload = {
-                instance_id: meta.instanceId,
-                device_name: cloud.deviceName,
-                browser: this.detectBrowser(),
-                platform: this.detectPlatform(),
-                mode: 'userscript',
-                account_label: cloud.accountLabel,
-                tabs: nextTabs,
-                closed: nextClosed
-              };
-              fetch(`${creds.url}/rest/v1/rpc/besing_sync_push`, {
-                method: 'POST',
-                keepalive: true,
-                headers: {
-                  'Content-Type': 'application/json',
-                  'apikey': creds.anonKey,
-                  'Authorization': `Bearer ${creds.anonKey}`
-                },
-                body: JSON.stringify({ p_secret: creds.secret, p_payload: payload })
-              }).catch(() => {});
+            const isAsyncShim = (curTabs && typeof curTabs.then === 'function')
+              || (curClosed && typeof curClosed.then === 'function')
+              || (meta && typeof meta.then === 'function');
+            if (!isAsyncShim) {
+              const nextTabs = this._dedupTabs(curTabs || [], now)
+                .filter(t => t.id !== tabId && (!normUrl || this._normalizeTabUrl(t.url) !== normUrl))
+                .slice(0, 50);
+              GM_setValue(tabsKey, nextTabs);
+
+              let nextClosed = (Array.isArray(curClosed) ? curClosed : [])
+                .filter(c => c && (!normUrl || this._normalizeTabUrl(c.url) !== normUrl));
+              if (clean) {
+                nextClosed.unshift({
+                  url: clean.url,
+                  title: this._cleanTitle(document.title || clean.host),
+                  closedAt: new Date(now).toISOString()
+                });
+              }
+              nextClosed = nextClosed.slice(0, 25);
+              GM_setValue(closedKey, nextClosed);
+              this._lastTabCount = nextTabs.length;
+              this._lastClosedCount = nextClosed.length;
+
+              dispatchClosePush(meta, nextTabs, nextClosed);
               return;
             }
           } catch (e) {}
         }
 
-        // Async fallback when GM_* is unavailable
+        // Async fallback when synchronous GM_* is unavailable
         (async () => {
-          await this._updateActiveTabRecord(clean, document.title || '', true);
+          const nextTabs = await this._updateActiveTabRecord(clean, document.title || '', true);
+          let nextClosed = (await this._readShared(this.SHARED_CLOSED_KEY, [])) || [];
           if (clean) {
-            const curClosed = (await this._readShared(this.SHARED_CLOSED_KEY, [])) || [];
-            const nextClosed = [
+            nextClosed = [
               { url: clean.url, title: this._cleanTitle(document.title || clean.host), closedAt: new Date(now).toISOString() },
-              ...curClosed.filter(c => c && c.url !== clean.url)
+              ...nextClosed.filter(c => c && (!normUrl || this._normalizeTabUrl(c.url) !== normUrl))
             ].slice(0, 25);
             await this._writeShared(this.SHARED_CLOSED_KEY, nextClosed);
           }
-          await this._userscriptPush({ includeTabs: true, keepalive: true, force: true });
+          this._lastClosedCount = nextClosed.length;
+          const meta = await this._ensureMeta();
+          dispatchClosePush(meta, nextTabs, nextClosed);
         })().catch(() => {});
       };
+      this._boundPageHide = handlePageExit;
+      this._boundBeforeUnload = handlePageExit;
       window.addEventListener('pagehide', this._boundPageHide);
+      window.addEventListener('beforeunload', this._boundBeforeUnload);
+
+      // Restore tab into open list if Safari/Mobile Edge brings it back from back/forward cache (bfcache).
+      this._boundPageShow = async (e) => {
+        if (!this._active) return;
+        if (!(e && e.persisted) && !this._pageHidingAt) return;
+        this._pageHidingAt = 0;
+        const cfg = this._config || {};
+        const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(cfg));
+        if (!clean) return;
+        const normUrl = this._normalizeTabUrl(clean.url);
+        await this._updateActiveTabRecord(clean, document.title || clean.host, false, { activeOverride: true });
+        const curClosed = (await this._readShared(this.SHARED_CLOSED_KEY, [])) || [];
+        const filteredClosed = (Array.isArray(curClosed) ? curClosed : [])
+          .filter(c => c && this._normalizeTabUrl(c.url) !== normUrl);
+        if (filteredClosed.length !== curClosed.length) {
+          await this._writeShared(this.SHARED_CLOSED_KEY, filteredClosed);
+          this._lastClosedCount = filteredClosed.length;
+        }
+        await this._userscriptPush({ includeTabs: true });
+      };
+      window.addEventListener('pageshow', this._boundPageShow);
 
       // SPA route change detection (popstate, hashchange, history.pushState).
       this._boundRouteChange = () => {
@@ -9440,10 +9588,15 @@
         }
       } catch (e) {}
 
-      // Periodic 60s tick: commit usage + check whether 10-minute auto-pull is due while visible.
+      // Periodic 60s tick: commit usage, keep active tab fresh, and check whether 10-minute auto-pull is due.
       this._usageTimer = setInterval(async () => {
         if (!this._active || document.visibilityState !== 'visible') return;
         await this._commitUsageSegment();
+        const now = Date.now();
+        if (now - this._lastTabRefreshTs >= 5 * 60 * 1000) {
+          const clean = this.sanitizeUrl(window.location.href, this._parseExcludeHosts(this._config || {}));
+          if (clean) await this._updateActiveTabRecord(clean, document.title || clean.host, false, { activeOverride: true });
+        }
         const pending = await this._readShared(this.SHARED_PENDING_KEY, null);
         const hasPendingUsage = pending && pending.usage && Object.values(pending.usage).some(u => u && u.seconds >= 30);
         if (hasPendingUsage || (pending && Array.isArray(pending.history) && pending.history.length > 0)) {
@@ -9465,6 +9618,7 @@
 
     destroy() {
       this._active = false;
+      this._pageHidingAt = 0;
       if (this._visitDelayTimer) { clearTimeout(this._visitDelayTimer); this._visitDelayTimer = null; }
       if (this._usageTimer) { clearInterval(this._usageTimer); this._usageTimer = null; }
       if (this._pullCheckTimer) { clearInterval(this._pullCheckTimer); this._pullCheckTimer = null; }
@@ -9475,6 +9629,14 @@
       if (this._boundPageHide) {
         window.removeEventListener('pagehide', this._boundPageHide);
         this._boundPageHide = null;
+      }
+      if (this._boundBeforeUnload) {
+        window.removeEventListener('beforeunload', this._boundBeforeUnload);
+        this._boundBeforeUnload = null;
+      }
+      if (this._boundPageShow) {
+        window.removeEventListener('pageshow', this._boundPageShow);
+        this._boundPageShow = null;
       }
       if (this._boundActivity) {
         ['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach(ev => {
@@ -10113,7 +10275,7 @@
 
   // 4. Update Engine (Checks version, prompts native update, or auto-updates via stable bootstrapper)
   class BESUpdater {
-    static CURRENT_VERSION = '1.14.0';
+    static CURRENT_VERSION = '1.14.1';
 
     static isStableLoader() {
       if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.name) {

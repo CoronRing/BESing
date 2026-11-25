@@ -18,7 +18,7 @@ MANIFEST_PATH = SCRIPTS_DIR / "SCRIPT_LIST.json"
 TARGET_USER_JS = USERSCRIPT_DIR / "besing-manager.user.js"
 TARGET_META_JS = USERSCRIPT_DIR / "besing-manager.meta.js"
 
-VERSION = "1.14.0"
+VERSION = "1.14.1"
 
 USER_SCRIPT_HEADER = f"""// ==UserScript==
 // @name         BESing Packed
@@ -1601,6 +1601,10 @@ def build():
         if (running.includes('pagestream')) {{
           const ps = (app.modules || []).find(m => m.id === 'pagestream');
           if (ps && typeof ps.debugStatus === 'function') parts.push(ps.debugStatus());
+        }}
+        if (running.includes('browser-sync')) {{
+          const bs = (app.modules || []).find(m => m.id === 'browser-sync');
+          if (bs && typeof bs.debugStatus === 'function') parts.push(bs.debugStatus());
         }}
         if (running.includes('prevent-redirect')) {{
           const pr = (app.modules || []).find(m => m.id === 'prevent-redirect');
